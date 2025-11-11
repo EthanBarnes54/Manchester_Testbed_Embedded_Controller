@@ -15,24 +15,21 @@ The system is designed to dynamically tune control voltages in response to live 
 ## System Architecture  
 
 +------------------------------------------------------+
-| Dash Dashboard |
-| Real-time visualisation and manual control interface |
+| ESP-12F Dashboard |
+| Real-time visualisation and manual control via Python package - Dash.|
 +-------------------------------+----------------------+
 |
 ▼
 +------------------------------------------------------+
 | Python Backend |
-| Serial communication, data logging, ML optimisation |
+| Serial communication, data logging and control architectures for/of the ESP-12F Arduino Board.|
 +-------------------------------+----------------------+
 |
 ▼
 +------------------------------------------------------+
 | ESP32 Embedded Firmware |
-| Real-time DAC/ADC control, OTA updates, diagnostics |
+| Real-time DAC/ADC control, OTA updates, diagnostics from the testbed via physical connections to the board.|
 +------------------------------------------------------+
-
-yaml
-Copy code
 
 ---
 
@@ -51,16 +48,16 @@ Copy code
 - Variance-based stability detection for adaptive control  
 
 ### Plotly Dash Dashboard
-- Browser-based interface for control and monitoring  
-- Live plotting of measured voltages  
-- DAC voltage adjustment via intuitive slider  
-- Real-time metrics for connection, voltage, and sample count  
+- Browser-based interface for control and monitoring.  
+- Live plotting of measured voltages.
+- DAC voltage adjustment via manual input boxes.  
+- Real-time metrics for connections, voltages, and data feeds. 
 
 ### Adaptive Machine Learning Control (in development)
 - Recurrent Neural Network (RNN) architecture  
 - Incremental online learning via backpropagation  
 - Variance-based detection of steady-state conditions  
-- Predictive voltage adjustment for response maximisation  
+- Predictive voltage adjustment for voltage optimisations  
 
 ---
 
@@ -69,9 +66,9 @@ Copy code
 | Layer | Technologies |
 |-------|---------------|
 | **Firmware** | ESP32 / Arduino Framework / I²C (ADS1115, MCP4725) |
-| **Backend** | Python 3.11+ / pandas / matplotlib / pyserial |
-| **Frontend** | Plotly Dash / Flask |
-| **ML Module** | TensorFlow / scikit-learn |
+| **Backend** | Python 3.14|
+| **Frontend** | Plotly Dash |
+| **ML Module** | Torch / scikit-learn |
 
 ---
 
@@ -82,4 +79,4 @@ Project: Manchester Ion Beam Testbed — Embedded Control Framework
 
 License
 Released under the MIT License.
-This software is open-source and may be used, modified, and distributed with attribution.
+This software is open-source and may be used, modified, and distributed with attribution and recognition.
