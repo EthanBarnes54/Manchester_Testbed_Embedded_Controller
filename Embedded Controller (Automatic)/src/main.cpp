@@ -1,14 +1,3 @@
-
-// ---------------- Pin control (5 PWM-like + 1 digital) ---------------- //
-// Pin Channels:
-//  1) squeeze_plate  (PWM 0..1023)
-//  2) ion_source     (PWM 0..1023)
-//  3) wein_filter    (PWM 0..1023)
-//  4) cone_1         (PWM 0..1023)
-//  5) cone_2         (PWM 0..1023)
-//
-//  6) switch_logic   (digital 0/1)
-
 #include <Arduino.h>
 #include "log.h"
 #include <Wire.h>
@@ -24,72 +13,6 @@ const int LED_PIN = 2;
 
 float TargetVoltage = 0.0;
 unsigned long lastHeartbeat = 0;
-
-#ifndef SQUEEZE_PLATE_PIN
-#define SQUEEZE_PLATE_PIN 14  // D5 (PWM)
-#endif
-#ifndef ION_SOURCE_PIN
-#define ION_SOURCE_PIN 12     // D6 (PWM)
-#endif
-#ifndef WEIN_FILTER_PIN
-#define WEIN_FILTER_PIN 13    // D7 (PWM)
-#endif
-#ifndef CONE_1_PIN
-#define CONE_1_PIN 15         // D8 (PWM)
-#endif
-#ifndef CONE_2_PIN
-#define CONE_2_PIN 16         // D0 (may not PWM)
-#endif
-#ifndef SWITCH_LOGIC_PIN
-#define SWITCH_LOGIC_PIN 0    // D3 (digital; boot strap care)
-#endif
-
-const int CHANNEL_PINS[6] = {SQUEEZE_PLATE_PIN, ION_SOURCE_PIN, WEIN_FILTER_PIN, CONE_1_PIN, CONE_2_PIN, SWITCH_LOGIC_PIN};
-int channelValues[6] = {0, 0, 0, 0, 0, 0};
-
-void initChannels() {
-  analogWriteRange(1023);
-  for (int i = 0; i < 5; i++) {
-    pinMode(CHANNEL_PINS[i], OUTPUT);
-    analogWrite(CHANNEL_PINS[i], 0);
-    channelValues[i] = 0;
-  }
-  pinMode(CHANNEL_PINS[5], OUTPUT);
-  digitalWrite(CHANNEL_PINS[5], LOW);
-  channelValues[5] = 0;
-}
-
-void setChannel(uint8_t idx1, int value) {
-  if (idx1 < 1 || idx1 > 6) {
-    Serial.println("ERROR: PIN index out of range!");
-    return;
-  }
-  uint8_t i = idx1 - 1;
-  int pin = CHANNEL_PINS[i];
-  if (i < 5) {
-    if (value < 0) value = 0;
-    if (value > 1023) value = 1023;
-    analogWrite(pin, value);
-    channelValues[i] = value;
-    Serial.println(String("ACK PIN ") + idx1 + " " + value);
-  } else {
-    int v = value ? HIGH : LOW;
-    digitalWrite(pin, v);
-    channelValues[i] = value ? 1 : 0;
-    Serial.println(String("ACK PIN ") + idx1 + " " + channelValues[i]);
-  }
-}
-
-void reportChannels() {
-  Serial.print("PINS ");
-  Serial.print("squeeze_plate="); Serial.print(channelValues[0]); Serial.print(" ");
-  Serial.print("ion_source=");    Serial.print(channelValues[1]); Serial.print(" ");
-  Serial.print("wein_filter=");   Serial.print(channelValues[2]); Serial.print(" ");
-  Serial.print("cone_1=");        Serial.print(channelValues[3]); Serial.print(" ");
-  Serial.print("cone_2=");        Serial.print(channelValues[4]); Serial.print(" ");
-  Serial.print("switch_logic=");  Serial.print(channelValues[5]);
-  Serial.println("");
-}
 
 void blinkOnce(int duration = 100) {
   digitalWrite(LED_PIN, HIGH);
@@ -141,7 +64,6 @@ void setup() {
 
   ArduinoOTA.onError([](ota_error_t error) {
     Serial.printf("Error[%u]: ", error);
-
     if (error == OTA_AUTH_ERROR) Serial.println("Authentication Failed...");
     else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed...");
     else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed...");
@@ -150,7 +72,7 @@ void setup() {
   });
 
   ArduinoOTA.begin();
-  Serial.println("Ready for OTA updates...");
+  Serial.println("Ready for OTA updates");
 
   // --- I2C & Peripheral Setup ---
   Wire.begin();
@@ -171,8 +93,6 @@ void setup() {
 
   LOG_INFO("Setup complete. Awaiting commands...");
   digitalWrite(LED_PIN, LOW);
-
-  initChannels();
 }
 
 // ---------- Voltage control ---------- //
@@ -209,54 +129,26 @@ void loop() {
       SetVoltage(voltage_target);
       Serial.println("ACK SET");
     }
-
-    else if (cmd.startsWith("PIN")) {
-      
-      int s1 = cmd.indexOf(' ');
-      int s2 = cmd.indexOf(' ', s1 + 1);
-      if (s1 > 0 && s2 > s1) {
-        String token = cmd.substring(s1 + 1, s2);
-
-        uint8_t idx = 0;
-        String t = token; t.toLowerCase();
-        if (t == "squeeze_plate") idx = 1;
-        else if (t == "ion_source") idx = 2;
-        else if (t == "wein_filter") idx = 3;
-        else if (t == "cone_1") idx = 4;
-        else if (t == "cone_2") idx = 5;
-        else if (t == "switch_logic") idx = 6;
-        else {idx = (uint8_t)token.toInt()};
-
-        int val = cmd.substring(s2 + 1).toInt();
-        setChannel(idx, val);
-      } 
-      else {Serial.println("ERROR: PIN syntax")};
-    }
-
-    else if (cmd.equalsIgnoreCase("GET PINS") || cmd.equalsIgnoreCase("PINS")) {
-      reportChannels();
-    }
-
     else if (cmd.equalsIgnoreCase("READ")) {
       float live_voltage = ReadVoltage();
       Serial.println(String("MEASURED ") + live_voltage + " V");
       blinkOnce(80);
     }
-
     else if (cmd.equalsIgnoreCase("PING")) {
       Serial.println("OK");
       blinkOnce(50);
     }
-
     else {
       Serial.println("ERROR: Unknown command");
       blinkError(2, 70);
     }
   }
+
   
   float v = ReadVoltage();
   Serial.println(String("MEASURED ") + v + " V");
 
+  
   if (millis() - lastHeartbeat > 2000) {
     digitalWrite(LED_PIN, HIGH);
     delay(50);
@@ -267,3 +159,15 @@ void loop() {
   delay(500);
 }
 
+
+
+// THESE ARE EXAMPLES FOR TESTING, CHANGE ONCE RIG IS FINISHED
+// Read a voltage from ADC channel 0
+// int16_t adc0 = ads.readADC_SingleEnded(0);
+// float voltage = adc0 * 0.1875 / 1000.0;  // convert to volts
+
+// Set DAC output proportional to read voltage
+// uint16_t dacValue = (uint16_t)((voltage / 3.3) * 4095);
+// dac.setVoltage(dacValue, false);
+
+// LOG_DEBUG(String("ADC0: ") + voltage + " V | DAC: " + dacValue);
