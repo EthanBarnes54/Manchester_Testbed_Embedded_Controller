@@ -1,4 +1,5 @@
-    # ---------- Data Logger for ES12F Serial Instrument ---------- #
+    
+# ---------- Data Logger for ES12F Serial Instrument ---------- #
 
     # Continuously reads measurement data from a queue provided by the backend module,
     # logs it to a CSV file, and optionally visualizes voltage in real time.
