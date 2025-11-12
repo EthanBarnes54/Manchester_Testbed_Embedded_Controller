@@ -19,7 +19,7 @@ from pathlib import Path
 #                 Variable Initialisation
 # -------------------------------------------------------
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cpu")
 
 MODEL_PATH = Path("RNN_model.pt")
 
@@ -27,9 +27,10 @@ SEQUENCE_LENGTH = 10
 HIDDEN_SIZE = 64
 LEARNING_RATE = 1e-3
 
-# Inputs currently: [dac, voltage]; extend later with pin/perm
-INPUT_SIZE = 2
-OUTPUT_SIZE = 1
+# Inputs: [Squeeze_plate_voltage, Ion_source_voltage, Wein_filter_voltage, Upper_cone_voltage, Lower_cone_voltage,  Diode_voltage]
+
+INPUT_SIZE = 6
+OUTPUT_SIZE = 5
 
 # -------------------------------------------------------
 #                      Logging setup
@@ -40,6 +41,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
+
 log = logging.getLogger("RNN_Controller")
 
 # -------------------------------------------------------
@@ -72,7 +74,7 @@ class RNN(nn.Module):
 # -------------------------------------------------------
 
 
-def _load_checkpoint(model, scaler):
+def load_previous_weights(model, scaler):
     try:
         ckpt = torch.load(MODEL_PATH, map_location=DEVICE)
         if isinstance(ckpt, dict) and "state_dict" in ckpt:
@@ -85,16 +87,15 @@ def _load_checkpoint(model, scaler):
                 scaler.scale_ = np.array(scale_, dtype=float)
             log.info("Loaded model and scaler from checkpoint.")
         else:
-            # Backward compatibility: file contains state_dict only
             model.load_state_dict(ckpt)
             log.info("Loaded model state_dict (no scaler in checkpoint).")
         return True
-    except Exception as e:
-        log.warning(f"No valid checkpoint found: {e}")
+    except Exception as fault:
+        log.warning(f"No valid checkpoint found: {fault}")
         return False
 
 
-def _save_checkpoint(model, scaler):
+def save_NN_weights(model, scaler):
     payload = {
         "state_dict": model.state_dict(),
     }
@@ -111,7 +112,7 @@ scaler = StandardScaler()
 def model_init(retrain: bool = False):
     model = RNN(INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE, use_elu_head=True).to(DEVICE)
     if not retrain and MODEL_PATH.exists():
-        _load_checkpoint(model, scaler)
+       load_previous_weights(model, scaler)
     else:
         log.info("Initialized new model weights (fresh start).")
     return model
@@ -192,7 +193,7 @@ def train_model(
             f"Epoch {epoch+1}/{number_of_epochs} | Loss={loss.item():.6f} | R2={r2:.3f}"
         )
 
-    _save_checkpoint(model, scaler)
+    save_NN_weights(model, scaler)
 
 
 # -------------------------------------------------------
@@ -253,7 +254,7 @@ def online_update(new_data_frame: pd.DataFrame, grad_clip: float = 1.0):
         nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
 
-    _save_checkpoint(model, scaler)
+    save_NN_weights(model, scaler)
     log.info(f"Online update done | Loss={loss.item():.6f}")
 
 

@@ -145,13 +145,13 @@ class SerialBackend:
                             except ValueError:
                                 continue
                             idx = self._name_to_index(name)
-                            self._update_pin_cache(idx, val)
+                            self.update_pin_values(idx, val)
                     except Exception:
                         pass
                 elif line.startswith("ACK PIN"):
                     try:
                         tokens = line.split()
-                        self._update_pin_cache(int(tokens[2]), int(tokens[3]))
+                        self.update_pin_values(int(tokens[2]), int(tokens[3]))
                     except Exception:
                         pass
 
@@ -221,13 +221,13 @@ class SerialBackend:
                 elif len(parts) == 3 and parts[0].upper() == "PIN":
                     try:
                         idx = self._name_to_index(parts[1])
-                        val = int(parts[2])
-                        if self._update_pin_cache(idx, val):
+                        val = int(float(parts[2]))
+                        if self.update_pin_values(idx, val):
                             log.info(f"[SIM] PIN {idx} set to {self.pins[idx-1]}")
                         else:
                             log.warning(f"[SIM] PIN index out of range: {idx}")
-                    except ValueError:
-                        log.warning(f"[SIM] Invalid PIN value in command: {cmd}")
+                    except Exception:
+                        log.warning(f"[SIM] Invalid PIN command: {cmd}")
                 else:
                     log.info(f"[SIM] Received command: {cmd}")
                 return
@@ -264,11 +264,18 @@ class SerialBackend:
             return max(0, min(1023, int(value)))
         return 1 if int(value) else 0
 
-    def update_pins(self, idx: int, value: int) -> bool:
-        cv = self._coerce_pin_value(idx, value)
+    def update_pin_values(self, idx: int, value: int) -> bool:
+        try:
+            i = int(idx)
+            v = int(value)
+        except Exception:
+            return False
+        if not (1 <= i <= 6):
+            return False
+        cv = self.get_pin_value(i, v)
         if cv is None:
             return False
-        self.pins[idx - 1] = cv
+        self.pins[i - 1] = cv
         self.pins_timestamp = time.time()
         return True
 
@@ -346,24 +353,25 @@ class SerialBackend:
 #                   Global event for board access
 # -------------------------------------------------------------------------
 
-reader = SerialBackend(offline=OFFLINE)
+Back_End_Controller = SerialBackend(offline=OFFLINE)
+reader = Back_End_Controller  # alias for compatibility if referenced elsewhere
 
-get_data = reader.get_data
-send_command = reader.send_command
-set_pin_voltage = reader.set_pin_voltage
-set_pwm = reader.set_pwm
-set_switch = reader.set_switch
-set_pin = reader.set_pin
-set_pin_by_name = reader.set_pin_by_name
-set_squeeze_plate = reader.set_squeeze_plate
-set_ion_source = reader.set_ion_source
-set_wein_filter = reader.set_wein_filter
-set_cone_1 = reader.set_cone_1
-set_cone_2 = reader.set_cone_2
-set_switch_logic = reader.set_switch_logic
-get_pins = reader.get_pins
-lines = reader.lines
-get_status = reader.get_status
+get_data = Back_End_Controller.get_data
+send_command = Back_End_Controller.send_command
+set_pin_voltage = Back_End_Controller.set_pin_voltage
+set_pwm = Back_End_Controller.set_pwm
+set_switch = Back_End_Controller.set_switch
+set_pin = Back_End_Controller.set_pin
+set_pin_by_name = Back_End_Controller.set_pin_by_name
+set_squeeze_plate = Back_End_Controller.set_squeeze_plate
+set_ion_source = Back_End_Controller.set_ion_source
+set_wein_filter = Back_End_Controller.set_wein_filter
+set_cone_1 = Back_End_Controller.set_cone_1
+set_cone_2 = Back_End_Controller.set_cone_2
+set_switch_logic = Back_End_Controller.set_switch_logic
+get_pins = Back_End_Controller.get_pins
+lines = Back_End_Controller.lines
+get_status = Back_End_Controller.get_status
 
 # -------------------------------------------------------------------------
 #                             Manual testing 
@@ -374,8 +382,8 @@ if __name__ == "__main__":
     try:
         while True:
             time.sleep(1)
-            df = reader.get_data()
+            df = Back_End_Controller.get_data()
             if not df.empty:
                 log.info(f"Latest: {df['voltage'].iloc[-1]:.3f} V ({len(df)} samples)")
     except KeyboardInterrupt:
-        reader.stop()
+        Back_End_Controller.stop()

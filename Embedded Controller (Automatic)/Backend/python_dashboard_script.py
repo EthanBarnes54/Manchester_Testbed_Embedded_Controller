@@ -1,8 +1,10 @@
 
-    # ----------     ESP-12F Control & Monitoring Dashboard     ---------- # 
+    # ----------     ESP32 Control & Monitoring Dashboard     ---------- # 
 
-    # A Dash web interface for real-time control and data visualization
-    # of the ESP12F-based embedded system. Communicates via python_backend.
+    # A Dash based web interface for real-time control and data visualization
+    # of the ESP32F-based embedded control system. Communicates with hardware
+    # via python_backend and recieves inputs from the RNN system for optimised 
+    # outputs to the board.
 
     # http://127.0.0.1:8050  <- past into browser for dashboard access
 
@@ -14,32 +16,27 @@ import plotly.graph_objs as go
 import pandas as pd
 import pkgutil, importlib.util
 import numpy as np
+import logging
+from python_backend import Back_End_Controller, start_training_sweep, get_sweep_status, stop_training_sweep
+import dash
 
-# Temporary shim for Python 3.14 removal of pkgutil.find_loader
+# Temporary shim for Python 3.14 (pkgutil.find_loader has been removed)
 
 if not hasattr(pkgutil, "find_loader"):
     pkgutil.find_loader = lambda name: importlib.util.find_spec(name)
-
-import logging
-from python_backend import reader, start_training_sweep, get_sweep_status, stop_training_sweep
-import dash
 
 # -------------------------------------------------------------------------
 #                                Logging setup
 # -------------------------------------------------------------------------
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S",)
 log = logging.getLogger("Dashboard")
 
 # -------------------------------------------------------------------------
 #                                 Initialize app
 # -------------------------------------------------------------------------
 
-app = Dash(__name__, title="ESP12-F Control Dashboard")
+app = Dash(__name__, title="Manchester Ion Beam Testbed: Control Dashboard")
 server = app.server  
 
 # -------------------------------------------------------------------------
@@ -50,7 +47,6 @@ app.layout = html.Div(
     style={"fontFamily": "Segoe UI, sans-serif", "padding": "2em"},
     children=[
         html.H2("ESP12-F Control Dashboard", style={"textAlign": "center"}),
-
         dcc.Graph(id="live-graph", style={"height": "60vh"}),
 
         html.Div(
@@ -73,6 +69,48 @@ app.layout = html.Div(
         ),
 
         html.Div(
+            style={"marginTop": "1em"},
+            children=[
+                html.H4("Pin Controls: 5 PWM + 1 Logic Switch"),
+                html.Div(
+                    style={"display": "grid", "gridTemplateColumns": "repeat(2, 1fr)", "gap": "1em"},
+                    children=[
+                        html.Div([
+                            html.Label("Squeeze Plate (0-1023)"),
+                            dcc.Input(id="pwm1", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"}),
+                        ]),
+                        html.Div([
+                            html.Label("Ion Source (0-1023)"),
+                            dcc.Input(id="pwm2", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"}),
+                        ]),
+                        html.Div([
+                            html.Label("Wein Filter (0-1023)"),
+                            dcc.Input(id="pwm3", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"}),
+                        ]),
+                        html.Div([
+                            html.Label("Upper Cone (Initial/Entry Cone) (0-1023)"),
+                            dcc.Input(id="pwm4", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"}),
+                        ]),
+                        html.Div([
+                            html.Label("Lower Cone (Final/Exit Cone) (0-1023)"),
+                            dcc.Input(id="pwm5", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"}),
+                        ]),
+                        html.Div([
+                            html.Label("Switch Logic"),
+                            dcc.Checklist(
+                                id="sw6",
+                                options=[{"label": "ON", "value": "on"}],
+                                value=[],
+                                inputStyle={"marginRight": "0.5em"},
+                            ),
+                        ]),
+                    ],
+                ),
+                html.Div(id="pins-ack", style={"marginTop": "0.5em", "fontWeight": "bold"}),
+            ],
+        ),
+
+        html.Div(
             id="metrics-bar",
             style={
                 "display": "flex",
@@ -87,6 +125,16 @@ app.layout = html.Div(
                 html.Div(id="num-points", children="Samples: --"),
                 html.Div(id="status", children="OFFLINE", style={"color": "red", "fontWeight": "bold"}),
             ],
+        ),
+
+        html.Div(
+            id="pin-status",
+            style={
+                "display": "flex",
+                "flexWrap": "wrap",
+                "gap": "0.5em 1em",
+                "marginTop": "0.5em",
+            },
         ),
 
         dcc.Interval(id="update-interval", interval=1000, n_intervals=0),
@@ -166,7 +214,7 @@ app.layout = html.Div(
 )
 
 # -------------------------------------------------------------------------
-#                                  Callbacks
+#                                Graph Updates
 # -------------------------------------------------------------------------
 
 @app.callback(
@@ -178,33 +226,36 @@ app.layout = html.Div(
 
 def update_graph(_):
     
-    df = reader.get_data()
-    if df.empty:
+    data_frame = Back_End_Controller.get_data()
+
+    if data_frame.empty:
         return go.Figure(), "Voltage: -- V", "Samples: 0"
 
-    fig = go.Figure()
-    fig.add_trace(
+    figure = go.Figure()
+
+    figure.add_trace(
         go.Scatter(
-            x=pd.to_datetime(df["timestamp"], unit="s"),
-            y=df["voltage"],
+            x=pd.to_datetime(data_frame["timestamp"], unit="s"),
+            y=data_frame["voltage"],
             mode="lines",
             line=dict(color="royalblue"),
         )
     )
-    fig.update_layout(
+
+    figure.update_layout(
         xaxis_title="Time",
         yaxis_title="Voltage (V)",
         margin=dict(l=50, r=20, t=40, b=40),
         template="plotly_white",
     )
 
-    latest_voltage = f"Voltage: {df['voltage'].iloc[-1]:.3f} V"
-    num_points = f"Samples: {len(df)}"
-    return fig, latest_voltage, num_points
+    recent_voltage_measurement = f"Voltage: {data_frame['voltage'].iloc[-1]:.3f} V"
+    number_of_points = f"Samples: {len(data_frame)}"
+
+    return figure, recent_voltage_measurement, number_of_points
 
 
 @app.callback(
-        
     Output("ack", "children"),
     Output("ack", "style"),
     Input("send-btn", "n_clicks"),
@@ -212,31 +263,40 @@ def update_graph(_):
     prevent_initial_call=True,
 )
 
-def send_voltage_command(n_clicks, voltage):
-
-    if n_clicks == 0:
+def send_voltage_command(n_clicks, value):
+    if not n_clicks:
         raise PreventUpdate
-
     try:
-        if voltage is None:
-            raise ValueError("Please enter a voltage value.")
+        if value is None:
+            return "Enter a value", {"color": "#333"}
+        v = float(value)
+        if not (0.0 <= v <= 3.3):
+            return "Out of range (0.0–3.3 V)", {"color": "red", "fontWeight": "bold"}
+        Back_End_Controller.send_command(f"SET {v:.6f}")
+        return f"Sent: SET {v:.6f}", {"color": "green", "fontWeight": "bold"}
+    except Exception as fault:
+        return f"Error: {fault}", {"color": "red", "fontWeight": "bold"}
 
-        v32 = float(np.float32(voltage))
-        if not (0.0 <= v32 <= 3.3):
-            raise ValueError("Voltage must be between 0.0 and 3.3 V.")
+# -------------------------------------------------------------------------
+#                     Input validation (UI Interface)
+# -------------------------------------------------------------------------
 
-        reader.send_command(f"SET {v32:.2f}")
-        log.info(f"Sent voltage command: {v32:.2f} V")
-        return (
-            f"Sent {v32:.2f} V successfully.",
-            {"color": "green", "fontWeight": "bold"},
-        )
-    except Exception as e:
-        log.error(f"Command failed: {e}")
-        return (
-            f"Error sending voltage: {str(e)}",
-            {"color": "red", "fontWeight": "bold"},
-        )
+@app.callback(
+    Output("voltage-input", "style"),
+    Input("voltage-input", "value"),
+)
+
+def _validate_voltage_input(val):
+    base = {"width": "140px"}
+    if val is None:
+        return base
+    try:
+        fval = float(val)
+    except Exception:
+        return {**base, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
+    if 0.0 <= fval <= 3.3:
+        return base
+    return {**base, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
 
 # -------------------------------------------------------------------------
 #                             Status updater
@@ -249,12 +309,113 @@ def send_voltage_command(n_clicks, voltage):
 )
 def update_status(_):
     try:
-        status_text = getattr(reader, "get_status", lambda: "Connecting...")()
+        status_text = getattr(Back_End_Controller, "get_status", lambda: "Connecting...")()
     except Exception:
         status_text = "Connecting..."
 
     if str(status_text).startswith("Simulated"):
         return "OFFLINE", {"color": "red", "fontWeight": "bold"}
+    elif "Connected" in str(status_text):
+        return "CONNECTED", {"color": "green", "fontWeight": "bold"}
+    else:
+        return "OFFLINE", {"color": "red", "fontWeight": "bold"}
+
+# -------------------------------------------------------------------------
+#                             Pin control updates
+# -------------------------------------------------------------------------
+
+@app.callback(
+    Output("pins-ack", "children"),
+    Output("pins-ack", "style"),
+    Input("pwm1", "value"),
+    Input("pwm2", "value"),
+    Input("pwm3", "value"),
+    Input("pwm4", "value"),
+    Input("pwm5", "value"),
+    Input("sw6", "value"),
+    prevent_initial_call=True,
+)
+def update_pins(v1, v2, v3, v4, v5, sw6):
+    try:
+        if v1 is not None:
+            Back_End_Controller.set_pwm(1, int(v1))
+        if v2 is not None:
+            Back_End_Controller.set_pwm(2, int(v2))
+        if v3 is not None:
+            Back_End_Controller.set_pwm(3, int(v3))
+        if v4 is not None:
+            Back_End_Controller.set_pwm(4, int(v4))
+        if v5 is not None:
+            Back_End_Controller.set_pwm(5, int(v5))
+
+        is_on = isinstance(sw6, (list, tuple)) and ("on" in sw6)
+        Back_End_Controller.set_switch(bool(is_on))
+
+        msg = (
+            f"Pins updated: squeeze_plate={v1}, ion_source={v2}, wein_filter={v3}, "
+            f"cone_1={v4}, cone_2={v5}, switch_logic={'ON' if is_on else 'OFF'}"
+        )
+        return msg, {"color": "green", "fontWeight": "bold"}
+    except Exception as fault:
+        return f"Error updating pins: {fault}", {"color": "red", "fontWeight": "bold"}
+
+# -------------------------------------------------------------------------
+#                               Pin statuses
+# -------------------------------------------------------------------------
+
+@app.callback(
+    Output("pin-status", "children"),
+    Input("update-interval", "n_intervals"),
+)
+
+def update_pin_status(_):
+    try:
+        status_text = getattr(Back_End_Controller, "get_status", lambda: "Connecting...")()
+    except Exception:
+        status_text = "Connecting..."
+
+    pins = getattr(Back_End_Controller, "get_pins", lambda: {"names": [], "values": [], "timestamp": 0.0})()
+    names = pins.get("names", [])
+    values = pins.get("values", [])
+
+    if "Connected" in str(status_text):
+        try:
+            Back_End_Controller.send_command("PINS")
+        except Exception:
+            pass
+
+    def chip(label, val, state):
+        color = {
+            "CONNECTED": "green",
+            "DISCONNECTED": "red",
+        }.get(state, "#333")
+        return html.Div(
+            style={
+                "border": f"1px solid {color}",
+                "borderRadius": "6px",
+                "padding": "0.25em 0.5em",
+                "minWidth": "180px",
+            },
+            children=[
+                html.Span(f"{label}: ", style={"fontWeight": "bold"}),
+                html.Span(str(val)),
+                html.Span(f"  ({state})", style={"marginLeft": "0.4em", "color": color}),
+            ],
+        )
+
+    if not names or not values:
+        return [chip("Pins", "--", "DISCONNECTED")]
+
+    state = "DISCONNECTED"
+    if str(status_text).startswith("Simulated"):
+        state = "DISCONNECTED"
+
+    disp_vals = list(values)
+    if len(disp_vals) >= 6:
+        disp_vals[5] = "ON" if int(disp_vals[5]) else "OFF"
+
+    chips = [chip(n, disp_vals[i] if i < len(disp_vals) else "--", state) for i, n in enumerate(names)]
+    return chips
 
 
 # -------------------------------------------------------------------------
@@ -265,19 +426,24 @@ def update_status(_):
     Output("sweep-status", "children"),
     Output("sweep-btn", "disabled"),
     Output("sweep-progress-inner", "style"),
+
     Input("update-interval", "n_intervals"),
     Input("sweep-btn", "n_clicks"),
     Input("sweep-stop-btn", "n_clicks"),
+
     State("sweep-min", "value"),
     State("sweep-max", "value"),
     State("sweep-step", "value"),
     State("sweep-dwell", "value"),
     State("sweep-epochs", "value"),
+
     prevent_initial_call=False,
 )
+
 def handle_training_sweep(_, start_clicks, stop_clicks, min_v, max_v, step, dwell_s, epochs):
     
     triggered_id = None
+    
     try:
         ctx = dash.callback_context
 
@@ -299,14 +465,14 @@ def handle_training_sweep(_, start_clicks, stop_clicks, min_v, max_v, step, dwel
             started = start_training_sweep(min_v=min_v, max_v=max_v, step=step, dwell_s=dwell_s, epochs=epochs)
 
             if started:
-                log.info("Training sweep started by user from the dashboard...")
+                log.info("Training sweep initiated by user...")
         except Exception as fault:
             log.error(f"Failed to start training sweep: {fault}")
 
     elif triggered_id == "sweep-stop-btn" and stop_clicks and int(stop_clicks) > 0:
         try:
             stop_training_sweep()
-            log.info("Training sweep stop requested by user from the dashboard...")
+            log.info("Training sweep cancelled by user...")
         except Exception as fault:
             log.error(f"Failed to stop training sweep: {fault}")
 
@@ -316,11 +482,11 @@ def handle_training_sweep(_, start_clicks, stop_clicks, min_v, max_v, step, dwel
         status = {"state": "unknown", "progress": 0.0, "message": ""}
 
     state = str(status.get("state", "idle"))
-    prog = float(status.get("progress", 0.0))
-    msg = str(status.get("message", ""))
+    progress = float(status.get("progress", 0.0))
+    message = str(status.get("message", ""))
 
-    pct = int(max(0.0, min(1.0, prog)) * 100)
-    text = f"Sweep: {state} ({pct}%)" + (f" — {msg}" if msg else "")
+    percent_completion = int(max(0.0, min(1.0, progress)) * 100)
+    text = f"Sweep: {state} ({percent_completion}%)" + (f" — {message}" if message else "")
     disabled = state == "running"
 
     if state == "running":
@@ -332,12 +498,7 @@ def handle_training_sweep(_, start_clicks, stop_clicks, min_v, max_v, step, dwel
     else:
         color = "#ccc"
 
-    bar_style = {
-        "height": "100%",
-        "width": f"{pct}%",
-        "background": color,
-        "transition": "width 0.2s ease",
-    }
+    bar_style = {"height": "100%", "width": f"{percent_completion}%", "background": color, "transition": "width 0.2s ease",}
 
     return text, disabled, bar_style
 

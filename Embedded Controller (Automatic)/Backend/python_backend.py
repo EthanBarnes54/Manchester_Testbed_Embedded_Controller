@@ -6,6 +6,7 @@
     # Designed for use with:
     # - python_logging_script.py  (data logging)
     # - python_dashboard_script.py (real-time control)
+    # - python_RNN_controller.py  (ML model training, inference and automated control)
 
     # -----------------------------------------------------------------------#
 
@@ -55,13 +56,16 @@ class SerialBackend:
         self.serial = None
 
         self.alive = threading.Event()
-        self.lines = queue.Queue(maxsize=MAX_QUEUE_SIZE)
+        self.lines = queue.Queue(maxsize = MAX_QUEUE_SIZE)
         self.data_lock = threading.Lock()
         self.data_frame = pd.DataFrame(columns=["timestamp", "dac", "voltage", "raw_message"])
 
         self.offline = offline
         self.target_voltage = 1.0  
-        self.current_dac = 1.0
+        self.live_voltage = 1.0
+
+        self.pins = [0, 0, 0, 0, 0, 0]
+        self.pins_timestamp = 0.0
 
         self.sweep_thread = None
         self.sweep_status = {"state": "idle", "progress": 0.0, "message": ""}
@@ -71,26 +75,67 @@ class SerialBackend:
         self.alive.set()
         self.thread.start()
 
+    @staticmethod
+    def _name_to_index(token: str) -> int:
+
+        if token is None:
+            return 0
+        
+        t = str(token).strip().lower()
+
+        mapping = {
+            "squeeze_plate": 1,
+            "ion_source": 2,
+            "wein_filter": 3,
+            "cone_1": 4,
+            "cone_2": 5,
+            "switch_logic": 6,
+        }
+
+        if t in mapping:
+            return mapping[t]
+        try:
+            v = int(t)
+            return v if 1 <= v <= 6 else 0
+        except Exception:
+            return 0
+
+    def update_pin_values(self, idx: int, value: int) -> bool:
+
+        if not (1 <= int(idx) <= 6):
+            return False
+        cv = self.get_pin_value(int(idx), int(value))
+
+        if cv is None:
+            return False
+        
+        self.pins[int(idx) - 1] = cv
+        self.pins_timestamp = time.time()
+        return True
+
     def _run(self):
 
         while self.alive.is_set():
         
-            if self.offline: #Offline mode for testing without hardware
+            if self.offline: 
                 
                 timestamp = time.time()
                 noise = (random.random() - 0.5) * 0.5 
                 v = max(0.0, min(3.3, self.target_voltage + noise))
                 line = f"MEASURED {v:.3f}"
+
                 if not self.lines.full():
                     self.lines.put((timestamp, line))
                 with self.data_lock:
+
                     self.data_frame.loc[len(self.data_frame)] = {
                         "timestamp": timestamp,
-                        "dac": float(self.current_dac),
+                        "dac": float(self.live_voltage),
                         "voltage": v,
                         "raw_message": line,
                     }
                     self.data_frame = self.data_frame.tail(1000).reset_index(drop=True)
+
                 time.sleep(0.05)  
                 continue
 
@@ -99,6 +144,7 @@ class SerialBackend:
 
             try: 
                 line = self.serial.readline().decode("utf-8", "ignore").strip()
+
                 if not line:
                     continue
 
@@ -116,11 +162,36 @@ class SerialBackend:
                     with self.data_lock:
                         self.data_frame.loc[len(self.data_frame)] = {
                             "timestamp": timestamp,
-                            "dac": float(self.current_dac),
+                            "dac": float(self.live_voltage),
                             "voltage": voltage,
                             "raw_message": line,
                         }
                         self.data_frame = self.data_frame.tail(1000).reset_index(drop=True)
+
+                elif line.startswith("PINS"):
+                    try:
+                        for part in line.split()[1:]:
+                            if "=" not in part:
+                                continue
+
+                            name, sval = part.split("=", 1)
+
+                            try:
+                                val = int(float(sval))
+                            except ValueError:
+                                continue
+
+                            idx = self._name_to_index(name)
+                            self.update_pin_values(idx, val)
+
+                    except Exception:
+                        pass
+                elif line.startswith("ACK PIN"):
+                    try:
+                        tokens = line.split()
+                        self.update_pin_values(int(tokens[2]), int(tokens[3]))
+                    except Exception:
+                        pass
 
             except serial.SerialException as Serial_Exception:
 
@@ -146,14 +217,14 @@ class SerialBackend:
 
         while self.alive.is_set():
             try:
-                log.info("Connecting to ESP12F...")
+                log.info("Connecting to ESP32...")
                 self.serial = serial.Serial(self.port, self.baud, timeout=1)
-                log.info(f"Connected to ESP12F on {self.port} at {self.baud} baud...")
+                log.info(f"Connected to ESP32 on {self.port} at {self.baud} baud...")
                 return
-            except serial.SerialException as Serial_Exception:
-                
+            
+            except serial.SerialException as fault:
                 log.warning(
-                    f"Connection failed: {Serial_Exception}. Falling back to offline..."
+                    f"Connection to board failed: {fault}. Reverting to offline..."
                 )
                 self.offline = True
                 return
@@ -165,8 +236,10 @@ class SerialBackend:
                 log.info("Serial closing...")
                 self.serial.close()
                 log.info("Serial now closed...")
+
             except Exception:
                 pass
+
         self.serial = None
 
     # ------------------------------------------------------------------
@@ -181,30 +254,47 @@ class SerialBackend:
                 if len(parts) == 2 and parts[0].upper() == "SET":
                     try:
                         v = float(parts[1])
-                        v_clamped = max(0.0, min(3.3, v))
-                        self.target_voltage = v_clamped
-                        self.current_dac = v_clamped
+                        v_target = max(0.0, min(3.3, v))
+
+                        self.target_voltage = v_target
+                        self.live_voltage = v_target
+
                         log.info(f"[SIM] Target voltage set to {self.target_voltage:.3f} V")
+
                     except ValueError:
                         log.warning(f"[SIM] Invalid SET value in command: {cmd}")
+
+                elif len(parts) == 3 and parts[0].upper() == "PIN":
+                    try:
+                        idx = self._name_to_index(parts[1])
+                        val = int(float(parts[2]))
+
+                        if self.update_pin_values(idx, val):
+                            log.info(f"[SIM] PIN {idx} set to {self.pins[idx-1]}")
+                        else:
+                            log.warning(f"[SIM] PIN index out of range: {idx}")
+                    except Exception:
+                        log.warning(f"[SIM] Invalid PIN command: {cmd}")
                 else:
                     log.info(f"[SIM] Received command: {cmd}")
                 return
 
             if not self.serial or not self.serial.is_open:
-                raise ConnectionError("Serial port not open.")
+                raise ConnectionError("ERROR: Serial port not open!")
+            
             self.serial.write((cmd + "\n").encode("utf-8"))
-            log.info(f"Sent command: {cmd}")
+            log.info(f"Command sent to board: {cmd}...")
 
             parts = cmd.strip().split()
+
             if len(parts) == 2 and parts[0].upper() == "SET":
                 try:
                     v = float(parts[1])
-                    self.current_dac = max(0.0, min(3.3, v))
+                    self.live_voltage = max(0.0, min(3.3, v))
                 except ValueError:
                     pass
-        except Exception as exception:
-            log.error(f"Failed to send command '{cmd}': {exception}")
+        except Exception as fault:
+            log.error(f"Failed to send command '{cmd}': {fault}")
 
     def get_data(self) -> pd.DataFrame:
         
@@ -219,6 +309,63 @@ class SerialBackend:
             return f"Connected via {self.port}..."
         return "Connecting..."
 
+    def get_pin_value(self, i: int, value: int):
+
+        if not (1 <= i <= 6):
+            return None
+        if i <= 5:
+            return max(0, min(1023, int(value)))
+        return 1 if int(value) else 0
+
+    def set_pin_voltage(self, i: int, value: int):
+
+        if i < 1 or i > 6:
+            raise ValueError("ERROR: index must be 1-6!")
+        if i <= 5:
+            value = max(0, min(1023, int(value)))
+        else:
+            value = 1 if int(value) else 0
+        self.send_command(f"PIN {int(i)} {int(value)}")
+
+    def set_pwm(self, channel: int, duty: int):
+
+        if channel < 1 or channel > 5:
+            raise ValueError("ERROR: PWM channel must be 1-5!")
+        self.set_pin_voltage(channel, duty)
+
+    def set_switch(self, on: bool):
+        self.set_pin_voltage(6, 1 if on else 0)
+
+    def set_pin(self, i: int, value: int):
+        self.set_pin_voltage(i, value)
+
+    def set_pin_by_name(self, name: str, value: int):
+        i = self._name_to_index(name)
+        if not (1 <= i <= 6):
+            raise ValueError("ERROR: Unknown pin name!")
+        if i <= 5:
+            value = max(0, min(1023, int(value)))
+        else:
+            value = 1 if int(value) else 0
+        self.send_command(f"PIN {str(name)} {int(value)}")
+
+    def get_pins(self):
+
+        names = [
+            "squeeze_plate",
+            "ion_source",
+            "wein_filter",
+            "cone_1",
+            "cone_2",
+            "switch_logic",
+        ]
+
+        return {
+            "names": names,
+            "values": list(self.pins),
+            "timestamp": self.pins_timestamp,
+        }
+
     def stop(self):
 
         log.info("Backend thread stopping...")
@@ -230,39 +377,45 @@ class SerialBackend:
     #                         Training sweep control
     # ------------------------------------------------------------------
 
-    def _sweep_worker(self, min_v: float, max_v: float, step: float, dwell_s: float, epochs: int):
+    def _sweep_worker(self, minimum_voltage: float, maximum_voltage: float, step: float, hold_time: float, epochs: int):
         try:
             self.sweep_status = {"state": "running", "progress": 0.0, "message": ""}
-            grid = np.arange(min_v, max_v + 1e-9, step, dtype=float)
+            grid = np.arange(minimum_voltage, maximum_voltage + 1e-9, step, dtype=float)
             total = len(grid)
 
             for i, v in enumerate(grid):
                 if self.sweep_cancel.is_set():
+
                     self.sweep_status.update({
                         "state": "aborted",
-                        "message": "Sweep aborted by user.",
+                        "message": "Sweep aborted by user...",
                     })
                     return
+                
                 self.send_command(f"SET {v:.3f}")
-                time.sleep(dwell_s)
+                time.sleep(hold_time)
+
                 self.sweep_status["progress"] = (i + 1) / max(total, 1)
 
-            # Snapshot data and train
             if self.sweep_cancel.is_set():
+
                 self.sweep_status.update({
                     "state": "aborted",
-                    "message": "Sweep aborted before training.",
+                    "message": "Sweep aborted before training...",
                 })
                 return
+            
             data_frame = self.get_data()
             try:
-                import python_RNN_controller as rnnc
+                import python_RNN_controller as rnnc #imported here to prevent import issues that have happened before
 
                 if not data_frame.empty:
 
                     if "dac" not in data_frame.columns and "voltage" in data_frame.columns:
-                        data_frame = data_frame.assign(dac=self.current_dac)
+
+                        data_frame = data_frame.assign(dac=self.live_voltage)
                     rnnc.train_model(data_frame, number_of_epochs=epochs)
+
                     self.sweep_status.update({
                         "state": "completed",
                         "message": f"Trained on {len(data_frame)} samples.",
@@ -281,6 +434,7 @@ class SerialBackend:
                     "state": "failed",
                     "message": f"Training error: {fault}",
                 })
+
         except Exception as fault:
             self.sweep_status.update({
                 "state": "failed",
@@ -292,50 +446,59 @@ class SerialBackend:
         if self.sweep_thread and self.sweep_thread.is_alive():
             log.info("Sweep already running; ignoring start request.")
             return False
-        # Reset cancel and status
+        
         self.sweep_cancel.clear()
         self.sweep_status = {"state": "queued", "progress": 0.0, "message": ""}
-        self.sweep_thread = threading.Thread(
-            target=self._sweep_worker,
-            args=(min_v, max_v, step, dwell_s, epochs),
-            daemon=True,
-        )
-
+        self.sweep_thread = threading.Thread(target=self._sweep_worker, args=(min_v, max_v, step, dwell_s, epochs),daemon=True,)
         self.sweep_thread.start()
+
         return True
 
     def get_sweep_status(self) -> dict:
         return dict(self.sweep_status)
 
     def stop_training_sweep(self):
-        # Cooperative cancel of the sweep worker
         self.sweep_cancel.set()
 
 # -------------------------------------------------------------------------
 #                   Global event for board access
 # -------------------------------------------------------------------------
 
-reader = SerialBackend(offline=OFFLINE)
+Back_End_Controller = SerialBackend(offline = OFFLINE)
+reader = Back_End_Controller
 
-get_data = reader.get_data
-send_command = reader.send_command
-lines = reader.lines
-get_status = reader.get_status
-start_training_sweep = reader.start_training_sweep
-get_sweep_status = reader.get_sweep_status
-stop_training_sweep = reader.stop_training_sweep
+get_data = Back_End_Controller.get_data
+send_command = Back_End_Controller.send_command
+
+set_pin_voltage = Back_End_Controller.set_pin_voltage
+set_pwm = Back_End_Controller.set_pwm
+set_switch = Back_End_Controller.set_switch
+set_pin = Back_End_Controller.set_pin
+set_pin_by_name = Back_End_Controller.set_pin_by_name
+get_pins = Back_End_Controller.get_pins
+
+lines = Back_End_Controller.lines
+get_status = Back_End_Controller.get_status
+
+start_training_sweep = getattr(Back_End_Controller, 'start_training_sweep', None)
+get_sweep_status = getattr(Back_End_Controller, 'get_sweep_status', None)
+stop_training_sweep = getattr(Back_End_Controller, 'stop_training_sweep', None)
 
 # -------------------------------------------------------------------------
 #                             Manual testing 
 # -------------------------------------------------------------------------
 
 if __name__ == "__main__":
+
     log.info("Starting backend in standalone mode...")
+
     try:
         while True:
             time.sleep(1)
-            data_frame = reader.get_data()
+            data_frame = Back_End_Controller.get_data()
+
             if not data_frame.empty:
                 log.info(f"Latest: {data_frame['voltage'].iloc[-1]:.3f} V ({len(data_frame)} samples)")
+
     except KeyboardInterrupt:
-        reader.stop()
+        Back_End_Controller.stop()

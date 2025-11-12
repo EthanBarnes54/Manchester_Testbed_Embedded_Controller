@@ -21,7 +21,7 @@ if not hasattr(pkgutil, "find_loader"):
     pkgutil.find_loader = lambda name: importlib.util.find_spec(name)
 
 import logging
-from python_backend import reader
+from python_backend import Back_End_Controller
 
 # -------------------------------------------------------------------------
 #                                Logging setup
@@ -140,7 +140,7 @@ app.layout = html.Div(
 
 def update_graph(_):
     
-    df = reader.get_data()
+    df = Back_End_Controller.get_data()
     if df.empty:
         return go.Figure(), "Voltage: -- V", "Samples: 0"
 
@@ -175,7 +175,7 @@ def update_graph(_):
 )
 def update_status(_):
     try:
-        status_text = getattr(reader, "get_status", lambda: "Connecting...")()
+        status_text = getattr(Back_End_Controller, "get_status", lambda: "Connecting...")()
     except Exception:
         status_text = "Connecting..."
 
@@ -243,18 +243,18 @@ def update_pins(v1, v2, v3, v4, v5, sw6):
     try:
 
         if v1 is not None:
-            reader.set_pwm(1, int(v1))
+            Back_End_Controller.set_pwm(1, int(v1))
         if v2 is not None:
-            reader.set_pwm(2, int(v2))
+            Back_End_Controller.set_pwm(2, int(v2))
         if v3 is not None:
-            reader.set_pwm(3, int(v3))
+            Back_End_Controller.set_pwm(3, int(v3))
         if v4 is not None:
-            reader.set_pwm(4, int(v4))
+            Back_End_Controller.set_pwm(4, int(v4))
         if v5 is not None:
-            reader.set_pwm(5, int(v5))
+            Back_End_Controller.set_pwm(5, int(v5))
 
         is_on = isinstance(sw6, (list, tuple)) and ("on" in sw6)
-        reader.set_switch(bool(is_on))
+        Back_End_Controller.set_switch(bool(is_on))
 
         msg = (
             f"Pins updated: squeeze_plate={v1}, ion_source={v2}, wein_filter={v3}, "
@@ -275,17 +275,17 @@ def update_pins(v1, v2, v3, v4, v5, sw6):
 )
 def update_pin_status(_):
     try:
-        status_text = getattr(reader, "get_status", lambda: "Connecting...")()
+        status_text = getattr(Back_End_Controller, "get_status", lambda: "Connecting...")()
     except Exception:
         status_text = "Connecting..."
 
-    pins = getattr(reader, "get_pins", lambda: {"names": [], "values": [], "timestamp": 0.0})()
+    pins = getattr(Back_End_Controller, "get_pins", lambda: {"names": [], "values": [], "timestamp": 0.0})()
     names = pins.get("names", [])
     values = pins.get("values", [])
     
     if "Connected" in str(status_text):
         try:
-            reader.send_command("PINS")
+            Back_End_Controller.send_command("PINS")
         except Exception:
             pass
 

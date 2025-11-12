@@ -103,7 +103,7 @@ def moving_average(series, data_window=5):
     return np.convolve(series, np.ones(data_window)/data_window, mode="valid")
 
 # ---------------------------------------------------------------
-#               Feature Engineering Utilities
+#                    Feature Engineering
 # ---------------------------------------------------------------
 
 def add_derived_features(data_frame):
