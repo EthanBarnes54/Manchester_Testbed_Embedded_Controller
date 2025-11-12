@@ -12,7 +12,9 @@
 #include <Arduino.h>
 #include "log.h"
 #include <Wire.h>
-#include <ESP8266WiFi.h>
+#include <WiFi.h>
+#include <ESPmDNS.h>
+#include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <Adafruit_ADS1X15.h>
 #include <Adafruit_MCP4725.h>
@@ -20,40 +22,50 @@
 Adafruit_ADS1115 ads;
 Adafruit_MCP4725 dac;
 
-const int LED_PIN = 2;
+const int LED_PIN = 2; // On-board LED on many ESP32 dev boards
 
 float TargetVoltage = 0.0;
 unsigned long lastHeartbeat = 0;
 
+// Default pins adjusted for ESP32 (safe GPIOs for PWM)
 #ifndef SQUEEZE_PLATE_PIN
-#define SQUEEZE_PLATE_PIN 14  // D5 (PWM)
+#define SQUEEZE_PLATE_PIN 25  // PWM-capable
 #endif
 #ifndef ION_SOURCE_PIN
-#define ION_SOURCE_PIN 12     // D6 (PWM)
+#define ION_SOURCE_PIN 26     // PWM-capable
 #endif
 #ifndef WEIN_FILTER_PIN
-#define WEIN_FILTER_PIN 13    // D7 (PWM)
+#define WEIN_FILTER_PIN 27    // PWM-capable
 #endif
 #ifndef CONE_1_PIN
-#define CONE_1_PIN 15         // D8 (PWM)
+#define CONE_1_PIN 32         // PWM-capable
 #endif
 #ifndef CONE_2_PIN
-#define CONE_2_PIN 16         // D0 (may not PWM)
+#define CONE_2_PIN 33         // PWM-capable
 #endif
 #ifndef SWITCH_LOGIC_PIN
-#define SWITCH_LOGIC_PIN 0    // D3 (digital; boot strap care)
+#define SWITCH_LOGIC_PIN 16   // Digital output
 #endif
 
 const int CHANNEL_PINS[6] = {SQUEEZE_PLATE_PIN, ION_SOURCE_PIN, WEIN_FILTER_PIN, CONE_1_PIN, CONE_2_PIN, SWITCH_LOGIC_PIN};
 int channelValues[6] = {0, 0, 0, 0, 0, 0};
 
+// ESP32 LEDC PWM setup
+static const int PWM_FREQ = 5000;         // 5 kHz
+static const int PWM_RESOLUTION = 10;     // 10-bit -> 0..1023
+static const int PWM_MAX = (1 << PWM_RESOLUTION) - 1;
+static const int LEDC_CHANNELS[5] = {0, 1, 2, 3, 4};
+
 void initChannels() {
-  analogWriteRange(1023);
+  // Configure 5 PWM outputs using LEDC
   for (int i = 0; i < 5; i++) {
     pinMode(CHANNEL_PINS[i], OUTPUT);
-    analogWrite(CHANNEL_PINS[i], 0);
+    ledcSetup(LEDC_CHANNELS[i], PWM_FREQ, PWM_RESOLUTION);
+    ledcAttachPin(CHANNEL_PINS[i], LEDC_CHANNELS[i]);
+    ledcWrite(LEDC_CHANNELS[i], 0);
     channelValues[i] = 0;
   }
+  // Digital switch
   pinMode(CHANNEL_PINS[5], OUTPUT);
   digitalWrite(CHANNEL_PINS[5], LOW);
   channelValues[5] = 0;
@@ -68,8 +80,8 @@ void setChannel(uint8_t idx1, int value) {
   int pin = CHANNEL_PINS[i];
   if (i < 5) {
     if (value < 0) value = 0;
-    if (value > 1023) value = 1023;
-    analogWrite(pin, value);
+    if (value > PWM_MAX) value = PWM_MAX;
+    ledcWrite(LEDC_CHANNELS[i], value);
     channelValues[i] = value;
     Serial.println(String("ACK PIN ") + idx1 + " " + value);
   } else {
@@ -125,7 +137,7 @@ void setup() {
   Serial.println("\nWiFi connected, IP address:");
   Serial.println(WiFi.localIP());
   
-  ArduinoOTA.setHostname("esp12fdev");
+  ArduinoOTA.setHostname("esp32dev");
 
   ArduinoOTA.onStart([]() {
     Serial.println("OTA connection starting...");
@@ -136,7 +148,9 @@ void setup() {
   });
 
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("Connection in Progress: %u%%\r", (progress / (total / 100)));
+    if (total) {
+      Serial.printf("OTA Progress: %u%%\r", (progress * 100) / total);
+    }
   });
 
   ArduinoOTA.onError([](ota_error_t error) {
