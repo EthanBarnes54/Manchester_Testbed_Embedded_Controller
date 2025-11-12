@@ -74,11 +74,11 @@ app.layout = html.Div(
                             dcc.Input(id="pwm3", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"}),
                         ]),
                         html.Div([
-                            html.Label("Cone 1 (0-1023)"),
+                            html.Label("Upper Cone (Initial/Entry Cone) (0-1023)"),
                             dcc.Input(id="pwm4", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"}),
                         ]),
                         html.Div([
-                            html.Label("Cone 2 (0-1023)"),
+                            html.Label("Lower Cone (Final/Exit Cone) (0-1023)"),
                             dcc.Input(id="pwm5", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"}),
                         ]),
                         html.Div([
@@ -186,6 +186,43 @@ def update_status(_):
     else:
         return "OFFLINE", {"color": "red", "fontWeight": "bold"}
     
+# -------------------------------------------------------------------------
+#                          Input Styles (UI Clarity)
+# -------------------------------------------------------------------------
+
+@app.callback(
+    Output("pwm1", "style"),
+    Output("pwm2", "style"),
+    Output("pwm3", "style"),
+    Output("pwm4", "style"),
+    Output("pwm5", "style"),
+    Input("pwm1", "value"),
+    Input("pwm2", "value"),
+    Input("pwm3", "value"),
+    Input("pwm4", "value"),
+    Input("pwm5", "value"),
+)
+def _validate_pwm_inputs(v1, v2, v3, v4, v5):
+    def style_for(val, lo=0, hi=1023):
+        base = {"width": "120px"}
+        if val is None:
+            return base
+        try:
+            fval = float(val)
+        except Exception:
+            return {**base, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
+        if lo <= fval <= hi:
+            return base
+        return {**base, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
+
+    return (
+        style_for(v1),
+        style_for(v2),
+        style_for(v3),
+        style_for(v4),
+        style_for(v5),
+    )
+
 # -------------------------------------------------------------------------
 #                             Pin control callback
 # -------------------------------------------------------------------------
