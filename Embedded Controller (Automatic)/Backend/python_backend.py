@@ -6,6 +6,7 @@
     # Designed for use with:
     # - python_logging_script.py  (data logging)
     # - python_dashboard_script.py (real-time control)
+    # - python_signal_pipeline.py (data preprocessing for use in the RNN controller)
     # - python_RNN_controller.py  (ML model training, inference and automated control)
 
     # -----------------------------------------------------------------------#
@@ -19,6 +20,7 @@ import logging
 import os
 import random
 import numpy as np
+from python_ml_metrics import MLMetricCollector
 
 # -------------------------------------------------------------------------
 #                             Logging setup
@@ -71,9 +73,55 @@ class SerialBackend:
         self.sweep_status = {"state": "idle", "progress": 0.0, "message": ""}
         self.sweep_cancel = threading.Event()
 
-        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread = threading.Thread(target=self.run, daemon=True)
         self.alive.set()
         self.thread.start()
+
+    # ------------------------------------------------------------------
+    #                    Connect / Disconnect Switches
+    # ------------------------------------------------------------------
+
+    def connect(self):
+
+        if self.offline:
+            
+            time.sleep(0.1)
+            return
+
+        while self.alive.is_set():
+            try:
+                log.info("Connecting to ESP32...")
+                self.serial = serial.Serial(self.port, self.baud, timeout=1)
+                log.info(f"Connected to ESP32 on {self.port} at {self.baud} baud...")
+                return
+            
+            except serial.SerialException as fault:
+                log.warning(
+                    f"Connection to board failed: {fault}. Reverting to offline..."
+                )
+                self.offline = True
+                return
+
+    def disconnect(self):
+
+        if self.serial and self.serial.is_open:
+            try:
+                log.info("Serial closing...")
+                self.serial.close()
+                log.info("Serial now closed...")
+
+            except Exception:
+                pass
+
+        self.serial = None
+
+
+    def get_latest_point(self):
+        with self.data_lock:
+            if self.data_frame.empty:
+                return None
+            row = self.data_frame.iloc[-1]
+            return float(row["timestamp"]), float(row["voltage"])
 
     @staticmethod
     def _name_to_index(token: str) -> int:
@@ -113,7 +161,7 @@ class SerialBackend:
         self.pins_timestamp = time.time()
         return True
 
-    def _run(self):
+    def run(self):
 
         while self.alive.is_set():
         
@@ -140,7 +188,7 @@ class SerialBackend:
                 continue
 
             if self.serial is None or not self.serial.is_open:
-                self._connect()
+                self.connect()
 
             try: 
                 line = self.serial.readline().decode("utf-8", "ignore").strip()
@@ -196,7 +244,7 @@ class SerialBackend:
             except serial.SerialException as Serial_Exception:
 
                 log.warning(f"Serial exception: {Serial_Exception}. Reconnecting...")
-                self._disconnect()
+                self.disconnect()
                 time.sleep(RETRY_DELAY)
 
             except Exception as py_Exception:
@@ -204,43 +252,6 @@ class SerialBackend:
                 log.error(f"Unexpected error: {py_Exception}")
                 time.sleep(0.5)
 
-    # ------------------------------------------------------------------
-    #                    Connect / Disconnect Switches
-    # ------------------------------------------------------------------
-
-    def _connect(self):
-
-        if self.offline:
-            
-            time.sleep(0.1)
-            return
-
-        while self.alive.is_set():
-            try:
-                log.info("Connecting to ESP32...")
-                self.serial = serial.Serial(self.port, self.baud, timeout=1)
-                log.info(f"Connected to ESP32 on {self.port} at {self.baud} baud...")
-                return
-            
-            except serial.SerialException as fault:
-                log.warning(
-                    f"Connection to board failed: {fault}. Reverting to offline..."
-                )
-                self.offline = True
-                return
-
-    def _disconnect(self):
-
-        if self.serial and self.serial.is_open:
-            try:
-                log.info("Serial closing...")
-                self.serial.close()
-                log.info("Serial now closed...")
-
-            except Exception:
-                pass
-
-        self.serial = None
 
     # ------------------------------------------------------------------
     #                               Methods
@@ -370,7 +381,7 @@ class SerialBackend:
 
         log.info("Backend thread stopping...")
         self.alive.clear()
-        self._disconnect()
+        self.disconnect()
         log.info("Backend thread stopped...")
 
     # ------------------------------------------------------------------
@@ -407,32 +418,25 @@ class SerialBackend:
             
             data_frame = self.get_data()
             try:
-                import python_RNN_controller as rnnc #imported here to prevent import issues that have happened before
-
+                # Legacy training removed; controller-only pipeline mode
                 if not data_frame.empty:
-
                     if "dac" not in data_frame.columns and "voltage" in data_frame.columns:
-
                         data_frame = data_frame.assign(dac=self.live_voltage)
-                    rnnc.train_model(data_frame, number_of_epochs=epochs)
-
                     self.sweep_status.update({
                         "state": "completed",
-                        "message": f"Trained on {len(data_frame)} samples.",
+                        "message": f"Data sweep complete (training disabled). {len(data_frame)} samples collected.",
                         "progress": 1.0,
                     })
-
                 else:
                     self.sweep_status.update({
                         "state": "failed",
                         "message": "No data collected during sweep.",
                         "progress": 0.0,
                     })
-
             except Exception as fault:
                 self.sweep_status.update({
                     "state": "failed",
-                    "message": f"Training error: {fault}",
+                    "message": f"Sweep post-processing error: {fault}",
                 })
 
         except Exception as fault:
@@ -479,6 +483,38 @@ get_pins = Back_End_Controller.get_pins
 
 lines = Back_End_Controller.lines
 get_status = Back_End_Controller.get_status
+
+# -------------------------------------------------------------------------
+#                   Machine Learning Metrics Interface
+# -------------------------------------------------------------------------
+
+ML_METRICS = MLMetricCollector(maxlen=4000)
+
+def get_ml_metrics():
+
+    try:
+        point = Back_End_Controller.get_latest_point()
+        pins = Back_End_Controller.get_pins().get("values", [])
+
+        if point is not None:
+            ts, v = point
+            ML_METRICS.update_from_backend(ts, v, pins)
+            
+    except Exception:
+        pass
+    return ML_METRICS.snapshot()
+
+def push_ml_features(features, names=None):
+    try:
+        ML_METRICS.push_features(features, feature_names=names)
+    except Exception:
+        pass
+
+def push_ml_saliency(saliency):
+    try:
+        ML_METRICS.push_saliency(saliency)
+    except Exception:
+        pass
 
 start_training_sweep = getattr(Back_End_Controller, 'start_training_sweep', None)
 get_sweep_status = getattr(Back_End_Controller, 'get_sweep_status', None)

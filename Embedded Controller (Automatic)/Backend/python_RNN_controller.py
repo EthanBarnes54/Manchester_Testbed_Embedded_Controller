@@ -14,6 +14,9 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score
 import logging
 from pathlib import Path
+from collections import deque
+
+__all__ = ["RNNController"]
 
 # -------------------------------------------------------
 #                 Variable Initialisation
@@ -49,7 +52,7 @@ log = logging.getLogger("RNN_Controller")
 # -------------------------------------------------------
 
 
-class RNN(nn.Module):
+class _RNN(nn.Module):
 
     def __init__(self, input_size, hidden_size, output_size, use_elu_head: bool = True):
         super().__init__()
@@ -110,7 +113,7 @@ def save_NN_weights(model, scaler):
 scaler = StandardScaler()
 
 def model_init(retrain: bool = False):
-    model = RNN(INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE, use_elu_head=True).to(DEVICE)
+    model = _RNN(INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE, use_elu_head=True).to(DEVICE)
     if not retrain and MODEL_PATH.exists():
        load_previous_weights(model, scaler)
     else:
@@ -119,7 +122,7 @@ def model_init(retrain: bool = False):
 
 
 model = model_init()
-optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+optimizer = optim.Adam(model.parameters(), learning_rate=LEARNING_RATE)
 criterion = nn.MSELoss()
 
 # -------------------------------------------------------
@@ -256,6 +259,96 @@ def online_update(new_data_frame: pd.DataFrame, grad_clip: float = 1.0):
 
     save_NN_weights(model, scaler)
     log.info(f"Online update done | Loss={loss.item():.6f}")
+
+
+# -------------------------------------------------------
+#                 Data Pipeline Integration
+# -------------------------------------------------------
+
+class RNNController:
+
+    def __init__(
+        self,
+        feature_dim: int,
+        hidden_size: int = HIDDEN_SIZE,
+        output_size: int = OUTPUT_SIZE,
+        learning_rate: float = LEARNING_RATE,
+        use_elu_head: bool = True,
+    ):
+        self.input_size = int(5 + feature_dim)
+        self.model = _RNN(self.input_size, hidden_size, output_size, use_elu_head=use_elu_head).to(DEVICE)
+        self.optimizer = optim.Adam(self.model.parameters(), learning_rate=learning_rate)
+        self.criterion = nn.MSELoss()
+        self.sequence_length = SEQUENCE_LENGTH
+
+        self._ckpt_path = Path("RNN_model_pipeline.pt")
+        self.history = deque(maxlen=self.sequence_length)
+        self.pipeline = None
+
+    def attach_pipeline(self, pipeline):
+        self.pipeline = pipeline
+
+    @staticmethod
+    def build_input_vector(pins_state: np.ndarray, pipeline_features: np.ndarray) -> np.ndarray:
+
+        pins = np.asarray(pins_state, dtype=float).reshape(-1)
+        feats = np.asarray(pipeline_features, dtype=float).reshape(-1)
+
+        if pins.shape[0] != 5:
+            raise ValueError("ERROR: Must be 5 pins!")
+        return np.concatenate([pins, feats], axis=0)
+
+    def predict_from_history(self, history_inputs: np.ndarray) -> np.ndarray:
+
+        x = np.asarray(history_inputs, dtype=float)
+
+        if x.ndim != 2 or x.shape[1] != self.input_size:
+            raise ValueError(f"ERROR: Data histories must be of (T, {self.input_size}) dimensions!")
+        if x.shape[0] < self.sequence_length:
+            raise ValueError(f"ERROR: Predictions require at least {self.sequence_length} pieces of data history!")
+
+        seq = x[-self.sequence_length :][None, ...]
+        self.model.eval()
+
+        with torch.no_grad():
+            t = torch.tensor(seq, dtype=torch.float32).to(DEVICE)
+            y = self.model(t).cpu().numpy().reshape(-1)
+        return y
+
+    def step_features(self, pins_state: np.ndarray, pipeline_features: np.ndarray):
+
+        u = self.build_input_vector(pins_state, pipeline_features)
+        self.history.append(u)
+        if len(self.history) < self.sequence_length:
+            return None
+        return self.predict_from_history(np.stack(list(self.history), axis=0))
+
+    def data_chunk(self, pins_state: np.ndarray, voltages_chunk: np.ndarray):
+
+        if self.pipeline is None:
+            raise RuntimeError("ERROR: No pipeline attached! Attach the pipeline first...")
+        
+        outputs = []
+
+        for features in self.pipeline.process_chunk(voltages_chunk):
+            y = self.step_features(pins_state, features)
+            if y is not None:
+                outputs.append(y)
+        return outputs
+
+    def save(self, path=None):
+        p = path if path is not None else self._ckpt_path
+        torch.save({"state_dict": self.model.state_dict()}, p)
+
+    def load(self, path=None) -> bool:
+        p = path if path is not None else self._ckpt_path
+        try:
+            ckpt = torch.load(p, map_location=DEVICE)
+            state = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
+            self.model.load_state_dict(state)
+            return True
+        except Exception:
+            return False
 
 
 if __name__ == "__main__":
