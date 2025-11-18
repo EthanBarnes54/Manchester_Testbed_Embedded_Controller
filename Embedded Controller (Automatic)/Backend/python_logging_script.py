@@ -1,23 +1,22 @@
-    
-# ---------- Data Logger for ES12F Serial Instrument ---------- #
 
-    # Continuously reads measurement data from a queue provided by the backend module,
-    # logs it to a CSV file, and optionally visualizes voltage in real time.
+#----------- Data logger for ESP12F serial instrument. -------------#
 
-    # ------------------------------------------------------------- #
+#   Python module which reads measurement data from the backend queue, 
+#   logs to CSV, and visualizes the voltage in real time. 
+
+#----------------------------------------------------------------------#
 
 import time
 import pandas as pd
 import logging
 import matplotlib.pyplot as plt
-from python_backend import lines
+from python_Backend import lines
 
 # -------------------------------------------------------------------------
-# Logging configuration
+#                           Logging configuration
 # -------------------------------------------------------------------------
 
 logging.basicConfig(
-
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
@@ -26,7 +25,7 @@ logging.basicConfig(
 log = logging.getLogger("DataLogger")
 
 # -------------------------------------------------------------------------
-# Configuration constants
+#                       Configuration constants
 # -------------------------------------------------------------------------
 
 AUTOSAVE_INTERVAL = 10  # seconds
@@ -37,7 +36,7 @@ timestamp_str = time.strftime("%Y%m%d_%H%M%S")
 FILE_NAME = f"DataLog_{timestamp_str}.csv"
 
 # -------------------------------------------------------------------------
-# Data storage setup
+#                           Data storage setup
 # -------------------------------------------------------------------------
 
 data_frame = pd.DataFrame(columns=["timestamp", "voltage", "raw_message"])
@@ -53,7 +52,7 @@ if ENABLE_PLOT:
     ax.set_title(f"Live Voltage Trace ({timestamp_str})")
 
 # -------------------------------------------------------------------------
-# Main logging loop
+#                           Main logging loop
 # -------------------------------------------------------------------------
 
 try:
@@ -92,15 +91,18 @@ try:
             plt.pause(0.05)
 
 except KeyboardInterrupt:
-    
     log.warning("Logging interrupted by user.")
     if buffer:
-        pd.DataFrame(buffer, columns=["timestamp", "voltage", "raw_message"]).to_csv(FILE_NAME, mode="a", index=False)
+        pd.DataFrame(buffer, columns=["timestamp", "voltage", "raw_message"]).to_csv(
+            FILE_NAME, mode="a", index=False
+        )
     log.info("Final data saved before exit.")
 
 except Exception as Exception:
-
     log.exception(f"Unexpected error during logging: {Exception}")
     if buffer:
-        pd.DataFrame(buffer, columns=["timestamp", "voltage", "raw_message"]).to_csv(FILE_NAME, mode="a", index=False)
+        pd.DataFrame(buffer, columns=["timestamp", "voltage", "raw_message"]).to_csv(
+            FILE_NAME, mode="a", index=False
+        )
     log.info("Emergency data dump complete.")
+

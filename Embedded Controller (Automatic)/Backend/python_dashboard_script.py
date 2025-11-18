@@ -1,14 +1,12 @@
+#--------------- ESP32 Control and Monitoring Dashboard -------------------#
 
-    # ----------     ESP32 Control & Monitoring Dashboard     ---------- # 
+# A Dash-based web interface for real-time control and data visualization
+# of the ESP32-based embedded control system. Communicates with the backend
+# and  ML system to display live metrics of both the ion beam testbed and 
+# RNN remote controller.
 
-    # A Dash based web interface for real-time control and data visualization
-    # of the ESP32F-based embedded control system. Communicates with hardware
-    # via python_backend and recieves inputs from the RNN system for optimised 
-    # outputs to the board.
-
-    # http://127.0.0.1:8050  <- past into browser for dashboard access
-
-    #----------------------------------------------------------------------#
+# Run locally in a new terminal and open http://127.0.0.1:8050 in a browser.
+# ------------------------------------------------------------------------#
 
 from dash import Dash, dcc, html, Input, Output, State
 from dash.exceptions import PreventUpdate
@@ -17,17 +15,15 @@ import pandas as pd
 import pkgutil, importlib.util
 import numpy as np
 import logging
-from python_backend import (
-    Back_End_Controller,
-    start_training_sweep,
-    get_sweep_status,
-    stop_training_sweep,
-    get_ml_metrics,
-)
+import time
 import dash
+try:
+    from python_RNN_Controller import propose_dac
+except Exception:
+    propose_dac = None
+from python_Backend import (get_ml_metrics, Back_End_Controller, start_training_sweep, get_sweep_status, stop_training_sweep, get_model_info)
 
-# Temporary shim for Python 3.14 (pkgutil.find_loader has been removed)
-
+# Workaround for Python 3.14 (pkgutil.find_loader has been removed)
 if not hasattr(pkgutil, "find_loader"):
     pkgutil.find_loader = lambda name: importlib.util.find_spec(name)
 
@@ -43,8 +39,9 @@ log = logging.getLogger("Dashboard")
 # -------------------------------------------------------------------------
 
 app = Dash(__name__, title="Manchester Ion Beam Testbed: Control Dashboard")
-server = app.server  
+server = app.server
 
+LAST_AUTO_TS = 0.0
 # -------------------------------------------------------------------------
 #                                     Layout
 # -------------------------------------------------------------------------
@@ -54,35 +51,35 @@ def _control_tab():
         children=[
             html.H2("ESP12-F Control Dashboard", style={"textAlign": "center"}),
             dcc.Graph(id="live-graph", style={"height": "60vh"}),
-            html.Div(
-                style={"marginTop": "2em", "display": "flex", "alignItems": "center", "gap": "1em"},
-                children=[
+
+            html.Div(style={"marginTop": "2em", "display": "flex", "alignItems": "center", "gap": "1em"},
+                    children=[
                     html.Label("Set DAC Voltage (V):", style={"fontWeight": "bold"}),
                     dcc.Input(id="voltage-input", type="number", min=0.0, max=3.3, step=0.000001, value=1.0, debounce=True, style={"width": "140px"}),
                     html.Button("Send Command", id="send-btn", n_clicks=0, style={"padding": "0.5em 1em"}),
                     html.Span(id="ack", style={"marginLeft": "1em", "fontWeight": "bold"}),
                 ],
             ),
-            html.Div(
-                style={"marginTop": "1em"},
+
+            html.Div(style={"marginTop": "1em"},
+                     
                 children=[
                     html.H4("Pin Controls: 5 PWM + 1 Logic Switch"),
-                    html.Div(
-                        style={"display": "grid", "gridTemplateColumns": "repeat(2, 1fr)", "gap": "1em"},
+                    html.Div(style={"display": "grid", "gridTemplateColumns": "repeat(2, 1fr)", "gap": "1em"},
                         children=[
-                            html.Div([html.Label("Squeeze Plate (0-1023)"), dcc.Input(id="pwm1", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"})]),
-                            html.Div([html.Label("Ion Source (0-1023)"), dcc.Input(id="pwm2", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"})]),
-                            html.Div([html.Label("Wein Filter (0-1023)"), dcc.Input(id="pwm3", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"})]),
-                            html.Div([html.Label("Upper Cone (Initial/Entry Cone) (0-1023)"), dcc.Input(id="pwm4", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"})]),
-                            html.Div([html.Label("Lower Cone (Final/Exit Cone) (0-1023)"), dcc.Input(id="pwm5", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"})]),
+                            html.Div([html.Label("Squeeze Plate"), dcc.Input(id="pwm1", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"})]),
+                            html.Div([html.Label("Ion Source"), dcc.Input(id="pwm2", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"})]),
+                            html.Div([html.Label("Wein Filter"), dcc.Input(id="pwm3", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"})]),
+                            html.Div([html.Label("Upper Cone (Initial/Entry Cone)"), dcc.Input(id="pwm4", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"})]),
+                            html.Div([html.Label("Lower Cone (Final/Exit Cone)"), dcc.Input(id="pwm5", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"})]),
                             html.Div([html.Label("Switch Logic"), dcc.Checklist(id="sw6", options=[{"label": "ON", "value": "on"}], value=[], inputStyle={"marginRight": "0.5em"})]),
                         ],
                     ),
                     html.Div(id="pins-ack", style={"marginTop": "0.5em", "fontWeight": "bold"}),
                 ],
             ),
-            html.Div(
-                id="metrics-bar",
+
+            html.Div(id="metrics-bar",
                 style={"display": "flex", "justifyContent": "space-around", "marginTop": "2em", "padding": "1em", "borderTop": "1px solid #ddd", "color": "#333"},
                 children=[
                     html.Div(id="latest-voltage", children="Voltage: -- V"),
@@ -90,11 +87,12 @@ def _control_tab():
                     html.Div(id="status", children="OFFLINE", style={"color": "red", "fontWeight": "bold"}),
                 ],
             ),
+
             html.Div(id="pin-status", style={"display": "flex", "flexWrap": "wrap", "gap": "0.5em 1em", "marginTop": "0.5em"}),
-            html.Div(
-                style={"marginTop": "1.5em", "padding": "1em", "border": "1px solid #e0e0e0", "borderRadius": "8px", "maxWidth": "740px", "background": "#fafafa"},
+            html.Div(style={"marginTop": "1.5em", "padding": "1em", "border": "1px solid #e0e0e0", "borderRadius": "8px", "maxWidth": "740px", "background": "#fafafa"},
                 children=[
                     html.Div(children=[html.H4("Training Sweep", style={"margin": 0}), html.P("Generate the training dataset by sweeping over all ouput DAC values, then train the RNN controller.", style={"margin": "0.25em 0 0.75em 0", "color": "#555"})]),
+
                     html.Div(
                         style={"display": "grid", "gridTemplateColumns": "repeat(5, 1fr)", "gap": "0.75em", "alignItems": "end"},
                         children=[
@@ -105,6 +103,7 @@ def _control_tab():
                             html.Div(children=[html.Small("Epochs"), dcc.Input(id="sweep-epochs", type="number", value=10, min=1, step=1, placeholder="10", style={"width": "100%"})]),
                         ],
                     ),
+
                     html.Div(
                         style={"display": "flex", "alignItems": "center", "gap": "1em", "marginTop": "0.5em"},
                         children=[
@@ -114,7 +113,24 @@ def _control_tab():
                             html.Span(id="sweep-eta", children=""),
                         ],
                     ),
+                    
                     html.Div(id="sweep-progress", style={"width": "100%", "height": "12px", "background": "#eee", "borderRadius": "6px", "overflow": "hidden", "marginTop": "0.5em"}, children=[html.Div(id="sweep-progress-inner", style={"height": "100%", "width": "0%", "background": "#ccc", "transition": "width 0.2s ease"})]),
+
+                    html.Div(
+                        style={"marginTop": "1em", "padding": "1em", "border": "1px solid #e0e0e0", "borderRadius": "8px", "maxWidth": "740px", "background": "#fafafa"},
+                        children=[
+                            html.Div(children=[html.H4("Automation & Data", style={"margin": 0})]),
+                            html.Div(
+                                style={"display": "flex", "gap": "1em", "alignItems": "center", "flexWrap": "wrap", "marginTop": "0.5em"},
+                                children=[
+                                    html.Div(children=[html.Label("Auto Control"), dcc.Checklist(id="auto-mode", options=[{"label": "ON", "value": "on"}], value=[], inputStyle={"marginRight": "0.5em"})]),
+                                    html.Div(children=[html.Label("Auto Rate (ms)"), dcc.Input(id="auto-rate-ms", type="number", value=500, min=100, step=50, style={"width": "100px"})]),
+                                    html.Div(children=[html.Label("Save dataset after sweep"), dcc.Checklist(id="save-dataset-toggle", options=[{"label": "Enable", "value": "on"}], value=[], inputStyle={"marginRight": "0.5em"})]),
+                                    html.Span(id="save-dataset-ack", style={"fontWeight": "bold"}),
+                                ],
+                            ),
+                        ],
+                    ),
                 ],
             ),
         ],
@@ -132,7 +148,8 @@ def _ml_tab():
                     html.Div(id="ml-beam-mean", style={"minWidth": "220px"}),
                     html.Div(id="ml-beam-var", style={"minWidth": "220px"}),
                     html.Div(id="ml-effort", style={"minWidth": "220px"}),
-                    html.Div(id="ml-sats", style={"minWidth": "220px"}),
+                    html.Div(id="ml-saturation_series", style={"minWidth": "220px"}),
+                    html.Div(id="ml-model-status", style={"minWidth": "220px"}),
                 ],
             ),
             html.Div(
@@ -147,13 +164,16 @@ def _ml_tab():
     )
 
 
-app.layout = html.Div(
-    style={"fontFamily": "Segoe UI, sans-serif", "padding": "2em"},
+app.layout = html.Div(style={"fontFamily": "Segoe UI, sans-serif", "padding": "2em"},
+                      
     children=[
-        dcc.Tabs(id="tabs", value="control", children=[
+
+        dcc.Tabs(id="tabs", value="control", 
+            children=[
             dcc.Tab(label="Control", value="control", children=[_control_tab()]),
             dcc.Tab(label="ML", value="ml", children=[_ml_tab()]),
         ]),
+
         dcc.Interval(id="update-interval", interval=1000, n_intervals=0),
     ],
 )
@@ -167,9 +187,12 @@ app.layout = html.Div(
     Output("latest-voltage", "children"),
     Output("num-points", "children"),
     Input("update-interval", "n_intervals"),
+    State("auto-mode", "value"),
+    State("auto-rate-ms", "value"),
 )
 
-def update_graph(_):
+
+def update_graph(_, auto_mode_value, auto_rate_ms):
     
     data_frame = Back_End_Controller.get_data()
 
@@ -197,6 +220,33 @@ def update_graph(_):
     recent_voltage_measurement = f"Voltage: {data_frame['voltage'].iloc[-1]:.3f} V"
     number_of_points = f"Samples: {len(data_frame)}"
 
+        # Auto-control (guarded, rate-limited)
+    try:
+        auto_on = isinstance(auto_mode_value, (list, tuple)) and ("on" in auto_mode_value)
+        rate_ms = 500 if auto_rate_ms is None else max(100, int(auto_rate_ms))
+    except Exception:
+        auto_on, rate_ms = False, 500
+
+    # Disable auto during sweep runs
+    try:
+        st = get_sweep_status()
+        if isinstance(st, dict) and str(st.get("state", "")).lower() == "running":
+            auto_on = False
+    except Exception:
+        pass
+
+    if auto_on and propose_dac is not None:
+        try:
+            global LAST_AUTO_TS
+            now = time.time()
+            if now - LAST_AUTO_TS >= (rate_ms / 1000.0):
+                grid = np.linspace(0.0, 3.3, 34, dtype=float)
+                best_dac, _ = propose_dac(data_frame, candidate_dacs=grid)
+                if 0.0 <= best_dac <= 3.3:
+                    Back_End_Controller.send_command(f"SET {best_dac:.6f}")
+                    LAST_AUTO_TS = now
+        except Exception:
+            pass
     return figure, recent_voltage_measurement, number_of_points
 
 
@@ -208,19 +258,35 @@ def update_graph(_):
     prevent_initial_call=True,
 )
 
-def send_voltage_command(n_clicks, value):
-    if not n_clicks:
+def send_voltage_command(number_of_clicks, input_value):
+
+    if not number_of_clicks:
         raise PreventUpdate
     try:
-        if value is None:
-            return "Enter a value", {"color": "#333"}
-        v = float(value)
-        if not (0.0 <= v <= 3.3):
-            return "Out of range (0.0–3.3 V)", {"color": "red", "fontWeight": "bold"}
-        Back_End_Controller.send_command(f"SET {v:.6f}")
-        return f"Sent: SET {v:.6f}", {"color": "green", "fontWeight": "bold"}
+        if input_value is None:
+            return "Enter a value...", {"color": "#333"}
+        
+        input_voltage = float(input_value)
+
+        if not (0.0 <= input_voltage <= 3.3):
+            return "ERROR: Input out of range (0.0-3.3 V)!", {"color": "red", "fontWeight": "bold"}
+        
+        Back_End_Controller.send_command(f"SET {input_voltage:.6f}")
+
+        return f"Sent: SET {input_voltage:.6f}", {"color": "green", "fontWeight": "bold"}
     except Exception as fault:
-        return f"Error: {fault}", {"color": "red", "fontWeight": "bold"}
+        return f"ERROR: Command not set - {fault}!", {"color": "red", "fontWeight": "bold"}
+@app.callback(
+    Output("save-dataset-ack", "children"),
+    Input("save-dataset-toggle", "value"),
+)
+def _toggle_save_dataset(value):
+    enabled = isinstance(value, (list, tuple)) and ("on" in value)
+    try:
+        getattr(Back_End_Controller, "set_save_dataset_enabled", lambda _: None)(enabled)
+    except Exception:
+        pass
+    return f"Save after sweep: {'ON' if enabled else 'OFF'}"
 
 # -------------------------------------------------------------------------
 #                     Input validation (UI Interface)
@@ -231,17 +297,19 @@ def send_voltage_command(n_clicks, value):
     Input("voltage-input", "value"),
 )
 
-def _validate_voltage_input(val):
-    base = {"width": "140px"}
-    if val is None:
-        return base
+def _validate_voltage_input(input_value):
+    base_style = {"width": "140px"}
+
+    if input_value is None:
+        return base_style
     try:
-        fval = float(val)
+        fval = float(input_value)
     except Exception:
-        return {**base, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
+        return {** base_style, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
+    
     if 0.0 <= fval <= 3.3:
-        return base
-    return {**base, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
+        return  base_style
+    return {** base_style, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
 
 # -------------------------------------------------------------------------
 #                             Status updater
@@ -252,6 +320,7 @@ def _validate_voltage_input(val):
     Output("status", "style"),
     Input("update-interval", "n_intervals"),
 )
+
 def update_status(_):
     try:
         status_text = getattr(Back_End_Controller, "get_status", lambda: "Connecting...")()
@@ -278,31 +347,41 @@ def update_status(_):
     Input("pwm4", "value"),
     Input("pwm5", "value"),
     Input("sw6", "value"),
+
     prevent_initial_call=True,
 )
-def update_pins(v1, v2, v3, v4, v5, sw6):
+
+def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_voltage_5, logic_pin):
+
+    pin_voltages = [pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_voltage_5]
+
     try:
-        if v1 is not None:
-            Back_End_Controller.set_pwm(1, int(v1))
-        if v2 is not None:
-            Back_End_Controller.set_pwm(2, int(v2))
-        if v3 is not None:
-            Back_End_Controller.set_pwm(3, int(v3))
-        if v4 is not None:
-            Back_End_Controller.set_pwm(4, int(v4))
-        if v5 is not None:
-            Back_End_Controller.set_pwm(5, int(v5))
+        for channel_index, value_index in enumerate(pin_voltages, start=1):
 
-        is_on = isinstance(sw6, (list, tuple)) and ("on" in sw6)
-        Back_End_Controller.set_switch(bool(is_on))
+            if value_index is None:
+                continue
 
-        msg = (
-            f"Pins updated: squeeze_plate={v1}, ion_source={v2}, wein_filter={v3}, "
-            f"cone_1={v4}, cone_2={v5}, switch_logic={'ON' if is_on else 'OFF'}"
-        )
-        return msg, {"color": "green", "fontWeight": "bold"}
+        try:
+            Back_End_Controller.set_pwm(channel_index, int(value_index))
+        except (TypeError, ValueError):
+            pass
+
+        switch_status = isinstance(logic_pin, (list, tuple)) and ("on" in logic_pin)
+        Back_End_Controller.set_switch(bool(switch_status))
+
+        status_message = (
+            f"Pins updated: squeeze_plate={pin_voltages[0]}, "
+            f"ion_source={pin_voltages[1]}, "
+            f"wein_filter={pin_voltages[2]}, "
+            f"cone_1={pin_voltages[3]}, "
+            f"cone_2={pin_voltages[4]}, "
+            f"switch_logic={'ON' if switch_status else 'OFF'}"
+            )        
+        
+        return status_message, {"color": "green", "fontWeight": "bold"}
+    
     except Exception as fault:
-        return f"Error updating pins: {fault}", {"color": "red", "fontWeight": "bold"}
+        return f"ERROR: Pin update failed - {fault}!", {"color": "red", "fontWeight": "bold"}
 
 # -------------------------------------------------------------------------
 #                               Pin statuses
@@ -314,26 +393,32 @@ def update_pins(v1, v2, v3, v4, v5, sw6):
 )
 
 def update_pin_status(_):
+
     try:
-        status_text = getattr(Back_End_Controller, "get_status", lambda: "Connecting...")()
+        connection_status = getattr(Back_End_Controller, "get_status", lambda: "Connecting...")()
     except Exception:
-        status_text = "Connecting..."
+        connection_status = "Connecting..."
 
-    pins = getattr(Back_End_Controller, "get_pins", lambda: {"names": [], "values": [], "timestamp": 0.0})()
-    names = pins.get("names", [])
-    values = pins.get("values", [])
+    pin_snapshot = getattr(
+        Back_End_Controller,
+        "get_pins",
+        lambda: {"names": [], "values": [], "timestamp": 0.0},
+    )()
 
-    if "Connected" in str(status_text):
+    pin_names = pin_snapshot.get("names", [])
+    pin_values = pin_snapshot.get("values", [])
+
+    if "Connected" in str(connection_status):
         try:
             Back_End_Controller.send_command("PINS")
         except Exception:
             pass
 
-    def chip(label, val, state):
+    def chip(pin_label, pin_value, connection_state):
         color = {
             "CONNECTED": "green",
             "DISCONNECTED": "red",
-        }.get(state, "#333")
+        }.get(connection_state, "#333")
         return html.Div(
             style={
                 "border": f"1px solid {color}",
@@ -342,25 +427,32 @@ def update_pin_status(_):
                 "minWidth": "180px",
             },
             children=[
-                html.Span(f"{label}: ", style={"fontWeight": "bold"}),
-                html.Span(str(val)),
-                html.Span(f"  ({state})", style={"marginLeft": "0.4em", "color": color}),
+                html.Span(f"{pin_label}: ", style={"fontWeight": "bold"}),
+                html.Span(str(pin_value)),
+                html.Span(f"  ({connection_state})", style={"marginLeft": "0.4em", "color": color}),
             ],
         )
 
-    if not names or not values:
+    if not pin_names or not pin_values:
         return [chip("Pins", "--", "DISCONNECTED")]
 
-    state = "DISCONNECTED"
-    if str(status_text).startswith("Simulated"):
-        state = "DISCONNECTED"
+    # Determine connection state from status text
+    if str(connection_status).startswith("Simulated"):
+        connection_state = "DISCONNECTED"
+    elif "Connected" in str(connection_status):
+        connection_state = "CONNECTED"
+    else:
+        connection_state = "DISCONNECTED"
 
-    disp_vals = list(values)
-    if len(disp_vals) >= 6:
-        disp_vals[5] = "ON" if int(disp_vals[5]) else "OFF"
+    value_display = list(pin_values)
+    if len(value_display) >= 6:
+        value_display[5] = "ON" if int(value_display[5]) else "OFF"
 
-    chips = [chip(n, disp_vals[i] if i < len(disp_vals) else "--", state) for i, n in enumerate(names)]
-    return chips
+    pin_status_chips = [
+        chip(name, value_display[i] if i < len(value_display) else "--", connection_state)
+        for i, name in enumerate(pin_names)
+    ]
+    return pin_status_chips
 
 
 # -------------------------------------------------------------------------
@@ -368,6 +460,7 @@ def update_pin_status(_):
 # -------------------------------------------------------------------------
 
 @app.callback(
+        
     Output("sweep-status", "children"),
     Output("sweep-btn", "disabled"),
     Output("sweep-progress-inner", "style"),
@@ -385,61 +478,66 @@ def update_pin_status(_):
     prevent_initial_call=False,
 )
 
-def handle_training_sweep(_, start_clicks, stop_clicks, min_v, max_v, step, dwell_s, epochs):
+def handle_training_sweep(_, start_click_count, stop_click_count, min_voltage, max_voltage, step, dwell_s,  number_of_epochs):
     
-    triggered_id = None
+    trigger_id = None
     
     try:
-        ctx = dash.callback_context
+        callback_context = dash.callback_context
 
-        if ctx and ctx.triggered:
-            triggered_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        if callback_context and callback_context.triggered:
+            trigger_id = callback_context.triggered[0]["prop_id"].split(".")[0]
 
     except Exception:
-        triggered_id = None
+        trigger_id = None
 
-    if triggered_id == "sweep-btn" and start_clicks and int(start_clicks) > 0:
+    if trigger_id == "sweep-btn" and start_click_count and int(start_click_count) > 0:
 
         try:
-            min_v = 0.0 if min_v is None else float(min_v)
-            max_v = 3.3 if max_v is None else float(max_v)
-            step = 0.05 if step is None or step <= 0 else float(step)
-            dwell_s = 0.05 if dwell_s is None or dwell_s < 0 else float(dwell_s)
-            epochs = 10 if epochs is None or int(epochs) <= 0 else int(epochs)
+            min_sweep_voltage = 0.0 if min_voltage is None else float(min_voltage)
+            max_sweep_voltage = 3.3 if max_voltage is None else float(max_voltage)
 
-            started = start_training_sweep(min_v=min_v, max_v=max_v, step=step, dwell_s=dwell_s, epochs=epochs)
+            sweep_step = 0.05 if step is None or step <= 0 else float(step)
+            dwell_seconds = 0.05 if dwell_s is None or dwell_s < 0 else float(dwell_s)
+            number_of_epochs = 10 if  number_of_epochs is None or int( number_of_epochs) <= 0 else int( number_of_epochs)
+
+            started = start_training_sweep(min_v=min_sweep_voltage, max_v=max_sweep_voltage, step=sweep_step, dwell_s=dwell_seconds, epochs=int(number_of_epochs) if number_of_epochs else 10)
 
             if started:
                 log.info("Training sweep initiated by user...")
-        except Exception as fault:
-            log.error(f"Failed to start training sweep: {fault}")
 
-    elif triggered_id == "sweep-stop-btn" and stop_clicks and int(stop_clicks) > 0:
+        except Exception as fault:
+            log.error(f"ERROR: Failed to start training sweep - {fault}!")
+
+    elif trigger_id == "sweep-stop-btn" and stop_click_count and int(stop_click_count) > 0:
         try:
             stop_training_sweep()
             log.info("Training sweep cancelled by user...")
         except Exception as fault:
-            log.error(f"Failed to stop training sweep: {fault}")
+            log.error(f"ERROR: Failed to stop training sweep - {fault}!")
 
     try:
-        status = get_sweep_status()
+        sweep_status = get_sweep_status()
     except Exception:
-        status = {"state": "unknown", "progress": 0.0, "message": ""}
+        sweep_status = {"state": "unknown", "progress": 0.0, "message": ""}
 
-    state = str(status.get("state", "idle"))
-    progress = float(status.get("progress", 0.0))
-    message = str(status.get("message", ""))
+    sweep_state = str(sweep_status.get("state", "idle"))
+    sweep_progress = float(sweep_status.get("progress", 0.0))
+    sweep_message = str(sweep_status.get("message", ""))
 
-    percent_completion = int(max(0.0, min(1.0, progress)) * 100)
-    text = f"Sweep: {state} ({percent_completion}%)" + (f" — {message}" if message else "")
-    disabled = state == "running"
+    percent_completion = int(max(0.0, min(1.0, sweep_progress)) * 100)
+    text = f"Sweep: {sweep_state} ({percent_completion}%)" + (f" – {sweep_message}" if sweep_message else "")
+    disabled = sweep_state == "running"
 
-    if state == "running":
+    if sweep_state == "running":
         color = "#3498db"  
-    elif state == "completed":
+
+    elif sweep_state == "completed":
         color = "#2ecc71"  
-    elif state == "failed":
+
+    elif sweep_state == "failed":
         color = "#e74c3c"  
+
     else:
         color = "#ccc"
 
@@ -458,57 +556,205 @@ def handle_training_sweep(_, start_clicks, stop_clicks, min_v, max_v, step, dwel
     Output("ml-beam-mean", "children"),
     Output("ml-beam-var", "children"),
     Output("ml-effort", "children"),
-    Output("ml-sats", "children"),
+    Output("ml-saturation_series", "children"),
+    Output("ml-model-status", "children"),
     Input("update-interval", "n_intervals"),
 )
+
 def update_ml_tab(_):
+
     try:
-        snap = get_ml_metrics()
+        metrics_snapshot = get_ml_metrics()
     except Exception:
-        snap = {}
+        metrics_snapshot = {}
 
-    t = snap.get("time_series", [])
-    v = snap.get("beam_series", [])
-    du2 = snap.get("control_effort_series", [])
-    sats = snap.get("saturations_series", [])
+    sample_times_series = metrics_snapshot.get("Sample_Times_series", [])
+    voltage_time_series = metrics_snapshot.get("Input_Voltage_series", [])
+    control_effort_series = metrics_snapshot.get("Pin_Control_Changes_series", [])
+    saturation_series = metrics_snapshot.get("Saturation_Indicators_series", [])
 
-    # Beam graph
-    if t and v:
-        beam_fig = go.Figure(data=[go.Scatter(x=pd.to_datetime(t, unit="s"), y=v, mode="lines", line=dict(color="#0066cc"))])
-        beam_fig.update_layout(template="plotly_white", margin=dict(l=40, r=10, t=30, b=30), xaxis_title="Time", yaxis_title="Diode voltage (V)")
+    if sample_times_series and voltage_time_series:
+        beam_figure = go.Figure(data=[go.Scatter(x=pd.to_datetime(sample_times_series, unit="s"), y=voltage_time_series, mode="lines", line=dict(color="#1f77b4", width=3))])
+        beam_figure.update_layout(template="plotly_white", margin=dict(l=40, r=10, t=30, b=30), xaxis_title="Time", yaxis_title="Diode voltage (V)")
+        beam_figure.update_xaxes(showgrid=True, gridcolor="#e6e6e6", gridwidth=1, zeroline=False, linecolor="#444", mirror=True, ticks="outside")
+        beam_figure.update_yaxes(showgrid=True, gridcolor="#e6e6e6", gridwidth=1, zeroline=False, linecolor="#444", mirror=True, ticks="outside")
+    
     else:
-        beam_fig = go.Figure()
+       beam_figure = go.Figure()
 
-    # Effort graph
-    if t and du2:
-        eff_fig = go.Figure(data=[go.Scatter(x=pd.to_datetime(t, unit="s"), y=du2, mode="lines", line=dict(color="#cc6600"))])
-        eff_fig.update_layout(template="plotly_white", margin=dict(l=40, r=10, t=30, b=30), xaxis_title="Time", yaxis_title="Control effort (||Δu||^2)")
+    if sample_times_series and control_effort_series:
+        effort_figure = go.Figure(data=[go.Scatter(x=pd.to_datetime(sample_times_series, unit="s"), y=control_effort_series, mode="lines", line=dict(color="#2e7d32", width=3))])
+        effort_figure.update_layout(template="plotly_white", margin=dict(l=40, r=10, t=30, b=30), xaxis_title="Time", yaxis_title="Control effort (||Î”u||^2)")
+    
     else:
-        eff_fig = go.Figure()
+        effort_figure = go.Figure()
 
-    # Attribution bar (saliency / shap placeholder)
-    names = snap.get("feature_names", [])
-    sal = snap.get("saliency", [])
-    if names and sal and len(names) == len(sal):
-        attrib_fig = go.Figure(data=[go.Bar(x=names, y=np.abs(np.array(sal)).tolist(), marker_color="#2c3e50")])
-        attrib_fig.update_layout(template="plotly_white", margin=dict(l=40, r=10, t=30, b=30), yaxis_title="|Attribution|")
+    try:
+        effort_figure.update_xaxes(showgrid=True, gridcolor="#e6e6e6", gridwidth=1, zeroline=False, linecolor="#444", mirror=True, ticks="outside")
+        effort_figure.update_yaxes(showgrid=True, gridcolor="#e6e6e6", gridwidth=1, zeroline=False, linecolor="#444", mirror=True, ticks="outside")
+        effort_figure.update_layout(font=dict(family="Segoe UI, sans-serif", size=12, color="#111"), plot_bgcolor="#ffffff", paper_bgcolor="#ffffff", yaxis_title="Control effort (||du||^2)")
+    except Exception:
+        pass
+
+    if sample_times_series and saturation_series:
+        try:
+            effort_figure.add_trace(
+                go.Scatter(
+                    x=pd.to_datetime(sample_times_series, unit="s"),
+                    y=saturation_series,
+                    mode="lines",
+                    line=dict(color="#e74c3c", width=2),
+                    name="Saturation",
+                    yaxis="y2",
+                )
+            )
+            effort_figure.update_layout(
+                yaxis2=dict(
+                    title="Saturation",
+                    overlaying="y",
+                    side="right",
+                    range=[-0.05, 1.05],
+                    showgrid=False,
+                    zeroline=False,
+                    tickmode="array",
+                    tickvals=[0, 1],
+                    ticktext=["0", "1"],
+                    linecolor="#444",
+                )
+            )
+
+            try:
+                for tr in list(effort_figure.data):
+                    if getattr(tr, "mode", "") == "lines":
+                        tr.showlegend = False
+            except Exception:
+                pass
+            
+            effort_figure.add_trace(
+                go.Scatter(
+                    x=[None], y=[None], mode="markers",
+                    marker=dict(symbol="square", size=12, color="#2e7d32", line=dict(color="#000", width=1)),
+                    name="Correction effort",
+                    showlegend=True,
+                )
+            )
+            effort_figure.add_trace(
+                go.Scatter(
+                    x=[None], y=[None], mode="markers",
+                    marker=dict(symbol="square", size=12, color="#e74c3c", line=dict(color="#000", width=1)),
+                    name="Saturation",
+                    showlegend=True,
+                )
+            )
+            effort_figure.update_layout(
+                legend=dict(
+                    orientation="v",
+                    y=1.0, x=1.0,
+                    yanchor="top", xanchor="right",
+                    bgcolor="#ffffff",
+                    bordercolor="#000000", borderwidth=0.5,
+                    font=dict(size=11, color="#111"),
+                )
+            )
+        except Exception:
+            pass
+
+    feature_names = metrics_snapshot.get("Feature_Names", [])
+    feature_saliency = metrics_snapshot.get("Feature_Saliency", [])
+    
+    if feature_names and feature_saliency and len(feature_names) == len(feature_saliency):
+        attribution_figure = go.Figure(data=[go.Bar(x=feature_names, y=np.abs(np.array(feature_saliency)).tolist(), marker_color="#2c3e50")])
+        attribution_figure.update_layout(template="plotly_white", margin=dict(l=40, r=10, t=30, b=30), yaxis_title="|Attribution|")
+    
     else:
-        attrib_fig = go.Figure()
-        attrib_fig.add_annotation(text="Attribution unavailable (attach pipeline+controller or install SHAP)", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
-        attrib_fig.update_layout(template="plotly_white", margin=dict(l=40, r=10, t=30, b=30))
+        attribution_figure = go.Figure()
+        attribution_figure.add_annotation(text="Attribution unavailable (attach pipeline+controller or install SHAP)", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+        attribution_figure.update_layout(template="plotly_white", margin=dict(l=40, r=10, t=30, b=30))
 
-    bm = snap.get("beam_mean")
-    bv = snap.get("beam_var")
-    em = snap.get("effort_mean")
-    st = snap.get("saturations_total", 0)
+    try:
+        attribution_figure.update_xaxes(showgrid=False, zeroline=False, linecolor="#444", mirror=True, ticks="outside")
+        attribution_figure.update_yaxes(showgrid=True, gridcolor="#e6e6e6", gridwidth=1, zeroline=False, linecolor="#444", mirror=True, ticks="outside")
+        attribution_figure.update_layout(font=dict(family="Segoe UI, sans-serif", size=12, color="#111"), plot_bgcolor="#ffffff", paper_bgcolor="#ffffff")
+    except Exception:
+        pass
 
-    bm_txt = f"Beam mean: {bm:.3f} V" if bm is not None else "Beam mean: --"
-    bv_txt = f"Beam var: {bv:.5f}" if bv is not None else "Beam var: --"
-    em_txt = f"Effort (avg ||Δu||^2): {em:.2f}" if em is not None else "Effort: --"
-    st_txt = f"Saturations (window): {int(st)}"
+    mean_beam_voltage = metrics_snapshot.get("Input_Voltage_mean")
+    beam_variance = metrics_snapshot.get("Input_Voltage_var")
+    mean_control_effort = metrics_snapshot.get("Pin_Control_Changes_mean")
+    saturation_indicators = metrics_snapshot.get("Saturation_Indicators_total", 0)
 
-    return beam_fig, eff_fig, attrib_fig, bm_txt, bv_txt, em_txt, st_txt
+    beam_mean_text = f"{mean_beam_voltage:.3f} V" if mean_beam_voltage is not None else "--"
+    beam_var_text = f"{beam_variance:.5f}" if beam_variance is not None else "--"
+    effort_text = f"{mean_control_effort:.2f}" if mean_control_effort is not None else "--"
+    saturation_text = f"{int(saturation_indicators)}"
+    # Model status: compute trained state and age text
+    model_status_text = "Model: not trained"
+    trained = False
+    age_text = ""
+    try:
+        mi = get_model_info()
+        sec = mi.get("last_train_ago_sec")
+        if sec is not None:
+            sec = float(sec)
+            trained = True
+            if sec < 60:
+                age_text = f"updated {sec:.0f}s ago"
+            elif sec < 3600:
+                age_text = f"updated {sec/60:.1f} min ago"
+            else:
+                age_text = f"updated {sec/3600:.1f} h ago"
+    except Exception:
+        pass
+    state_color = "green" if trained else "red"
 
+    card_style = {
+        "border": "1px solid #ddd",
+        "borderRadius": "6px",
+        "padding": "0.5em 0.75em",
+        "minWidth": "220px",
+        "background": "#fff",
+        "boxShadow": "0 1px 3px rgba(0,0,0,0.08)",
+        "color": "#111",
+    }
+
+    label_style = {"fontWeight": "bold", "marginRight": "0.35em", "color": "#111"}
+    value_style = {"fontWeight": "bold", "color": "#111"}
+
+    mean_beam_outputs = html.Div([
+        html.Span("Beam mean:", style=label_style), html.Span(beam_mean_text, style=value_style)
+    ], style=card_style)
+
+    mean_variance_outputs = html.Div([
+        html.Span("Beam var:", style=label_style), html.Span(beam_var_text, style=value_style)
+    ], style=card_style)
+
+    mean_control_effort_outputs = html.Div([
+        html.Span("Effort (avg ||du||^2):", style=label_style), html.Span(effort_text, style=value_style)
+    ], style=card_style)
+
+    saturation_indicator_outputs = html.Div([
+        html.Span("Saturations (window):", style=label_style), html.Span(saturation_text, style=value_style)
+    ], style=card_style)
+
+    model_status_outputs = html.Div(
+        [
+            html.Span("Model:", style=label_style),
+            html.Span("trained" if trained else "not trained", style={"fontWeight": "bold", "color": state_color}),
+            html.Span(f"  ({age_text})" if trained else "", style={"marginLeft": "0.4em", "color": "#333"}),
+        ],
+        style={**card_style, "border": f"1px solid {state_color}"},
+    )
+
+    return (
+        beam_figure,
+        effort_figure,
+        attribution_figure,
+        mean_beam_outputs,
+        mean_variance_outputs,
+        mean_control_effort_outputs,
+        saturation_indicator_outputs,
+        model_status_outputs,
+    )
 # -------------------------------------------------------------------------
 #                               Entry point
 # -------------------------------------------------------------------------
@@ -517,3 +763,11 @@ if __name__ == "__main__":
 
     log.info("Launching ESP-12F Control Dashboard...")
     app.run(debug=False, host="0.0.0.0", port=8050)
+
+
+
+
+
+
+
+

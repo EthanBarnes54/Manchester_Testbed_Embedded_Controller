@@ -1,20 +1,22 @@
-# ----------  Neural Network Controller (PyTorch RNN)  ---------- #
+# ----------------- RNN Auto controller ----------------- #
 
-# Learns from the distribution from the diode output voltage
-# data to predict outcomes conditioned on DAC, enabling live control.
+#   Learns from diode voltage sequences to predict outcomes 
+#   conditioned on DAC, supporting live control logic and 
+#   offline training.
 
-# --------------------------------------------------------------- #
+# ------------------------------------------------------- #
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import numpy as np
-import pandas as pd
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import r2_score
 import logging
 from pathlib import Path
 from collections import deque
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.metrics import r2_score
+from sklearn.preprocessing import StandardScaler
 
 __all__ = ["RNNController"]
 
@@ -23,9 +25,7 @@ __all__ = ["RNNController"]
 # -------------------------------------------------------
 
 DEVICE = torch.device("cpu")
-
 MODEL_PATH = Path("RNN_model.pt")
-
 SEQUENCE_LENGTH = 10
 HIDDEN_SIZE = 64
 LEARNING_RATE = 1e-3
@@ -47,13 +47,13 @@ logging.basicConfig(
 
 log = logging.getLogger("RNN_Controller")
 
+
 # -------------------------------------------------------
 #                    Model Architecture
 # -------------------------------------------------------
 
 
 class _RNN(nn.Module):
-
     def __init__(self, input_size, hidden_size, output_size, use_elu_head: bool = True):
         super().__init__()
         self.gru = nn.GRU(input_size, hidden_size, batch_first=True)
@@ -94,11 +94,11 @@ def load_previous_weights(model, scaler):
             log.info("Loaded model state_dict (no scaler in checkpoint).")
         return True
     except Exception as fault:
-        log.warning(f"No valid checkpoint found: {fault}")
+        log.warning(f"ERROR: No valid checkpoint found - {fault}!")
         return False
 
 
-def save_NN_weights(model, scaler):
+def save_nn_weights(model, scaler):
     payload = {
         "state_dict": model.state_dict(),
     }
@@ -108,22 +108,25 @@ def save_NN_weights(model, scaler):
             "scale_": scaler.scale_.tolist(),
         }
     torch.save(payload, MODEL_PATH)
-    log.info(f"Model checkpoint saved to {MODEL_PATH}")
+    log.info(f"Model checkpoint saved to {MODEL_PATH}...")
+
 
 scaler = StandardScaler()
+
 
 def model_init(retrain: bool = False):
     model = _RNN(INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE, use_elu_head=True).to(DEVICE)
     if not retrain and MODEL_PATH.exists():
-       load_previous_weights(model, scaler)
+        load_previous_weights(model, scaler)
     else:
-        log.info("Initialized new model weights (fresh start).")
+        log.info("Reset model weights. Please perofrm a retrain before operation...")
     return model
 
 
 model = model_init()
-optimizer = optim.Adam(model.parameters(), learning_rate=LEARNING_RATE)
+optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 criterion = nn.MSELoss()
+
 
 # -------------------------------------------------------
 #                   Data Preparation
@@ -133,13 +136,8 @@ criterion = nn.MSELoss()
 def _check_scaler_fitted():
     return hasattr(scaler, "mean_") and hasattr(scaler, "scale_")
 
+def prepare_sequences(data_frame: pd.DataFrame, sequence_length: int = SEQUENCE_LENGTH, fit_scaler: bool = False,):
 
-def prepare_sequences(
-    data_frame: pd.DataFrame,
-    sequence_length: int = SEQUENCE_LENGTH,
-    fit_scaler: bool = False,
-):
-    
     df = data_frame.dropna(subset=["dac", "voltage"]).copy()
     if len(df) < sequence_length:
         raise ValueError("Insufficient data for sequence preparation.")
@@ -151,7 +149,6 @@ def prepare_sequences(
         data = scaler.transform(features)
 
     X, y = [], []
-    
     for i in range(sequence_length - 1, len(data)):
         X.append(data[i - sequence_length + 1 : i + 1])
         y.append(data[i, 1])  # voltage at time i
@@ -173,9 +170,7 @@ def train_model(
 ):
     global model, optimizer
     model.train()
-
     try:
-        
         X, y = prepare_sequences(data_frame, fit_scaler=True)
     except ValueError:
         log.warning("Insufficient data for training...")
@@ -196,7 +191,7 @@ def train_model(
             f"Epoch {epoch+1}/{number_of_epochs} | Loss={loss.item():.6f} | R2={r2:.3f}"
         )
 
-    save_NN_weights(model, scaler)
+    save_nn_weights(model, scaler)
 
 
 # -------------------------------------------------------
@@ -205,7 +200,6 @@ def train_model(
 
 
 def propose_dac(data_window: pd.DataFrame, candidate_dacs: np.ndarray):
-   
     if len(data_window) < SEQUENCE_LENGTH - 1:
         raise ValueError("Not enough history to propose DAC.")
     if not _check_scaler_fitted():
@@ -213,25 +207,19 @@ def propose_dac(data_window: pd.DataFrame, candidate_dacs: np.ndarray):
 
     model.eval()
     hist = data_window.tail(SEQUENCE_LENGTH - 1)[["dac", "voltage"]].values
-
     last_v = data_window["voltage"].iloc[-1]
     sequences = []
-
     for i in candidate_dacs:
         sequence = np.vstack([hist, np.array([i, last_v], dtype=float)])
         sequences.append(sequence)
-
     sequences = np.stack(sequences, axis=0)
-
     B, T, F = sequences.shape
     flat = sequences.reshape(B * T, F)
     flat_scaled = scaler.transform(flat)
     seq_scaled = flat_scaled.reshape(B, T, F)
-
     with torch.no_grad():
         x = torch.tensor(seq_scaled, dtype=torch.float32).to(DEVICE)
         preds = model(x).squeeze(-1).cpu().numpy()
-
     best_idx = int(np.argmax(preds))
     return float(candidate_dacs[best_idx]), float(preds[best_idx])
 
@@ -244,11 +232,9 @@ def propose_dac(data_window: pd.DataFrame, candidate_dacs: np.ndarray):
 def online_update(new_data_frame: pd.DataFrame, grad_clip: float = 1.0):
     model.train()
     try:
-    
         X, y = prepare_sequences(new_data_frame, fit_scaler=True)
     except ValueError:
         return
-
     optimizer.zero_grad(set_to_none=True)
     preds = model(X)
     loss = criterion(preds, y)
@@ -256,8 +242,7 @@ def online_update(new_data_frame: pd.DataFrame, grad_clip: float = 1.0):
     if grad_clip is not None and grad_clip > 0:
         nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
-
-    save_NN_weights(model, scaler)
+    save_nn_weights(model, scaler)
     log.info(f"Online update done | Loss={loss.item():.6f}")
 
 
@@ -265,8 +250,8 @@ def online_update(new_data_frame: pd.DataFrame, grad_clip: float = 1.0):
 #                 Data Pipeline Integration
 # -------------------------------------------------------
 
-class RNNController:
 
+class RNNController:
     def __init__(
         self,
         feature_dim: int,
@@ -277,7 +262,7 @@ class RNNController:
     ):
         self.input_size = int(5 + feature_dim)
         self.model = _RNN(self.input_size, hidden_size, output_size, use_elu_head=use_elu_head).to(DEVICE)
-        self.optimizer = optim.Adam(self.model.parameters(), learning_rate=learning_rate)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
         self.criterion = nn.MSELoss()
         self.sequence_length = SEQUENCE_LENGTH
 
@@ -290,33 +275,28 @@ class RNNController:
 
     @staticmethod
     def build_input_vector(pins_state: np.ndarray, pipeline_features: np.ndarray) -> np.ndarray:
-
         pins = np.asarray(pins_state, dtype=float).reshape(-1)
         feats = np.asarray(pipeline_features, dtype=float).reshape(-1)
-
         if pins.shape[0] != 5:
             raise ValueError("ERROR: Must be 5 pins!")
         return np.concatenate([pins, feats], axis=0)
 
     def predict_from_history(self, history_inputs: np.ndarray) -> np.ndarray:
-
         x = np.asarray(history_inputs, dtype=float)
-
         if x.ndim != 2 or x.shape[1] != self.input_size:
             raise ValueError(f"ERROR: Data histories must be of (T, {self.input_size}) dimensions!")
         if x.shape[0] < self.sequence_length:
-            raise ValueError(f"ERROR: Predictions require at least {self.sequence_length} pieces of data history!")
-
+            raise ValueError(
+                f"ERROR: Predictions require at least {self.sequence_length} pieces of data history!"
+            )
         seq = x[-self.sequence_length :][None, ...]
         self.model.eval()
-
         with torch.no_grad():
             t = torch.tensor(seq, dtype=torch.float32).to(DEVICE)
             y = self.model(t).cpu().numpy().reshape(-1)
         return y
 
     def step_features(self, pins_state: np.ndarray, pipeline_features: np.ndarray):
-
         u = self.build_input_vector(pins_state, pipeline_features)
         self.history.append(u)
         if len(self.history) < self.sequence_length:
@@ -324,12 +304,9 @@ class RNNController:
         return self.predict_from_history(np.stack(list(self.history), axis=0))
 
     def data_chunk(self, pins_state: np.ndarray, voltages_chunk: np.ndarray):
-
         if self.pipeline is None:
             raise RuntimeError("ERROR: No pipeline attached! Attach the pipeline first...")
-        
         outputs = []
-
         for features in self.pipeline.process_chunk(voltages_chunk):
             y = self.step_features(pins_state, features)
             if y is not None:
@@ -352,4 +329,5 @@ class RNNController:
 
 
 if __name__ == "__main__":
-    log.info("RNN controller module ready. No standalone execution.")
+    log.info("RNN controller module ready! No standalone execution possible...")
+
