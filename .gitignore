@@ -1,0 +1,12 @@
+*.json
+*.checksum
+/Embedded Controller (Automatic)/.pio/libdeps/esp32_debug/Unity/examples/example_1
+*.md
+*.yml
+/Embedded Controller (Automatic)/.pio/libdeps/esp32dev/Adafruit ADS1X15
+/Embedded Controller (Automatic)/.pio/libdeps/esp32dev/Adafruit BusIO
+/Embedded Controller (Automatic)/.pio/libdeps/esp32dev/Adafruit MCP4725
+/Embedded Controller (Automatic)/.pio/libdeps/esp32dev/ArduinoJson
+*.dat
+/Embedded Controller (Automatic)/.pio/libdeps/esp32dev/Unity/examples/example_1
+/Embedded Controller (Automatic)/.pio/libdeps/esp32dev/Unity/examples/example_2
