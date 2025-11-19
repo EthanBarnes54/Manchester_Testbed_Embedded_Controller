@@ -27,17 +27,17 @@ Adafruit_MCP4725 dac;
 
 const int LED_PIN = 2; 
 
-float TargetVoltage = 0.0;
-unsigned long lastHeartbeat = 0;
-unsigned long lastMeasurementMs = 0;
+float target_voltage = 0.0;
+unsigned long last_heartbeat_ms = 0;
+unsigned long last_measurement_ms = 0;
 
 // Automatic switching for logic output (channel 6)
-bool switchAutoEnabled = false;
-unsigned long switchPeriodUs = 0;
-hw_timer_t* switchTimer = nullptr;
-portMUX_TYPE switchMux = portMUX_INITIALIZER_UNLOCKED;
+bool switch_auto_enabled = false;
+unsigned long switch_period_us = 0;
+hw_timer_t* switch_timer = nullptr;
+portMUX_TYPE switch_mux = portMUX_INITIALIZER_UNLOCKED;
 
-String commandBuffer;
+String command_buffer;
 
 #ifndef SQUEEZE_PLATE_PIN
 #define SQUEEZE_PLATE_PIN 25  
@@ -59,14 +59,14 @@ String commandBuffer;
 #endif
 
 const int CHANNEL_PINS[6] = {SQUEEZE_PLATE_PIN, ION_SOURCE_PIN, WEIN_FILTER_PIN, CONE_1_PIN, CONE_2_PIN, SWITCH_LOGIC_PIN};
-int channelValues[6] = {0, 0, 0, 0, 0, 0};
+int channel_values[6] = {0, 0, 0, 0, 0, 0};
 
 static const int PWM_FREQ = 5000;         
 static const int PWM_RESOLUTION = 10;     
 static const int PWM_MAX = (1 << PWM_RESOLUTION) - 1;
 static const int LEDC_CHANNELS[5] = {0, 1, 2, 3, 4};
 
-static inline void fastSetSwitchLevel(bool high) {
+static inline void fast_set_switch_level(bool high) {
   const uint32_t mask = (1UL << SWITCH_LOGIC_PIN);
   if (high) {
     GPIO.out_w1ts = mask;
@@ -75,102 +75,102 @@ static inline void fastSetSwitchLevel(bool high) {
   }
 }
 
-void IRAM_ATTR onSwitchTimer() {
-  portENTER_CRITICAL_ISR(&switchMux);
-  const bool currentlyHigh = (channelValues[5] != 0);
-  const bool nextState = !currentlyHigh;
-  fastSetSwitchLevel(nextState);
-  channelValues[5] = nextState ? 1 : 0;
-  portEXIT_CRITICAL_ISR(&switchMux);
+void IRAM_ATTR on_switch_timer() {
+  portENTER_CRITICAL_ISR(&switch_mux);
+  const bool currently_high = (channel_values[5] != 0);
+  const bool next_state = !currently_high;
+  fast_set_switch_level(next_state);
+  channel_values[5] = next_state ? 1 : 0;
+  portEXIT_CRITICAL_ISR(&switch_mux);
 }
 
-bool configureSwitchAutomation(unsigned long periodUs) {
-  if (switchTimer == nullptr) {
+bool configure_switch_automation(unsigned long period_us) {
+  if (switch_timer == nullptr) {
     return false;
   }
-  portENTER_CRITICAL(&switchMux);
-  switchPeriodUs = periodUs;
-  switchAutoEnabled = true;
-  timerAlarmWrite(switchTimer, switchPeriodUs, true);
-  timerAlarmEnable(switchTimer);
-  portEXIT_CRITICAL(&switchMux);
+  portENTER_CRITICAL(&switch_mux);
+  switch_period_us = period_us;
+  switch_auto_enabled = true;
+  timerAlarmWrite(switch_timer, switch_period_us, true);
+  timerAlarmEnable(switch_timer);
+  portEXIT_CRITICAL(&switch_mux);
   return true;
 }
 
-void stopSwitchAutomationAndSetLevel(int level) {
-  portENTER_CRITICAL(&switchMux);
-  switchAutoEnabled = false;
-  switchPeriodUs = 0;
-  if (switchTimer != nullptr) {
-    timerAlarmDisable(switchTimer);
+void stop_switch_automation_and_set_level(int switch_level) {
+  portENTER_CRITICAL(&switch_mux);
+  switch_auto_enabled = false;
+  switch_period_us = 0;
+  if (switch_timer != nullptr) {
+    timerAlarmDisable(switch_timer);
   }
-  channelValues[5] = level ? 1 : 0;
-  portEXIT_CRITICAL(&switchMux);
-  fastSetSwitchLevel(level != 0);
+  channel_values[5] = switch_level ? 1 : 0;
+  portEXIT_CRITICAL(&switch_mux);
+  fast_set_switch_level(switch_level != 0);
 }
 
-void initChannels() {
+void init_channels() {
   
   for (int i = 0; i < 5; i++) {
     pinMode(CHANNEL_PINS[i], OUTPUT);
     ledcSetup(LEDC_CHANNELS[i], PWM_FREQ, PWM_RESOLUTION);
     ledcAttachPin(CHANNEL_PINS[i], LEDC_CHANNELS[i]);
     ledcWrite(LEDC_CHANNELS[i], 0);
-    channelValues[i] = 0;
+    channel_values[i] = 0;
   }
   
   pinMode(CHANNEL_PINS[5], OUTPUT);
-  fastSetSwitchLevel(false);
-  channelValues[5] = 0;
+  fast_set_switch_level(false);
+  channel_values[5] = 0;
 }
 
-void setChannel(uint8_t idx1, int value) {
-  if (idx1 < 1 || idx1 > 6) {
+void set_channel(uint8_t channel_index_1based, int value) {
+  if (channel_index_1based < 1 || channel_index_1based > 6) {
     Serial.println("ERROR: PIN index out of range!");
     return;
   }
-  uint8_t i = idx1 - 1;
-  int pin = CHANNEL_PINS[i];
-  if (i < 5) {
+  uint8_t channel_index = channel_index_1based - 1;
+  int pin_number = CHANNEL_PINS[channel_index];
+  if (channel_index < 5) {
     if (value < 0) value = 0;
     if (value > PWM_MAX) value = PWM_MAX;
-    ledcWrite(LEDC_CHANNELS[i], value);
-    channelValues[i] = value;
-    Serial.println(String("ACK PIN ") + idx1 + " " + value);
+    ledcWrite(LEDC_CHANNELS[channel_index], value);
+    channel_values[channel_index] = value;
+    Serial.println(String("ACK PIN ") + channel_index_1based + " " + value);
   } else {
-    stopSwitchAutomationAndSetLevel(value ? 1 : 0);
-    Serial.println(String("ACK PIN ") + idx1 + " " + channelValues[i]);
+    stop_switch_automation_and_set_level(value ? 1 : 0);
+    Serial.println(String("ACK PIN ") + channel_index_1based + " " + channel_values[channel_index]);
   }
 }
 
-void reportChannels() {
-  int snapshot[6];
-  portENTER_CRITICAL(&switchMux);
-  memcpy(snapshot, channelValues, sizeof(snapshot));
-  portEXIT_CRITICAL(&switchMux);
+void report_channels() {
+  int snapshot_values[6];
+  portENTER_CRITICAL(&switch_mux);
+  memcpy(snapshot_values, channel_values, sizeof(snapshot_values));
+  portEXIT_CRITICAL(&switch_mux);
 
   Serial.print("PINS ");
-  Serial.print("squeeze_plate="); Serial.print(snapshot[0]); Serial.print(" ");
-  Serial.print("ion_source=");    Serial.print(snapshot[1]); Serial.print(" ");
-  Serial.print("wein_filter=");   Serial.print(snapshot[2]); Serial.print(" ");
-  Serial.print("cone_1=");        Serial.print(snapshot[3]); Serial.print(" ");
-  Serial.print("cone_2=");        Serial.print(snapshot[4]); Serial.print(" ");
-  Serial.print("switch_logic=");  Serial.print(snapshot[5]);
+  Serial.print("squeeze_plate="); Serial.print(snapshot_values[0]); Serial.print(" ");
+  Serial.print("ion_source=");    Serial.print(snapshot_values[1]); Serial.print(" ");
+  Serial.print("wein_filter=");   Serial.print(snapshot_values[2]); Serial.print(" ");
+  Serial.print("cone_1=");        Serial.print(snapshot_values[3]); Serial.print(" ");
+  Serial.print("cone_2=");        Serial.print(snapshot_values[4]); Serial.print(" ");
+  Serial.print("switch_logic=");  Serial.print(snapshot_values[5]);
   Serial.println("");
 }
 
-void blinkOnce(int duration = 100) {
+void blink_once(int duration_ms = 100) {
   digitalWrite(LED_PIN, HIGH);
-  delay(duration);
+  delay(duration_ms);
   digitalWrite(LED_PIN, LOW);
 }
 
-void blinkError(int flashes = 3, int duration = 100) {
-  for (int i = 0; i < flashes; i++) {
+void blink_error(int flash_count = 3, int duration_ms = 100) {
+  for (int i = 0; i < flash_count; i++) {
     digitalWrite(LED_PIN, HIGH);
-    delay(duration);
+    delay(duration_ms);
     digitalWrite(LED_PIN, LOW);
-    delay(duration);
+    delay(duration_ms);
   }
 }
 
@@ -223,14 +223,14 @@ void setup() {
 
   if (!ads.begin()) {
     LOG_ERROR("ADS1115 not found!");
-    blinkError(5);
+    blink_error(5);
   } else {
     LOG_INFO("ADS1115 ready...");
   }
 
   if (!dac.begin(0x60)) {
     LOG_ERROR("MCP4725 not found!");
-    blinkError(5);
+    blink_error(5);
   } else {
     LOG_INFO("MCP4725 ready...");
   }
@@ -238,142 +238,142 @@ void setup() {
   LOG_INFO("Setup complete. Awaiting commands...");
   digitalWrite(LED_PIN, LOW);
 
-  initChannels();
+  init_channels();
 
-  switchTimer = timerBegin(0, 80, true);
-  if (switchTimer != nullptr) {
-    timerAttachInterrupt(switchTimer, &onSwitchTimer, true);
-    timerAlarmDisable(switchTimer);
+  switch_timer = timerBegin(0, 80, true);
+  if (switch_timer != nullptr) {
+    timerAttachInterrupt(switch_timer, &on_switch_timer, true);
+    timerAlarmDisable(switch_timer);
     LOG_INFO("Switch logic timer initialised...");
   } else {
     LOG_ERROR("Failed to allocate switch logic timer. Automatic switching disabled.");
   }
 }
 
-void SetVoltage(float volts) {
+void set_voltage(float volts) {
   if (volts < 0) volts = 0;
   if (volts > 3.3) volts = 3.3;
 
   uint16_t dacValue = (uint16_t)((volts / 3.3) * 4095.0);
   dac.setVoltage(dacValue, false);
-  TargetVoltage = volts;
+  target_voltage = volts;
 
   Serial.println(String("DAC set to ") + volts + " V");
-  blinkOnce();  
+  blink_once();  
 }
 
-float ReadVoltage() {
+float read_voltage() {
   int16_t raw_voltage = ads.readADC_SingleEnded(0);
   return ads.computeVolts(raw_voltage);
 }
 
-void handleCommand(String cmd) {
-  cmd.trim();
-  if (cmd.isEmpty()) {
+void handle_command(String command) {
+  command.trim();
+  if (command.isEmpty()) {
     return;
   }
 
-  if (cmd.startsWith("SET")) {
-    float voltage_target = cmd.substring(4).toFloat();
-    SetVoltage(voltage_target);
+  if (command.startsWith("SET")) {
+    float voltage_target = command.substring(4).toFloat();
+    set_voltage(voltage_target);
     Serial.println("ACK SET");
   }
-  else if (cmd.startsWith("PIN")) {
-    int s1 = cmd.indexOf(' ');
-    int s2 = cmd.indexOf(' ', s1 + 1);
-    if (s1 > 0 && s2 > s1) {
-      String token = cmd.substring(s1 + 1, s2);
+  else if (command.startsWith("PIN")) {
+    int first_space_index = command.indexOf(' ');
+    int second_space_index = command.indexOf(' ', first_space_index + 1);
+    if (first_space_index > 0 && second_space_index > first_space_index) {
+      String token = command.substring(first_space_index + 1, second_space_index);
       token.trim();
-      uint8_t idx = 0;
-      String t = token;
-      t.toLowerCase();
+      uint8_t pin_index = 0;
+      String token_lower = token;
+      token_lower.toLowerCase();
 
-      if (t == "squeeze_plate") idx = 1;
-      else if (t == "ion_source") idx = 2;
-      else if (t == "wein_filter") idx = 3;
-      else if (t == "cone_1") idx = 4;
-      else if (t == "cone_2") idx = 5;
-      else if (t == "switch_logic") idx = 6;
-      else idx = (uint8_t)token.toInt();
+      if (token_lower == "squeeze_plate") pin_index = 1;
+      else if (token_lower == "ion_source") pin_index = 2;
+      else if (token_lower == "wein_filter") pin_index = 3;
+      else if (token_lower == "cone_1") pin_index = 4;
+      else if (token_lower == "cone_2") pin_index = 5;
+      else if (token_lower == "switch_logic") pin_index = 6;
+      else pin_index = (uint8_t)token.toInt();
 
-      int val = cmd.substring(s2 + 1).toInt();
-      setChannel(idx, val);
+      int value = command.substring(second_space_index + 1).toInt();
+      set_channel(pin_index, value);
     } else {
       Serial.println("ERROR: PIN syntax");
     }
   }
-  else if (cmd.startsWith("SWITCH_PERIOD_US")) {
-    int s1 = cmd.indexOf(' ');
-    if (s1 <= 0) {
+  else if (command.startsWith("SWITCH_PERIOD_US")) {
+    int first_space_index = command.indexOf(' ');
+    if (first_space_index <= 0) {
       Serial.println("ERROR: SWITCH_PERIOD_US syntax");
       return;
     }
-    String valToken = cmd.substring(s1 + 1);
-    valToken.trim();
-    long us = valToken.toInt();
-    if (us <= 0) {
-      stopSwitchAutomationAndSetLevel(0);
+    String value_token = command.substring(first_space_index + 1);
+    value_token.trim();
+    long switch_period_us = value_token.toInt();
+    if (switch_period_us <= 0) {
+      stop_switch_automation_and_set_level(0);
       Serial.println("ACK SWITCH_PERIOD_US 0 (disabled)");
       return;
     }
-    if (us < 1 || us > 20) {
+    if (switch_period_us < 1 || switch_period_us > 20) {
       Serial.println("ERROR: SWITCH_PERIOD_US must be between 1 and 20 microseconds");
       return;
     }
-    if (!configureSwitchAutomation(static_cast<unsigned long>(us))) {
+    if (!configure_switch_automation(static_cast<unsigned long>(switch_period_us))) {
       Serial.println("ERROR: Switch timer unavailable");
       return;
     }
     Serial.print("ACK SWITCH_PERIOD_US ");
-    Serial.println(us);
+    Serial.println(switch_period_us);
   }
-  else if (cmd.equalsIgnoreCase("GET PINS") || cmd.equalsIgnoreCase("PINS")) {
-    reportChannels();
+  else if (command.equalsIgnoreCase("GET PINS") || command.equalsIgnoreCase("PINS")) {
+    report_channels();
   }
-  else if (cmd.equalsIgnoreCase("READ")) {
-    float live_voltage = ReadVoltage();
+  else if (command.equalsIgnoreCase("READ")) {
+    float live_voltage = read_voltage();
     Serial.println(String("MEASURED ") + live_voltage + " V");
-    blinkOnce(80);
+    blink_once(80);
   }
-  else if (cmd.equalsIgnoreCase("PING")) {
+  else if (command.equalsIgnoreCase("PING")) {
     Serial.println("OK");
-    blinkOnce(50);
+    blink_once(50);
   }
   else {
     Serial.println("ERROR: Unknown command");
-    blinkError(2, 70);
+    blink_error(2, 70);
   }
 }
 
 void loop() {
   while (Serial.available()) {
-    char incoming = static_cast<char>(Serial.read());
-    if (incoming == '\r') {
+    char incoming_char = static_cast<char>(Serial.read());
+    if (incoming_char == '\r') {
       continue;
     }
-    if (incoming == '\n') {
-      handleCommand(commandBuffer);
-      commandBuffer = "";
+    if (incoming_char == '\n') {
+      handle_command(command_buffer);
+      command_buffer = "";
     } else {
-      if (commandBuffer.length() < 256) {
-        commandBuffer += incoming;
-      } else {commandBuffer = "";}
+      if (command_buffer.length() < 256) {
+        command_buffer += incoming_char;
+      } else {command_buffer = "";}
     }
   }
 
-  unsigned long nowMs = millis();
+  unsigned long now_ms = millis();
 
-  if (nowMs - lastMeasurementMs >= 50) {  
-    float v = ReadVoltage();
-    Serial.println(String("MEASURED ") + v + " V");
-    lastMeasurementMs = nowMs;
+  if (now_ms - last_measurement_ms >= 50) {  
+    float measured_voltage = read_voltage();
+    Serial.println(String("MEASURED ") + measured_voltage + " V");
+    last_measurement_ms = now_ms;
   }
 
-  if (nowMs - lastHeartbeat > 2000) {
+  if (now_ms - last_heartbeat_ms > 2000) {
     digitalWrite(LED_PIN, HIGH);
     delay(50);
     digitalWrite(LED_PIN, LOW);
-    lastHeartbeat = nowMs;
+    last_heartbeat_ms = now_ms;
   }
 
   delay(1); 
