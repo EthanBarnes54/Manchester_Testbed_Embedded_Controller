@@ -11,12 +11,16 @@
 #include <Arduino.h>
 #include "log.h"
 #include <Wire.h>
+#include <cstring>
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <Adafruit_ADS1X15.h>
 #include <Adafruit_MCP4725.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "soc/gpio_struct.h"
 
 Adafruit_ADS1115 ads;
 Adafruit_MCP4725 dac;
@@ -25,6 +29,15 @@ const int LED_PIN = 2;
 
 float TargetVoltage = 0.0;
 unsigned long lastHeartbeat = 0;
+unsigned long lastMeasurementMs = 0;
+
+// Automatic switching for logic output (channel 6)
+bool switchAutoEnabled = false;
+unsigned long switchPeriodUs = 0;
+hw_timer_t* switchTimer = nullptr;
+portMUX_TYPE switchMux = portMUX_INITIALIZER_UNLOCKED;
+
+String commandBuffer;
 
 #ifndef SQUEEZE_PLATE_PIN
 #define SQUEEZE_PLATE_PIN 25  
@@ -53,6 +66,49 @@ static const int PWM_RESOLUTION = 10;
 static const int PWM_MAX = (1 << PWM_RESOLUTION) - 1;
 static const int LEDC_CHANNELS[5] = {0, 1, 2, 3, 4};
 
+static inline void fastSetSwitchLevel(bool high) {
+  const uint32_t mask = (1UL << SWITCH_LOGIC_PIN);
+  if (high) {
+    GPIO.out_w1ts = mask;
+  } else {
+    GPIO.out_w1tc = mask;
+  }
+}
+
+void IRAM_ATTR onSwitchTimer() {
+  portENTER_CRITICAL_ISR(&switchMux);
+  const bool currentlyHigh = (channelValues[5] != 0);
+  const bool nextState = !currentlyHigh;
+  fastSetSwitchLevel(nextState);
+  channelValues[5] = nextState ? 1 : 0;
+  portEXIT_CRITICAL_ISR(&switchMux);
+}
+
+bool configureSwitchAutomation(unsigned long periodUs) {
+  if (switchTimer == nullptr) {
+    return false;
+  }
+  portENTER_CRITICAL(&switchMux);
+  switchPeriodUs = periodUs;
+  switchAutoEnabled = true;
+  timerAlarmWrite(switchTimer, switchPeriodUs, true);
+  timerAlarmEnable(switchTimer);
+  portEXIT_CRITICAL(&switchMux);
+  return true;
+}
+
+void stopSwitchAutomationAndSetLevel(int level) {
+  portENTER_CRITICAL(&switchMux);
+  switchAutoEnabled = false;
+  switchPeriodUs = 0;
+  if (switchTimer != nullptr) {
+    timerAlarmDisable(switchTimer);
+  }
+  channelValues[5] = level ? 1 : 0;
+  portEXIT_CRITICAL(&switchMux);
+  fastSetSwitchLevel(level != 0);
+}
+
 void initChannels() {
   
   for (int i = 0; i < 5; i++) {
@@ -64,7 +120,7 @@ void initChannels() {
   }
   
   pinMode(CHANNEL_PINS[5], OUTPUT);
-  digitalWrite(CHANNEL_PINS[5], LOW);
+  fastSetSwitchLevel(false);
   channelValues[5] = 0;
 }
 
@@ -82,21 +138,24 @@ void setChannel(uint8_t idx1, int value) {
     channelValues[i] = value;
     Serial.println(String("ACK PIN ") + idx1 + " " + value);
   } else {
-    int v = value ? HIGH : LOW;
-    digitalWrite(pin, v);
-    channelValues[i] = value ? 1 : 0;
+    stopSwitchAutomationAndSetLevel(value ? 1 : 0);
     Serial.println(String("ACK PIN ") + idx1 + " " + channelValues[i]);
   }
 }
 
 void reportChannels() {
+  int snapshot[6];
+  portENTER_CRITICAL(&switchMux);
+  memcpy(snapshot, channelValues, sizeof(snapshot));
+  portEXIT_CRITICAL(&switchMux);
+
   Serial.print("PINS ");
-  Serial.print("squeeze_plate="); Serial.print(channelValues[0]); Serial.print(" ");
-  Serial.print("ion_source=");    Serial.print(channelValues[1]); Serial.print(" ");
-  Serial.print("wein_filter=");   Serial.print(channelValues[2]); Serial.print(" ");
-  Serial.print("cone_1=");        Serial.print(channelValues[3]); Serial.print(" ");
-  Serial.print("cone_2=");        Serial.print(channelValues[4]); Serial.print(" ");
-  Serial.print("switch_logic=");  Serial.print(channelValues[5]);
+  Serial.print("squeeze_plate="); Serial.print(snapshot[0]); Serial.print(" ");
+  Serial.print("ion_source=");    Serial.print(snapshot[1]); Serial.print(" ");
+  Serial.print("wein_filter=");   Serial.print(snapshot[2]); Serial.print(" ");
+  Serial.print("cone_1=");        Serial.print(snapshot[3]); Serial.print(" ");
+  Serial.print("cone_2=");        Serial.print(snapshot[4]); Serial.print(" ");
+  Serial.print("switch_logic=");  Serial.print(snapshot[5]);
   Serial.println("");
 }
 
@@ -180,6 +239,15 @@ void setup() {
   digitalWrite(LED_PIN, LOW);
 
   initChannels();
+
+  switchTimer = timerBegin(0, 80, true);
+  if (switchTimer != nullptr) {
+    timerAttachInterrupt(switchTimer, &onSwitchTimer, true);
+    timerAlarmDisable(switchTimer);
+    LOG_INFO("Switch logic timer initialised...");
+  } else {
+    LOG_ERROR("Failed to allocate switch logic timer. Automatic switching disabled.");
+  }
 }
 
 void SetVoltage(float volts) {
@@ -199,67 +267,114 @@ float ReadVoltage() {
   return ads.computeVolts(raw_voltage);
 }
 
+void handleCommand(String cmd) {
+  cmd.trim();
+  if (cmd.isEmpty()) {
+    return;
+  }
+
+  if (cmd.startsWith("SET")) {
+    float voltage_target = cmd.substring(4).toFloat();
+    SetVoltage(voltage_target);
+    Serial.println("ACK SET");
+  }
+  else if (cmd.startsWith("PIN")) {
+    int s1 = cmd.indexOf(' ');
+    int s2 = cmd.indexOf(' ', s1 + 1);
+    if (s1 > 0 && s2 > s1) {
+      String token = cmd.substring(s1 + 1, s2);
+      token.trim();
+      uint8_t idx = 0;
+      String t = token;
+      t.toLowerCase();
+
+      if (t == "squeeze_plate") idx = 1;
+      else if (t == "ion_source") idx = 2;
+      else if (t == "wein_filter") idx = 3;
+      else if (t == "cone_1") idx = 4;
+      else if (t == "cone_2") idx = 5;
+      else if (t == "switch_logic") idx = 6;
+      else idx = (uint8_t)token.toInt();
+
+      int val = cmd.substring(s2 + 1).toInt();
+      setChannel(idx, val);
+    } else {
+      Serial.println("ERROR: PIN syntax");
+    }
+  }
+  else if (cmd.startsWith("SWITCH_PERIOD_US")) {
+    int s1 = cmd.indexOf(' ');
+    if (s1 <= 0) {
+      Serial.println("ERROR: SWITCH_PERIOD_US syntax");
+      return;
+    }
+    String valToken = cmd.substring(s1 + 1);
+    valToken.trim();
+    long us = valToken.toInt();
+    if (us <= 0) {
+      stopSwitchAutomationAndSetLevel(0);
+      Serial.println("ACK SWITCH_PERIOD_US 0 (disabled)");
+      return;
+    }
+    if (us < 1 || us > 20) {
+      Serial.println("ERROR: SWITCH_PERIOD_US must be between 1 and 20 microseconds");
+      return;
+    }
+    if (!configureSwitchAutomation(static_cast<unsigned long>(us))) {
+      Serial.println("ERROR: Switch timer unavailable");
+      return;
+    }
+    Serial.print("ACK SWITCH_PERIOD_US ");
+    Serial.println(us);
+  }
+  else if (cmd.equalsIgnoreCase("GET PINS") || cmd.equalsIgnoreCase("PINS")) {
+    reportChannels();
+  }
+  else if (cmd.equalsIgnoreCase("READ")) {
+    float live_voltage = ReadVoltage();
+    Serial.println(String("MEASURED ") + live_voltage + " V");
+    blinkOnce(80);
+  }
+  else if (cmd.equalsIgnoreCase("PING")) {
+    Serial.println("OK");
+    blinkOnce(50);
+  }
+  else {
+    Serial.println("ERROR: Unknown command");
+    blinkError(2, 70);
+  }
+}
+
 void loop() {
-  if (Serial.available()) {
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
-
-    if (cmd.startsWith("SET")) {
-      float voltage_target = cmd.substring(4).toFloat();
-      SetVoltage(voltage_target);
-      Serial.println("ACK SET");
+  while (Serial.available()) {
+    char incoming = static_cast<char>(Serial.read());
+    if (incoming == '\r') {
+      continue;
     }
-    else if (cmd.startsWith("PIN")) {
-      int s1 = cmd.indexOf(' ');
-      int s2 = cmd.indexOf(' ', s1 + 1);
-      if (s1 > 0 && s2 > s1) {
-        String token = cmd.substring(s1 + 1, s2);
-        token.trim();
-        uint8_t idx = 0;
-        String t = token; t.toLowerCase();
-
-        if (t == "squeeze_plate") idx = 1;
-        else if (t == "ion_source") idx = 2;
-        else if (t == "wein_filter") idx = 3;
-        else if (t == "cone_1") idx = 4;
-        else if (t == "cone_2") idx = 5;
-        else if (t == "switch_logic") idx = 6;
-        else idx = (uint8_t)token.toInt();
-
-        int val = cmd.substring(s2 + 1).toInt();
-        setChannel(idx, val);
-      } else {
-        Serial.println("ERROR: PIN syntax");
-      }
-    }
-    else if (cmd.equalsIgnoreCase("GET PINS") || cmd.equalsIgnoreCase("PINS")) {
-      reportChannels();
-    }
-    else if (cmd.equalsIgnoreCase("READ")) {
-      float live_voltage = ReadVoltage();
-      Serial.println(String("MEASURED ") + live_voltage + " V");
-      blinkOnce(80);
-    }
-    else if (cmd.equalsIgnoreCase("PING")) {
-      Serial.println("OK");
-      blinkOnce(50);
-    }
-    else {
-      Serial.println("ERROR: Unknown command");
-      blinkError(2, 70);
+    if (incoming == '\n') {
+      handleCommand(commandBuffer);
+      commandBuffer = "";
+    } else {
+      if (commandBuffer.length() < 256) {
+        commandBuffer += incoming;
+      } else {commandBuffer = "";}
     }
   }
 
-  float v = ReadVoltage();
-  Serial.println(String("MEASURED ") + v + " V");
+  unsigned long nowMs = millis();
 
-  if (millis() - lastHeartbeat > 2000) {
+  if (nowMs - lastMeasurementMs >= 50) {  
+    float v = ReadVoltage();
+    Serial.println(String("MEASURED ") + v + " V");
+    lastMeasurementMs = nowMs;
+  }
+
+  if (nowMs - lastHeartbeat > 2000) {
     digitalWrite(LED_PIN, HIGH);
     delay(50);
     digitalWrite(LED_PIN, LOW);
-    lastHeartbeat = millis();
+    lastHeartbeat = nowMs;
   }
 
-  delay(500);
+  delay(1); 
 }
-

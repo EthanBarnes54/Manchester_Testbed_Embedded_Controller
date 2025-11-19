@@ -8,7 +8,7 @@
 # Run locally in a new terminal and open http://127.0.0.1:8050 in a browser.
 # ------------------------------------------------------------------------#
 
-from dash import Dash, dcc, html, Input, Output, State
+from dash import Dash, dcc, html, Input, Output, State, ctx
 from dash.exceptions import PreventUpdate
 import plotly.graph_objs as go
 import pandas as pd
@@ -16,7 +16,6 @@ import pkgutil, importlib.util
 import numpy as np
 import logging
 import time
-import dash
 try:
     from python_RNN_Controller import propose_dac
 except Exception:
@@ -61,18 +60,103 @@ def _control_tab():
                 ],
             ),
 
-            html.Div(style={"marginTop": "1em"},
-                     
+            html.Div(
+                style={"marginTop": "1em"},
                 children=[
-                    html.H4("Pin Controls: 5 PWM + 1 Logic Switch"),
-                    html.Div(style={"display": "grid", "gridTemplateColumns": "repeat(2, 1fr)", "gap": "1em"},
+                    html.H4("Pin Controls: 5 PWM + Switch Timing"),
+                    html.Div(
+                        style={"display": "grid", "gridTemplateColumns": "repeat(2, 1fr)", "gap": "1em"},
                         children=[
-                            html.Div([html.Label("Squeeze Plate"), dcc.Input(id="pwm1", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"})]),
-                            html.Div([html.Label("Ion Source"), dcc.Input(id="pwm2", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"})]),
-                            html.Div([html.Label("Wein Filter"), dcc.Input(id="pwm3", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"})]),
-                            html.Div([html.Label("Upper Cone (Initial/Entry Cone)"), dcc.Input(id="pwm4", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"})]),
-                            html.Div([html.Label("Lower Cone (Final/Exit Cone)"), dcc.Input(id="pwm5", type="number", min=0, max=1023, step=1, value=0, debounce=True, style={"width": "120px"})]),
-                            html.Div([html.Label("Switch Logic"), dcc.Checklist(id="sw6", options=[{"label": "ON", "value": "on"}], value=[], inputStyle={"marginRight": "0.5em"})]),
+                            html.Div(
+                                [
+                                    html.Label("Squeeze Plate"),
+                                    dcc.Input(
+                                        id="pwm1",
+                                        type="number",
+                                        min=0,
+                                        max=1023,
+                                        step=1,
+                                        value=0,
+                                        debounce=True,
+                                        style={"width": "120px"},
+                                    ),
+                                ]
+                            ),
+                            html.Div(
+                                [
+                                    html.Label("Ion Source"),
+                                    dcc.Input(
+                                        id="pwm2",
+                                        type="number",
+                                        min=0,
+                                        max=1023,
+                                        step=1,
+                                        value=0,
+                                        debounce=True,
+                                        style={"width": "120px"},
+                                    ),
+                                ]
+                            ),
+                            html.Div(
+                                [
+                                    html.Label("Wein Filter"),
+                                    dcc.Input(
+                                        id="pwm3",
+                                        type="number",
+                                        min=0,
+                                        max=1023,
+                                        step=1,
+                                        value=0,
+                                        debounce=True,
+                                        style={"width": "120px"},
+                                    ),
+                                ]
+                            ),
+                            html.Div(
+                                [
+                                    html.Label("Upper Cone (Initial/Entry Cone)"),
+                                    dcc.Input(
+                                        id="pwm4",
+                                        type="number",
+                                        min=0,
+                                        max=1023,
+                                        step=1,
+                                        value=0,
+                                        debounce=True,
+                                        style={"width": "120px"},
+                                    ),
+                                ]
+                            ),
+                            html.Div(
+                                [
+                                    html.Label("Lower Cone (Final/Exit Cone)"),
+                                    dcc.Input(
+                                        id="pwm5",
+                                        type="number",
+                                        min=0,
+                                        max=1023,
+                                        step=1,
+                                        value=0,
+                                        debounce=True,
+                                        style={"width": "120px"},
+                                    ),
+                                ]
+                            ),
+                            html.Div(
+                                [
+                                    html.Label("Switch Time (µs)"),
+                                    dcc.Input(
+                                        id="switch-time-us",
+                                        type="number",
+                                        min=1,
+                                        max=20,
+                                        step=1,
+                                        value=5,
+                                        debounce=True,
+                                        style={"width": "120px"},
+                                    ),
+                                ]
+                            ),
                         ],
                     ),
                     html.Div(id="pins-ack", style={"marginTop": "0.5em", "fontWeight": "bold"}),
@@ -89,43 +173,220 @@ def _control_tab():
             ),
 
             html.Div(id="pin-status", style={"display": "flex", "flexWrap": "wrap", "gap": "0.5em 1em", "marginTop": "0.5em"}),
-            html.Div(style={"marginTop": "1.5em", "padding": "1em", "border": "1px solid #e0e0e0", "borderRadius": "8px", "maxWidth": "740px", "background": "#fafafa"},
+            html.Div(
+                style={"marginTop": "1.5em", "display": "flex", "gap": "1em", "flexWrap": "wrap"},
                 children=[
-                    html.Div(children=[html.H4("Training Sweep", style={"margin": 0}), html.P("Generate the training dataset by sweeping over all ouput DAC values, then train the RNN controller.", style={"margin": "0.25em 0 0.75em 0", "color": "#555"})]),
-
                     html.Div(
-                        style={"display": "grid", "gridTemplateColumns": "repeat(5, 1fr)", "gap": "0.75em", "alignItems": "end"},
+                        style={
+                            "flex": "1 1 360px",
+                            "padding": "1em",
+                            "border": "1px solid #e0e0e0",
+                            "borderRadius": "8px",
+                            "background": "#fafafa",
+                        },
                         children=[
-                            html.Div(children=[html.Small("Min V"), dcc.Input(id="sweep-min", type="number", value=0.0, min=0.0, max=3.3, step=0.01, placeholder="0.0", style={"width": "100%"})]),
-                            html.Div(children=[html.Small("Max V"), dcc.Input(id="sweep-max", type="number", value=3.3, min=0.0, max=3.3, step=0.01, placeholder="3.3", style={"width": "100%"})]),
-                            html.Div(children=[html.Small("Step"), dcc.Input(id="sweep-step", type="number", value=0.05, min=0.001, max=1.0, step=0.001, placeholder="0.05", style={"width": "100%"})]),
-                            html.Div(children=[html.Small("Dwell (s)"), dcc.Input(id="sweep-dwell", type="number", value=0.05, min=0.0, step=0.01, placeholder="0.05", style={"width": "100%"})]),
-                            html.Div(children=[html.Small("Epochs"), dcc.Input(id="sweep-epochs", type="number", value=10, min=1, step=1, placeholder="10", style={"width": "100%"})]),
+                            html.Div(
+                                children=[
+                                    html.H4("Training Sweep", style={"margin": 0}),
+                                    html.P(
+                                        "Generate the training dataset by sweeping over all ouput DAC values, then train the RNN controller.",
+                                        style={"margin": "0.25em 0 0.75em 0", "color": "#555"},
+                                    ),
+                                ]
+                            ),
+                            html.Div(
+                                style={
+                                    "display": "grid",
+                                    "gridTemplateColumns": "repeat(5, 1fr)",
+                                    "gap": "0.75em",
+                                    "alignItems": "end",
+                                },
+                                children=[
+                                    html.Div(
+                                        children=[
+                                            html.Small("Min V"),
+                                            dcc.Input(
+                                                id="sweep-min",
+                                                type="number",
+                                                value=0.0,
+                                                min=0.0,
+                                                max=3.3,
+                                                step=0.01,
+                                                placeholder="0.0",
+                                                style={"width": "100%"},
+                                            ),
+                                        ]
+                                    ),
+                                    html.Div(
+                                        children=[
+                                            html.Small("Max V"),
+                                            dcc.Input(
+                                                id="sweep-max",
+                                                type="number",
+                                                value=3.3,
+                                                min=0.0,
+                                                max=3.3,
+                                                step=0.01,
+                                                placeholder="3.3",
+                                                style={"width": "100%"},
+                                            ),
+                                        ]
+                                    ),
+                                    html.Div(
+                                        children=[
+                                            html.Small("Step"),
+                                            dcc.Input(
+                                                id="sweep-step",
+                                                type="number",
+                                                value=0.05,
+                                                min=0.001,
+                                                max=1.0,
+                                                step=0.001,
+                                                placeholder="0.05",
+                                                style={"width": "100%"},
+                                            ),
+                                        ]
+                                    ),
+                                    html.Div(
+                                        children=[
+                                            html.Small("Dwell (s)"),
+                                            dcc.Input(
+                                                id="sweep-dwell",
+                                                type="number",
+                                                value=0.05,
+                                                min=0.0,
+                                                step=0.01,
+                                                placeholder="0.05",
+                                                style={"width": "100%"},
+                                            ),
+                                        ]
+                                    ),
+                                    html.Div(
+                                        children=[
+                                            html.Small("Epochs"),
+                                            dcc.Input(
+                                                id="sweep-epochs",
+                                                type="number",
+                                                value=10,
+                                                min=1,
+                                                step=1,
+                                                placeholder="10",
+                                                style={"width": "100%"},
+                                            ),
+                                        ]
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                style={"display": "flex", "alignItems": "center", "gap": "1em", "marginTop": "0.5em"},
+                                children=[
+                                    html.Button(
+                                        "Start Training Sweep",
+                                        id="sweep-btn",
+                                        n_clicks=0,
+                                        style={"padding": "0.5em 1em"},
+                                    ),
+                                    html.Button(
+                                        "Stop",
+                                        id="sweep-stop-btn",
+                                        n_clicks=0,
+                                        style={"padding": "0.5em 1em"},
+                                    ),
+                                    html.Span(
+                                        id="sweep-status",
+                                        children="Sweep: idle",
+                                        style={"fontWeight": "bold"},
+                                    ),
+                                    html.Span(id="sweep-eta", children=""),
+                                ],
+                            ),
+                            html.Div(
+                                id="sweep-progress",
+                                style={
+                                    "width": "100%",
+                                    "height": "12px",
+                                    "background": "#eee",
+                                    "borderRadius": "6px",
+                                    "overflow": "hidden",
+                                    "marginTop": "0.5em",
+                                },
+                                children=[
+                                    html.Div(
+                                        id="sweep-progress-inner",
+                                        style={
+                                            "height": "100%",
+                                            "width": "0%",
+                                            "background": "#ccc",
+                                            "transition": "width 0.2s ease",
+                                        },
+                                    )
+                                ],
+                            ),
                         ],
                     ),
-
                     html.Div(
-                        style={"display": "flex", "alignItems": "center", "gap": "1em", "marginTop": "0.5em"},
-                        children=[
-                            html.Button("Start Training Sweep", id="sweep-btn", n_clicks=0, style={"padding": "0.5em 1em"}),
-                            html.Button("Stop", id="sweep-stop-btn", n_clicks=0, style={"padding": "0.5em 1em"}),
-                            html.Span(id="sweep-status", children="Sweep: idle", style={"fontWeight": "bold"}),
-                            html.Span(id="sweep-eta", children=""),
-                        ],
-                    ),
-                    
-                    html.Div(id="sweep-progress", style={"width": "100%", "height": "12px", "background": "#eee", "borderRadius": "6px", "overflow": "hidden", "marginTop": "0.5em"}, children=[html.Div(id="sweep-progress-inner", style={"height": "100%", "width": "0%", "background": "#ccc", "transition": "width 0.2s ease"})]),
-
-                    html.Div(
-                        style={"marginTop": "1em", "padding": "1em", "border": "1px solid #e0e0e0", "borderRadius": "8px", "maxWidth": "740px", "background": "#fafafa"},
+                        style={
+                            "flex": "1 1 280px",
+                            "padding": "1em",
+                            "border": "1px solid #e0e0e0",
+                            "borderRadius": "8px",
+                            "background": "#fafafa",
+                        },
                         children=[
                             html.Div(children=[html.H4("Automation & Data", style={"margin": 0})]),
                             html.Div(
-                                style={"display": "flex", "gap": "1em", "alignItems": "center", "flexWrap": "wrap", "marginTop": "0.5em"},
+                                style={
+                                    "display": "flex",
+                                    "gap": "1em",
+                                    "alignItems": "center",
+                                    "flexWrap": "wrap",
+                                    "marginTop": "0.5em",
+                                },
                                 children=[
-                                    html.Div(children=[html.Label("Auto Control"), dcc.Checklist(id="auto-mode", options=[{"label": "ON", "value": "on"}], value=[], inputStyle={"marginRight": "0.5em"})]),
-                                    html.Div(children=[html.Label("Auto Rate (ms)"), dcc.Input(id="auto-rate-ms", type="number", value=500, min=100, step=50, style={"width": "100px"})]),
-                                    html.Div(children=[html.Label("Save dataset after sweep"), dcc.Checklist(id="save-dataset-toggle", options=[{"label": "Enable", "value": "on"}], value=[], inputStyle={"marginRight": "0.5em"})]),
+                                    html.Div(
+                                        children=[
+                                            html.Label("Auto Control Mode", style={"display": "block"}),
+                                            html.Button(
+                                                "Auto: OFF",
+                                                id="auto-mode-button",
+                                                n_clicks=0,
+                                                style={
+                                                    "minWidth": "130px",
+                                                    "padding": "0.6em 1.2em",
+                                                    "fontWeight": "bold",
+                                                    "borderRadius": "6px",
+                                                    "border": "none",
+                                                    "background": "#e74c3c",
+                                                    "color": "#ffffff",
+                                                    "cursor": "pointer",
+                                                },
+                                            ),
+                                        ]
+                                    ),
+                                    html.Div(
+                                        children=[
+                                            html.Label("Auto Rate (ms)"),
+                                            dcc.Input(
+                                                id="auto-rate-ms",
+                                                type="number",
+                                                value=500,
+                                                min=100,
+                                                step=50,
+                                                style={"width": "100px"},
+                                            ),
+                                        ]
+                                    ),
+                                    html.Div(
+                                        children=[
+                                            html.Label("Save dataset after sweep"),
+                                            dcc.Checklist(
+                                                id="save-dataset-toggle",
+                                                options=[{"label": "Enable", "value": "on"}],
+                                                value=[],
+                                                inputStyle={"marginRight": "0.5em"},
+                                            ),
+                                        ]
+                                    ),
                                     html.Span(id="save-dataset-ack", style={"fontWeight": "bold"}),
                                 ],
                             ),
@@ -164,16 +425,18 @@ def _ml_tab():
     )
 
 
-app.layout = html.Div(style={"fontFamily": "Segoe UI, sans-serif", "padding": "2em"},
-                      
+app.layout = html.Div(
+    style={"fontFamily": "Segoe UI, sans-serif", "padding": "2em"},
     children=[
-
-        dcc.Tabs(id="tabs", value="control", 
+        dcc.Store(id="auto-mode", data=False),
+        dcc.Tabs(
+            id="tabs",
+            value="control",
             children=[
-            dcc.Tab(label="Control", value="control", children=[_control_tab()]),
-            dcc.Tab(label="ML", value="ml", children=[_ml_tab()]),
-        ]),
-
+                dcc.Tab(label="Control", value="control", children=[_control_tab()]),
+                dcc.Tab(label="ML", value="ml", children=[_ml_tab()]),
+            ],
+        ),
         dcc.Interval(id="update-interval", interval=1000, n_intervals=0),
     ],
 )
@@ -187,12 +450,12 @@ app.layout = html.Div(style={"fontFamily": "Segoe UI, sans-serif", "padding": "2
     Output("latest-voltage", "children"),
     Output("num-points", "children"),
     Input("update-interval", "n_intervals"),
-    State("auto-mode", "value"),
+    State("auto-mode", "data"),
     State("auto-rate-ms", "value"),
 )
 
 
-def update_graph(_, auto_mode_value, auto_rate_ms):
+def update_graph(_, auto_mode_enabled, auto_rate_ms):
     
     data_frame = Back_End_Controller.get_data()
 
@@ -220,14 +483,12 @@ def update_graph(_, auto_mode_value, auto_rate_ms):
     recent_voltage_measurement = f"Voltage: {data_frame['voltage'].iloc[-1]:.3f} V"
     number_of_points = f"Samples: {len(data_frame)}"
 
-        # Auto-control (guarded, rate-limited)
     try:
-        auto_on = isinstance(auto_mode_value, (list, tuple)) and ("on" in auto_mode_value)
+        auto_on = bool(auto_mode_enabled)
         rate_ms = 500 if auto_rate_ms is None else max(100, int(auto_rate_ms))
     except Exception:
         auto_on, rate_ms = False, 500
-
-    # Disable auto during sweep runs
+        
     try:
         st = get_sweep_status()
         if isinstance(st, dict) and str(st.get("state", "")).lower() == "running":
@@ -248,6 +509,37 @@ def update_graph(_, auto_mode_value, auto_rate_ms):
         except Exception:
             pass
     return figure, recent_voltage_measurement, number_of_points
+
+
+@app.callback(
+    Output("auto-mode", "data"),
+    Output("auto-mode-button", "children"),
+    Output("auto-mode-button", "style"),
+    Input("auto-mode-button", "n_clicks"),
+)
+
+def _toggle_auto_mode(n_clicks):
+    base_style = {
+        "minWidth": "130px",
+        "padding": "0.6em 1.2em",
+        "fontWeight": "bold",
+        "borderRadius": "6px",
+        "border": "none",
+        "color": "#ffffff",
+        "cursor": "pointer",
+    }
+
+    try:
+        clicks = 0 if n_clicks is None else int(n_clicks)
+    except Exception:
+        clicks = 0
+
+    if clicks % 2 == 1:
+        style = {**base_style, "background": "#2ecc71", "boxShadow": "0 0 4px rgba(46,204,113,0.6)"}
+        return True, "Auto: ON", style
+
+    style = {**base_style, "background": "#e74c3c", "boxShadow": "0 0 4px rgba(231,76,60,0.6)"}
+    return False, "Auto: OFF", style
 
 
 @app.callback(
@@ -276,6 +568,7 @@ def send_voltage_command(number_of_clicks, input_value):
         return f"Sent: SET {input_voltage:.6f}", {"color": "green", "fontWeight": "bold"}
     except Exception as fault:
         return f"ERROR: Command not set - {fault}!", {"color": "red", "fontWeight": "bold"}
+
 @app.callback(
     Output("save-dataset-ack", "children"),
     Input("save-dataset-toggle", "value"),
@@ -305,11 +598,32 @@ def _validate_voltage_input(input_value):
     try:
         fval = float(input_value)
     except Exception:
-        return {** base_style, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
+        return {**base_style, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
     
     if 0.0 <= fval <= 3.3:
-        return  base_style
-    return {** base_style, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
+        return base_style
+    return {**base_style, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
+
+
+@app.callback(
+    Output("switch-time-us", "style"),
+    Input("switch-time-us", "value"),
+)
+def _validate_switch_time_input(input_value):
+    base_style = {"width": "120px"}
+
+    if input_value is None:
+        return base_style
+
+    try:
+        fval = float(input_value)
+    except Exception:
+        return {**base_style, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
+
+    if 1.0 <= fval <= 20.0:
+        return base_style
+
+    return {**base_style, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
 
 # -------------------------------------------------------------------------
 #                             Status updater
@@ -346,28 +660,44 @@ def update_status(_):
     Input("pwm3", "value"),
     Input("pwm4", "value"),
     Input("pwm5", "value"),
-    Input("sw6", "value"),
+    Input("switch-time-us", "value"),
 
     prevent_initial_call=True,
 )
 
-def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_voltage_5, logic_pin):
+def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_voltage_5, switch_time_us):
 
     pin_voltages = [pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_voltage_5]
 
     try:
+        # Update PWM channels
         for channel_index, value_index in enumerate(pin_voltages, start=1):
 
             if value_index is None:
                 continue
 
-        try:
-            Back_End_Controller.set_pwm(channel_index, int(value_index))
-        except (TypeError, ValueError):
-            pass
+            try:
+                Back_End_Controller.set_pwm(channel_index, int(value_index))
+            except (TypeError, ValueError):
+                pass
 
-        switch_status = isinstance(logic_pin, (list, tuple)) and ("on" in logic_pin)
-        Back_End_Controller.set_switch(bool(switch_status))
+        # Update switch timing (µs)
+        switch_time_text = "not set"
+        if switch_time_us is not None:
+            try:
+                fval = float(switch_time_us)
+            except Exception as parse_fault:
+                return f"ERROR: Invalid switch time - {parse_fault}!", {"color": "red", "fontWeight": "bold"}
+
+            if not (1.0 <= fval <= 20.0):
+                return "ERROR: Switch time out of range (1–20 µs)!", {"color": "red", "fontWeight": "bold"}
+
+            try:
+                getattr(Back_End_Controller, "set_switch_timing_us", lambda *_: None)(fval)
+            except Exception:
+                pass
+
+            switch_time_text = f"{fval:.1f} µs"
 
         status_message = (
             f"Pins updated: squeeze_plate={pin_voltages[0]}, "
@@ -375,11 +705,11 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
             f"wein_filter={pin_voltages[2]}, "
             f"cone_1={pin_voltages[3]}, "
             f"cone_2={pin_voltages[4]}, "
-            f"switch_logic={'ON' if switch_status else 'OFF'}"
-            )        
-        
+            f"switch_time={switch_time_text}"
+        )
+
         return status_message, {"color": "green", "fontWeight": "bold"}
-    
+
     except Exception as fault:
         return f"ERROR: Pin update failed - {fault}!", {"color": "red", "fontWeight": "bold"}
 

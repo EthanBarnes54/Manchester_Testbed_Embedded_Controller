@@ -72,6 +72,7 @@ class SerialBackend:
 
         self.pins = [0, 0, 0, 0, 0, 0]
         self.pins_timestamp = 0.0
+        self.switch_timing_us = None
 
         self.sweep_thread = None
         self.sweep_status = {"state": "idle", "progress": 0.0, "message": ""}
@@ -354,6 +355,28 @@ class SerialBackend:
     # REMOVE ONCE RIG IS FINALISED
     def set_switch(self, on: bool):
         self.set_pin_voltage(6, 1 if on else 0)
+
+    def set_switch_timing_us(self, timing_us: float):
+        try:
+            value = float(timing_us)
+        except Exception:
+            return
+
+        board_switch_timing = max(1.0, min(20.0, value))
+        self.switch_timing_us = board_switch_timing
+
+        if self.offline:
+            try:
+                log.info(f"[SIM] Switch timing set to {board_switch_timing:.1f} us")
+            except Exception:
+                pass
+            return
+
+        try:
+            self.send_command(f"SWITCH_PERIOD_US {int(board_switch_timing)}")
+        except Exception as fault:
+            log.error(f"ERROR: Failed to send switch timing '{board_switch_timing}': {fault}")
+
     def set_pin(self, i: int, value: int):
         self.set_pin_voltage(i, value)
 
@@ -506,6 +529,7 @@ send_command = Back_End_Controller.send_command
 set_pin_voltage = Back_End_Controller.set_pin_voltage
 set_pwm = Back_End_Controller.set_pwm
 set_switch = Back_End_Controller.set_switch
+set_switch_timing_us = getattr(Back_End_Controller, "set_switch_timing_us", None)
 set_pin = Back_End_Controller.set_pin
 set_pin_by_name = Back_End_Controller.set_pin_by_name
 get_pins = Back_End_Controller.get_pins
