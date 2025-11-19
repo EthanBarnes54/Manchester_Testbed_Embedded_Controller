@@ -1,4 +1,4 @@
-#--------------- ESP32 Control and Monitoring Dashboard -------------------#
+﻿#--------------- ESP32 Control and Monitoring Dashboard -------------------#
 
 # A Dash-based web interface for real-time control and data visualization
 # of the ESP32-based embedded control system. Communicates with the backend
@@ -8,6 +8,7 @@
 # Run locally in a new terminal and open http://127.0.0.1:8050 in a browser.
 # ------------------------------------------------------------------------#
 
+import dash
 from dash import Dash, dcc, html, Input, Output, State, ctx
 from dash.exceptions import PreventUpdate
 import plotly.graph_objs as go
@@ -17,9 +18,9 @@ import numpy as np
 import logging
 import time
 try:
-    from python_RNN_Controller import propose_dac
+    from python_RNN_Controller import propose_control_vector
 except Exception:
-    propose_dac = None
+    propose_control_vector = None
 from python_Backend import (get_ml_metrics, Back_End_Controller, start_training_sweep, get_sweep_status, stop_training_sweep, get_model_info)
 
 # Workaround for Python 3.14 (pkgutil.find_loader has been removed)
@@ -51,15 +52,6 @@ def _control_tab():
             html.H2("ESP12-F Control Dashboard", style={"textAlign": "center"}),
             dcc.Graph(id="live-graph", style={"height": "60vh"}),
 
-            html.Div(style={"marginTop": "2em", "display": "flex", "alignItems": "center", "gap": "1em"},
-                    children=[
-                    html.Label("Set DAC Voltage (V):", style={"fontWeight": "bold"}),
-                    dcc.Input(id="voltage-input", type="number", min=0.0, max=3.3, step=0.000001, value=1.0, debounce=True, style={"width": "140px"}),
-                    html.Button("Send Command", id="send-btn", n_clicks=0, style={"padding": "0.5em 1em"}),
-                    html.Span(id="ack", style={"marginLeft": "1em", "fontWeight": "bold"}),
-                ],
-            ),
-
             html.Div(
                 style={"marginTop": "1em"},
                 children=[
@@ -69,82 +61,82 @@ def _control_tab():
                         children=[
                             html.Div(
                                 [
-                                    html.Label("Squeeze Plate"),
+                                    html.Label("Squeeze Plate Target (V)"),
                                     dcc.Input(
                                         id="pwm1",
                                         type="number",
-                                        min=0,
-                                        max=1023,
-                                        step=1,
-                                        value=0,
+                                        min=0.0,
+                                        max=3.3,
+                                        step=0.01,
+                                        value=0.0,
                                         debounce=True,
-                                        style={"width": "120px"},
+                                        style={"width": "140px"},
                                     ),
                                 ]
                             ),
                             html.Div(
                                 [
-                                    html.Label("Ion Source"),
+                                    html.Label("Ion Source Target (V)"),
                                     dcc.Input(
                                         id="pwm2",
                                         type="number",
-                                        min=0,
-                                        max=1023,
-                                        step=1,
-                                        value=0,
+                                        min=0.0,
+                                        max=3.3,
+                                        step=0.01,
+                                        value=0.0,
                                         debounce=True,
-                                        style={"width": "120px"},
+                                        style={"width": "140px"},
                                     ),
                                 ]
                             ),
                             html.Div(
                                 [
-                                    html.Label("Wein Filter"),
+                                    html.Label("Wein Filter Target (V)"),
                                     dcc.Input(
                                         id="pwm3",
                                         type="number",
-                                        min=0,
-                                        max=1023,
-                                        step=1,
-                                        value=0,
+                                        min=0.0,
+                                        max=3.3,
+                                        step=0.01,
+                                        value=0.0,
                                         debounce=True,
-                                        style={"width": "120px"},
+                                        style={"width": "140px"},
                                     ),
                                 ]
                             ),
                             html.Div(
                                 [
-                                    html.Label("Upper Cone (Initial/Entry Cone)"),
+                                    html.Label("Upper Cone Target (V)"),
                                     dcc.Input(
                                         id="pwm4",
                                         type="number",
-                                        min=0,
-                                        max=1023,
-                                        step=1,
-                                        value=0,
+                                        min=0.0,
+                                        max=3.3,
+                                        step=0.01,
+                                        value=0.0,
                                         debounce=True,
-                                        style={"width": "120px"},
+                                        style={"width": "140px"},
                                     ),
                                 ]
                             ),
                             html.Div(
                                 [
-                                    html.Label("Lower Cone (Final/Exit Cone)"),
+                                    html.Label("Lower Cone Target (V)"),
                                     dcc.Input(
                                         id="pwm5",
                                         type="number",
-                                        min=0,
-                                        max=1023,
-                                        step=1,
-                                        value=0,
+                                        min=0.0,
+                                        max=3.3,
+                                        step=0.01,
+                                        value=0.0,
                                         debounce=True,
-                                        style={"width": "120px"},
+                                        style={"width": "140px"},
                                     ),
                                 ]
                             ),
                             html.Div(
                                 [
-                                    html.Label("Switch Time (µs)"),
+                                    html.Label("Switch Time (us)"),
                                     dcc.Input(
                                         id="switch-time-us",
                                         type="number",
@@ -189,7 +181,7 @@ def _control_tab():
                                 children=[
                                     html.H4("Training Sweep", style={"margin": 0}),
                                     html.P(
-                                        "Generate the training dataset by sweeping over all ouput DAC values, then train the RNN controller.",
+                                        "Generate the training dataset by sweeping over output pin voltages, then train the RNN controller.",
                                         style={"margin": "0.25em 0 0.75em 0", "color": "#555"},
                                     ),
                                 ]
@@ -275,6 +267,48 @@ def _control_tab():
                                             ),
                                         ]
                                     ),
+                                    html.Div(
+                                        children=[
+                                            html.Small("Baseline levels"),
+                                            dcc.Input(
+                                                id="sweep-baselines",
+                                                type="number",
+                                                min=1,
+                                                step=1,
+                                                value=3,
+                                                placeholder="3",
+                                                style={"width": "100%"},
+                                            ),
+                                        ]
+                                    ),
+                                    html.Div(
+                                        children=[
+                                            html.Small("Factorial levels"),
+                                            dcc.Input(
+                                                id="sweep-factorials",
+                                                type="number",
+                                                min=1,
+                                                step=1,
+                                                value=3,
+                                                placeholder="3",
+                                                style={"width": "100%"},
+                                            ),
+                                        ]
+                                    ),
+                                    html.Div(
+                                        children=[
+                                            html.Small("Random samples"),
+                                            dcc.Input(
+                                                id="sweep-random-samples",
+                                                type="number",
+                                                min=1,
+                                                step=1,
+                                                value=60,
+                                                placeholder="auto",
+                                                style={"width": "100%"},
+                                            ),
+                                        ]
+                                    ),
                                 ],
                             ),
                             html.Div(
@@ -345,9 +379,8 @@ def _control_tab():
                                 children=[
                                     html.Div(
                                         children=[
-                                            html.Label("Auto Control Mode", style={"display": "block"}),
                                             html.Button(
-                                                "Auto: OFF",
+                                                "Auto Control: OFF",
                                                 id="auto-mode-button",
                                                 n_clicks=0,
                                                 style={
@@ -378,16 +411,24 @@ def _control_tab():
                                     ),
                                     html.Div(
                                         children=[
-                                            html.Label("Save dataset after sweep"),
-                                            dcc.Checklist(
-                                                id="save-dataset-toggle",
-                                                options=[{"label": "Enable", "value": "on"}],
-                                                value=[],
-                                                inputStyle={"marginRight": "0.5em"},
+                                            html.Button(
+                                                "Save After Sweep: OFF",
+                                                id="save-dataset-button",
+                                                n_clicks=0,
+                                                style={
+                                                    "minWidth": "150px",
+                                                    "padding": "0.6em 1.2em",
+                                                    "fontWeight": "bold",
+                                                    "borderRadius": "6px",
+                                                    "border": "none",
+                                                    "background": "#e74c3c",
+                                                    "color": "#ffffff",
+                                                    "cursor": "pointer",
+                                                },
                                             ),
                                         ]
                                     ),
-                                    html.Span(id="save-dataset-ack", style={"fontWeight": "bold"}),
+                                    html.Span(id="save-dataset-ack", style={"minWidth": "160px"}),
                                 ],
                             ),
                         ],
@@ -496,18 +537,16 @@ def update_graph(_, auto_mode_enabled, auto_rate_ms):
     except Exception:
         pass
 
-    if auto_on and propose_dac is not None:
+    if auto_on and propose_control_vector is not None:
         try:
             global LAST_AUTO_TS
             now = time.time()
             if now - LAST_AUTO_TS >= (rate_ms / 1000.0):
-                grid = np.linspace(0.0, 3.3, 34, dtype=float)
-                best_dac, _ = propose_dac(data_frame, candidate_dacs=grid)
-                if 0.0 <= best_dac <= 3.3:
-                    Back_End_Controller.send_command(f"SET {best_dac:.6f}")
-                    LAST_AUTO_TS = now
-        except Exception:
-            pass
+                targets = propose_control_vector(data_frame)
+                Back_End_Controller.set_pin_voltages(targets)
+                LAST_AUTO_TS = now
+        except Exception as fault:
+            log.warning(f"ERROR: Auto control update failed - {fault}!")
     return figure, recent_voltage_measurement, number_of_points
 
 
@@ -536,74 +575,50 @@ def _toggle_auto_mode(n_clicks):
 
     if clicks % 2 == 1:
         style = {**base_style, "background": "#2ecc71", "boxShadow": "0 0 4px rgba(46,204,113,0.6)"}
-        return True, "Auto: ON", style
+        return True, "Auto Control: ON", style
 
     style = {**base_style, "background": "#e74c3c", "boxShadow": "0 0 4px rgba(231,76,60,0.6)"}
-    return False, "Auto: OFF", style
+    return False, "Auto Control: OFF", style
 
 
 @app.callback(
-    Output("ack", "children"),
-    Output("ack", "style"),
-    Input("send-btn", "n_clicks"),
-    State("voltage-input", "value"),
-    prevent_initial_call=True,
+    Output("save-dataset-button", "children"),
+    Output("save-dataset-button", "style"),
+    Input("save-dataset-button", "n_clicks"),
 )
+def _toggle_save_dataset(n_clicks):
+    base_style = {
+        "minWidth": "150px",
+        "padding": "0.6em 1.2em",
+        "fontWeight": "bold",
+        "borderRadius": "6px",
+        "border": "none",
+        "color": "#ffffff",
+        "cursor": "pointer",
+    }
 
-def send_voltage_command(number_of_clicks, input_value):
-
-    if not number_of_clicks:
-        raise PreventUpdate
     try:
-        if input_value is None:
-            return "Enter a value...", {"color": "#333"}
-        
-        input_voltage = float(input_value)
+        clicks = 0 if n_clicks is None else int(n_clicks)
+    except Exception:
+        clicks = 0
 
-        if not (0.0 <= input_voltage <= 3.3):
-            return "ERROR: Input out of range (0.0-3.3 V)!", {"color": "red", "fontWeight": "bold"}
-        
-        Back_End_Controller.send_command(f"SET {input_voltage:.6f}")
-
-        return f"Sent: SET {input_voltage:.6f}", {"color": "green", "fontWeight": "bold"}
-    except Exception as fault:
-        return f"ERROR: Command not set - {fault}!", {"color": "red", "fontWeight": "bold"}
-
-@app.callback(
-    Output("save-dataset-ack", "children"),
-    Input("save-dataset-toggle", "value"),
-)
-def _toggle_save_dataset(value):
-    enabled = isinstance(value, (list, tuple)) and ("on" in value)
+    enabled = (clicks % 2) == 1
     try:
         getattr(Back_End_Controller, "set_save_dataset_enabled", lambda _: None)(enabled)
     except Exception:
         pass
-    return f"Save after sweep: {'ON' if enabled else 'OFF'}"
+
+    if enabled:
+        style = {**base_style, "background": "#2ecc71", "boxShadow": "0 0 4px rgba(46,204,113,0.6)"}
+    else:
+        style = {**base_style, "background": "#e74c3c", "boxShadow": "0 0 4px rgba(231,76,60,0.6)"}
+
+    label = f"Save After Sweep: {'ON' if enabled else 'OFF'}"
+    return label, style
 
 # -------------------------------------------------------------------------
 #                     Input validation (UI Interface)
 # -------------------------------------------------------------------------
-
-@app.callback(
-    Output("voltage-input", "style"),
-    Input("voltage-input", "value"),
-)
-
-def _validate_voltage_input(input_value):
-    base_style = {"width": "140px"}
-
-    if input_value is None:
-        return base_style
-    try:
-        fval = float(input_value)
-    except Exception:
-        return {**base_style, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
-    
-    if 0.0 <= fval <= 3.3:
-        return base_style
-    return {**base_style, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
-
 
 @app.callback(
     Output("switch-time-us", "style"),
@@ -670,18 +685,22 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
     pin_voltages = [pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_voltage_5]
 
     try:
-        # Update PWM channels
-        for channel_index, value_index in enumerate(pin_voltages, start=1):
+        if any(value is None for value in pin_voltages):
+            return "Enter all five target voltages (0.0-3.3 V).", {"color": "red", "fontWeight": "bold"}
 
-            if value_index is None:
-                continue
-
+        targets = []
+        for idx, value in enumerate(pin_voltages, start=1):
             try:
-                Back_End_Controller.set_pwm(channel_index, int(value_index))
+                fval = float(value)
             except (TypeError, ValueError):
-                pass
+                return f"ERROR: Invalid target for pin {idx}", {"color": "red", "fontWeight": "bold"}
 
-        # Update switch timing (µs)
+            if not (0.0 <= fval <= 3.3):
+                return f"ERROR: Pin {idx} target out of range (0.0-3.3 V)!", {"color": "red", "fontWeight": "bold"}
+            targets.append(fval)
+
+        Back_End_Controller.set_pin_voltages(targets)
+
         switch_time_text = "not set"
         if switch_time_us is not None:
             try:
@@ -690,21 +709,21 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
                 return f"ERROR: Invalid switch time - {parse_fault}!", {"color": "red", "fontWeight": "bold"}
 
             if not (1.0 <= fval <= 20.0):
-                return "ERROR: Switch time out of range (1–20 µs)!", {"color": "red", "fontWeight": "bold"}
+                return "ERROR: Switch time out of range (1-20 us)!", {"color": "red", "fontWeight": "bold"}
 
             try:
                 getattr(Back_End_Controller, "set_switch_timing_us", lambda *_: None)(fval)
             except Exception:
                 pass
 
-            switch_time_text = f"{fval:.1f} µs"
+            switch_time_text = f"{fval:.1f} us"
 
         status_message = (
-            f"Pins updated: squeeze_plate={pin_voltages[0]}, "
-            f"ion_source={pin_voltages[1]}, "
-            f"wein_filter={pin_voltages[2]}, "
-            f"cone_1={pin_voltages[3]}, "
-            f"cone_2={pin_voltages[4]}, "
+            f"Targets updated (V): squeeze_plate={targets[0]:.3f}, "
+            f"ion_source={targets[1]:.3f}, "
+            f"wein_filter={targets[2]:.3f}, "
+            f"cone_1={targets[3]:.3f}, "
+            f"cone_2={targets[4]:.3f}, "
             f"switch_time={switch_time_text}"
         )
 
@@ -749,6 +768,16 @@ def update_pin_status(_):
             "CONNECTED": "green",
             "DISCONNECTED": "red",
         }.get(connection_state, "#333")
+        try:
+            numeric_value = float(pin_value)
+        except Exception:
+            numeric_value = None
+
+        display = str(pin_value)
+        if pin_label != "switch_logic" and numeric_value is not None:
+            volts = (numeric_value / 1023.0) * 3.3
+            display = f"{int(numeric_value)} ({volts:.3f} V)"
+
         return html.Div(
             style={
                 "border": f"1px solid {color}",
@@ -758,7 +787,7 @@ def update_pin_status(_):
             },
             children=[
                 html.Span(f"{pin_label}: ", style={"fontWeight": "bold"}),
-                html.Span(str(pin_value)),
+                html.Span(display),
                 html.Span(f"  ({connection_state})", style={"marginLeft": "0.4em", "color": color}),
             ],
         )
@@ -804,19 +833,32 @@ def update_pin_status(_):
     State("sweep-step", "value"),
     State("sweep-dwell", "value"),
     State("sweep-epochs", "value"),
+    State("sweep-baselines", "value"),
+    State("sweep-factorials", "value"),
+    State("sweep-random-samples", "value"),
 
     prevent_initial_call=False,
 )
 
-def handle_training_sweep(_, start_click_count, stop_click_count, min_voltage, max_voltage, step, dwell_s,  number_of_epochs):
+def handle_training_sweep(
+    _,
+    start_click_count,
+    stop_click_count,
+    min_voltage,
+    max_voltage,
+    step,
+    dwell_s,
+    number_of_epochs,
+    baseline_levels_value,
+    factorial_levels_value,
+    random_samples_value,
+):
     
     trigger_id = None
     
     try:
-        callback_context = dash.callback_context
-
-        if callback_context and callback_context.triggered:
-            trigger_id = callback_context.triggered[0]["prop_id"].split(".")[0]
+        if ctx and ctx.triggered:
+            trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
 
     except Exception:
         trigger_id = None
@@ -826,12 +868,39 @@ def handle_training_sweep(_, start_click_count, stop_click_count, min_voltage, m
         try:
             min_sweep_voltage = 0.0 if min_voltage is None else float(min_voltage)
             max_sweep_voltage = 3.3 if max_voltage is None else float(max_voltage)
-
             sweep_step = 0.05 if step is None or step <= 0 else float(step)
             dwell_seconds = 0.05 if dwell_s is None or dwell_s < 0 else float(dwell_s)
-            number_of_epochs = 10 if  number_of_epochs is None or int( number_of_epochs) <= 0 else int( number_of_epochs)
 
-            started = start_training_sweep(min_v=min_sweep_voltage, max_v=max_sweep_voltage, step=sweep_step, dwell_s=dwell_seconds, epochs=int(number_of_epochs) if number_of_epochs else 10)
+            try:
+                epochs_value = int(number_of_epochs) if number_of_epochs is not None else 10
+            except Exception:
+                epochs_value = 10
+            if epochs_value <= 0:
+                epochs_value = 10
+
+            def _clean_positive_int(raw_value):
+                if raw_value is None:
+                    return None
+                try:
+                    val = int(raw_value)
+                except Exception:
+                    return None
+                return val if val > 0 else None
+
+            baseline_count = _clean_positive_int(baseline_levels_value)
+            factorial_count = _clean_positive_int(factorial_levels_value)
+            random_sample_override = _clean_positive_int(random_samples_value)
+
+            started = start_training_sweep(
+                min_v=min_sweep_voltage,
+                max_v=max_sweep_voltage,
+                step=sweep_step,
+                dwell_s=dwell_seconds,
+                epochs=epochs_value,
+                baseline_levels=baseline_count,
+                factorial_levels=factorial_count,
+                random_samples=random_sample_override,
+            )
 
             if started:
                 log.info("Training sweep initiated by user...")
@@ -856,7 +925,7 @@ def handle_training_sweep(_, start_click_count, stop_click_count, min_voltage, m
     sweep_message = str(sweep_status.get("message", ""))
 
     percent_completion = int(max(0.0, min(1.0, sweep_progress)) * 100)
-    text = f"Sweep: {sweep_state} ({percent_completion}%)" + (f" – {sweep_message}" if sweep_message else "")
+    text = f"Sweep: {sweep_state} ({percent_completion}%)" + (" - " + sweep_message if sweep_message else "")
     disabled = sweep_state == "running"
 
     if sweep_state == "running":
@@ -914,7 +983,7 @@ def update_ml_tab(_):
 
     if sample_times_series and control_effort_series:
         effort_figure = go.Figure(data=[go.Scatter(x=pd.to_datetime(sample_times_series, unit="s"), y=control_effort_series, mode="lines", line=dict(color="#2e7d32", width=3))])
-        effort_figure.update_layout(template="plotly_white", margin=dict(l=40, r=10, t=30, b=30), xaxis_title="Time", yaxis_title="Control effort (||Î”u||^2)")
+        effort_figure.update_layout(template="plotly_white", margin=dict(l=40, r=10, t=30, b=30), xaxis_title="Time", yaxis_title="Control effort (||ÃŽâ€u||^2)")
     
     else:
         effort_figure = go.Figure()

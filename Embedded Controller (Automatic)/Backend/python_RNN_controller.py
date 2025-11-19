@@ -18,7 +18,7 @@ import torch.optim as optim
 from sklearn.metrics import r2_score
 from sklearn.preprocessing import StandardScaler
 
-__all__ = ["RNNController"]
+__all__ = ["RNNController", "train_model", "online_update", "propose_control_vector"]
 
 # -------------------------------------------------------
 #                 Variable Initialisation
@@ -34,6 +34,8 @@ LEARNING_RATE = 1e-3
 
 INPUT_SIZE = 6
 OUTPUT_SIZE = 5
+PWM_MAX_VALUE = 1023.0
+ANALOG_VREF = 3.3
 
 # -------------------------------------------------------
 #                      Logging setup
@@ -136,25 +138,37 @@ criterion = nn.MSELoss()
 def _check_scaler_fitted():
     return hasattr(scaler, "mean_") and hasattr(scaler, "scale_")
 
-def prepare_sequences(data_frame: pd.DataFrame, sequence_length: int = SEQUENCE_LENGTH, fit_scaler: bool = False,):
+def prepare_sequences(
+    data_frame: pd.DataFrame,
+    sequence_length: int = SEQUENCE_LENGTH,
+    fit_scaler: bool = False,
+):
 
-    df = data_frame.dropna(subset=["dac", "voltage"]).copy()
-    if len(df) < sequence_length:
+    required_columns = [f"pin_{i}" for i in range(1, 6)] + ["voltage"]
+    df = data_frame.dropna(subset=required_columns).copy()
+
+    if len(df) <= sequence_length:
         raise ValueError("Insufficient data for sequence preparation.")
 
-    features = df[["dac", "voltage"]].values
+    feature_matrix = df[required_columns].values
+    target_matrix = df[[f"pin_{i}" for i in range(1, 6)]].values
+
     if fit_scaler or not _check_scaler_fitted():
-        data = scaler.fit_transform(features)
+        data = scaler.fit_transform(feature_matrix)
     else:
-        data = scaler.transform(features)
+        data = scaler.transform(feature_matrix)
 
     X, y = [], []
-    for i in range(sequence_length - 1, len(data)):
+    # Predict the next pin vector from the previous sequence
+    for i in range(sequence_length - 1, len(data) - 1):
         X.append(data[i - sequence_length + 1 : i + 1])
-        y.append(data[i, 1])  # voltage at time i
+        y.append(target_matrix[i + 1])
+
+    if not X or not y:
+        raise ValueError("ERROR: Could not build any training sequences.")
 
     X = torch.tensor(np.array(X), dtype=torch.float32).to(DEVICE)
-    y = torch.tensor(np.array(y), dtype=torch.float32).unsqueeze(-1).to(DEVICE)
+    y = torch.tensor(np.array(y), dtype=torch.float32).to(DEVICE)
     return X, y
 
 
@@ -199,29 +213,29 @@ def train_model(
 # -------------------------------------------------------
 
 
-def propose_dac(data_window: pd.DataFrame, candidate_dacs: np.ndarray):
-    if len(data_window) < SEQUENCE_LENGTH - 1:
-        raise ValueError("Not enough history to propose DAC.")
+def propose_control_vector(data_window: pd.DataFrame, output_mode: str = "volts"):
+    required_columns = [f"pin_{i}" for i in range(1, 6)] + ["voltage"]
+    df = data_window.dropna(subset=required_columns)
+
+    if len(df) < SEQUENCE_LENGTH:
+        raise ValueError("Not enough history to propose control targets.")
     if not _check_scaler_fitted():
         raise RuntimeError("Scaler not fitted. Train the model first.")
 
     model.eval()
-    hist = data_window.tail(SEQUENCE_LENGTH - 1)[["dac", "voltage"]].values
-    last_v = data_window["voltage"].iloc[-1]
-    sequences = []
-    for i in candidate_dacs:
-        sequence = np.vstack([hist, np.array([i, last_v], dtype=float)])
-        sequences.append(sequence)
-    sequences = np.stack(sequences, axis=0)
-    B, T, F = sequences.shape
-    flat = sequences.reshape(B * T, F)
-    flat_scaled = scaler.transform(flat)
-    seq_scaled = flat_scaled.reshape(B, T, F)
+    seq = df.tail(SEQUENCE_LENGTH)[required_columns].values
+    scaled = scaler.transform(seq)
+    x = torch.tensor(scaled[None, ...], dtype=torch.float32).to(DEVICE)
+
     with torch.no_grad():
-        x = torch.tensor(seq_scaled, dtype=torch.float32).to(DEVICE)
-        preds = model(x).squeeze(-1).cpu().numpy()
-    best_idx = int(np.argmax(preds))
-    return float(candidate_dacs[best_idx]), float(preds[best_idx])
+        preds = model(x).cpu().numpy().reshape(-1)
+
+    pwm_targets = np.clip(preds, 0.0, PWM_MAX_VALUE)
+
+    if output_mode.lower() == "pwm":
+        return pwm_targets
+
+    return (pwm_targets / PWM_MAX_VALUE) * ANALOG_VREF
 
 
 # -------------------------------------------------------
@@ -330,4 +344,3 @@ class RNNController:
 
 if __name__ == "__main__":
     log.info("RNN controller module ready! No standalone execution possible...")
-
