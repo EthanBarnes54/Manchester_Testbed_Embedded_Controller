@@ -4,6 +4,11 @@
 #   conditioned on DAC, supporting live control logic and 
 #   offline training.
 
+# Due to issues with packagE imports, if this file isnt 
+# working run this in the terminal:
+
+# C:\YOUR FOLDER LOCATION\Manchester_Testbed_Embedded_Controller>python "C:\YOUR FOLDER LOCATION\Manchester_Testbed_Embedded_Controller\Embedded Controller (Automatic)\Backend\python_RNN_Controller.py"
+#python "C:\Users\b09335eb\Documents\Manchester_Testbed_Embedded_Controller\Embedded Controller (Automatic)\Backend\python_RNN_Controller.py"
 # ------------------------------------------------------- #
 
 import logging
@@ -18,7 +23,14 @@ import torch.optim as optim
 from sklearn.metrics import r2_score
 from sklearn.preprocessing import StandardScaler
 
-__all__ = ["RNNController", "train_model", "online_update", "propose_control_vector"]
+__all__ = [
+    "RNNController",
+    "train_model",
+    "online_update",
+    "propose_control_vector",
+    "set_learning_rate",
+    "get_learning_rate",
+]
 
 # -------------------------------------------------------
 #                 Variable Initialisation
@@ -29,6 +41,8 @@ MODEL_PATH = Path("RNN_model.pt")
 SEQUENCE_LENGTH = 10
 HIDDEN_SIZE = 64
 LEARNING_RATE = 1e-3
+MIN_LEARNING_RATE = 1e-5
+MAX_LEARNING_RATE = 1e-1
 
 # Inputs: [Squeeze_plate_voltage, Ion_source_voltage, Wein_filter_voltage, Upper_cone_voltage, Lower_cone_voltage,  Diode_voltage]
 
@@ -36,6 +50,7 @@ INPUT_SIZE = 6
 OUTPUT_SIZE = 5
 PWM_MAX_VALUE = 1023.0
 ANALOG_VREF = 3.3
+_current_learning_rate = LEARNING_RATE
 
 # -------------------------------------------------------
 #                      Logging setup
@@ -59,18 +74,22 @@ class _RNN(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, use_elu_head: bool = True):
         super().__init__()
         self.gru = nn.GRU(input_size, hidden_size, batch_first=True)
+
         if use_elu_head:
-            self.head = nn.Sequential(
-                nn.Linear(hidden_size, hidden_size),
+           self.brain = nn.Sequential(
+                nn.Linear(hidden_size, 2 * hidden_size),
+                nn.ELU(),
+                nn.Linear(2 * hidden_size, hidden_size),
                 nn.ELU(),
                 nn.Linear(hidden_size, output_size),
             )
+
         else:
-            self.head = nn.Linear(hidden_size, output_size)
+            self.brain = nn.Linear(hidden_size, output_size)
 
     def forward(self, x):
         out, _ = self.gru(x)
-        out = self.head(out[:, -1, :])
+        out = self.brain(out[:, -1, :])
         return out
 
 
@@ -126,8 +145,29 @@ def model_init(retrain: bool = False):
 
 
 model = model_init()
-optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+optimizer = optim.Adam(model.parameters(), lr=_current_learning_rate)
 criterion = nn.MSELoss()
+
+
+def set_learning_rate(learning_rate: float) -> float:
+    """
+    Update the optimizer learning rate (bounded for stability) and return the active value.
+    """
+    global _current_learning_rate
+    try:
+        lr = float(learning_rate)
+    except Exception as fault:
+        raise ValueError(f"Invalid learning rate '{learning_rate}' - {fault}") from fault
+    lr = max(MIN_LEARNING_RATE, min(MAX_LEARNING_RATE, lr))
+    _current_learning_rate = lr
+    for group in optimizer.param_groups:
+        group["lr"] = lr
+    log.info(f"Learning rate set to {lr:.3e}")
+    return lr
+
+
+def get_learning_rate() -> float:
+    return float(_current_learning_rate)
 
 
 # -------------------------------------------------------
@@ -188,8 +228,9 @@ def train_model(
         X, y = prepare_sequences(data_frame, fit_scaler=True)
     except ValueError:
         log.warning("Insufficient data for training...")
-        return
+        return None
 
+    last_loss, last_r2 = None, None
     for epoch in range(number_of_epochs):
         optimizer.zero_grad(set_to_none=True)
         preds = model(X)
@@ -201,11 +242,14 @@ def train_model(
 
         with torch.no_grad():
             r2 = r2_score(y.cpu().numpy(), preds.cpu().numpy())
+            last_loss = float(loss.item())
+            last_r2 = float(r2)
         log.info(
             f"Epoch {epoch+1}/{number_of_epochs} | Loss={loss.item():.6f} | R2={r2:.3f}"
         )
 
     save_nn_weights(model, scaler)
+    return {"loss": last_loss, "r2": last_r2}
 
 
 # -------------------------------------------------------
@@ -244,11 +288,17 @@ def propose_control_vector(data_window: pd.DataFrame, output_mode: str = "volts"
 
 
 def online_update(new_data_frame: pd.DataFrame, grad_clip: float = 1.0):
+    if not _check_scaler_fitted():
+        log.warning("Scaler not fitted yet. Skipping online update until an initial training run completes...")
+        return False, None, None
     model.train()
     try:
-        X, y = prepare_sequences(new_data_frame, fit_scaler=True)
+        X, y = prepare_sequences(new_data_frame, fit_scaler=False)
     except ValueError:
-        return
+        return False, None, None
+    except Exception as fault:
+        log.warning(f"Online update data prep failed - {fault}")
+        return False, None, None
     optimizer.zero_grad(set_to_none=True)
     preds = model(X)
     loss = criterion(preds, y)
@@ -257,7 +307,13 @@ def online_update(new_data_frame: pd.DataFrame, grad_clip: float = 1.0):
         nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
     save_nn_weights(model, scaler)
-    log.info(f"Online update done | Loss={loss.item():.6f}")
+    try:
+        with torch.no_grad():
+            r2 = r2_score(y.cpu().numpy(), preds.detach().cpu().numpy())
+    except Exception:
+        r2 = None
+    log.info(f"Online update done | Loss={loss.item():.6f}" + (f" | R2={r2:.3f}" if r2 is not None else ""))
+    return True, float(loss.item()), float(r2) if r2 is not None else None
 
 
 # -------------------------------------------------------

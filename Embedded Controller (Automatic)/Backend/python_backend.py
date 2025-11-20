@@ -21,9 +21,21 @@ import serial
 
 from python_ML_Metrics import MetricCollector
 try:
-    from python_RNN_Controller import train_model
+    from python_RNN_Controller import (
+        train_model,
+        online_update,
+        set_learning_rate as _set_rnn_learning_rate,
+        get_learning_rate as _get_rnn_learning_rate,
+    )
 except Exception:
     train_model = None
+    online_update = None
+
+    def _set_rnn_learning_rate(_value):
+        return None
+
+    def _get_rnn_learning_rate():
+        return None
 
 
 # -------------------------------------------------------------------------
@@ -52,6 +64,10 @@ OFFLINE = os.getenv("OFFLINE", "").strip() not in ("", "0", "false", "False")
 MAX_MODULATION_VALUE = 1023
 MAX_CONTROL_VOLTAGE = 3.3
 CONTROL_PIN_COUNT = 5
+ONLINE_UPDATE_INTERVAL_SEC = 5.0
+ONLINE_WINDOW_DEFAULT_SEC = 30.0
+ONLINE_WINDOW_MIN_SEC = 5.0
+ONLINE_WINDOW_MAX_SEC = 600.0
 
 
 # -------------------------------------------------------------------------
@@ -95,10 +111,16 @@ class SerialBackend:
 
         self.save_dataset_enabled = False
         self.last_training_ts = None
+        self.last_online_update_ts = None
+        self.online_window_seconds = ONLINE_WINDOW_DEFAULT_SEC
+        self.online_update_period = ONLINE_UPDATE_INTERVAL_SEC
+        self.online_update_enabled = True
 
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.alive.set()
         self.thread.start()
+        self.online_update_thread = threading.Thread(target=self._online_update_worker, daemon=True)
+        self.online_update_thread.start()
 
     # ------------------------------------------------------------------
     #                    Connect / Disconnect Switches
@@ -138,6 +160,36 @@ class SerialBackend:
             self.save_dataset_enabled = bool(enabled)
         except Exception:
             self.save_dataset_enabled = False
+
+    def set_online_window_seconds(self, window_seconds: float):
+        try:
+            value = float(window_seconds)
+        except Exception as fault:
+            raise ValueError(f"Invalid window '{window_seconds}': {fault}") from fault
+        bounded = max(ONLINE_WINDOW_MIN_SEC, min(ONLINE_WINDOW_MAX_SEC, value))
+        self.online_window_seconds = bounded
+        log.info(f"Online update window set to {bounded:.1f} s")
+        return bounded
+
+    def get_online_window_seconds(self) -> float:
+        return float(self.online_window_seconds)
+
+    def set_online_learning_rate(self, learning_rate: float):
+        if _set_rnn_learning_rate is None:
+            raise RuntimeError("Learning rate control unavailable (RNN controller import failed).")
+        return _set_rnn_learning_rate(learning_rate)
+
+    def get_online_learning_rate(self):
+        if _get_rnn_learning_rate is None:
+            return None
+        return _get_rnn_learning_rate()
+
+    def get_online_update_config(self) -> dict:
+        return {
+            "window_seconds": float(self.online_window_seconds),
+            "learning_rate": self.get_online_learning_rate(),
+            "enabled": bool(self.online_update_enabled),
+        }
 
     def get_latest_point(self):
         with self.data_lock:
@@ -305,6 +357,52 @@ class SerialBackend:
             except Exception as fault:
                 log.error(f"ERROR: Unexpected - {fault}!")
                 time.sleep(0.5)
+
+    def _online_update_worker(self):
+        """
+        Periodically trigger incremental training steps using the latest telemetry window.
+        """
+        while self.alive.is_set():
+            time.sleep(self.online_update_period)
+            if not self.online_update_enabled or online_update is None:
+                continue
+            try:
+                if str(self.sweep_status.get("state", "")).lower() == "running":
+                    continue
+            except Exception:
+                pass
+
+            df = self.get_data()
+            if df.empty:
+                continue
+
+            try:
+                window_floor = time.time() - max(ONLINE_WINDOW_MIN_SEC, float(self.online_window_seconds))
+            except Exception:
+                window_floor = time.time() - ONLINE_WINDOW_DEFAULT_SEC
+
+            try:
+                window_df = df[df["timestamp"] >= window_floor]
+            except Exception:
+                window_df = df
+
+            if window_df.empty:
+                continue
+
+            try:
+                updated, loss, r2 = online_update(window_df, grad_clip=1.0)
+            except Exception as fault:
+                log.warning(f"ERROR: Online update failed - {fault}!")
+                continue
+
+            if updated:
+                now = time.time()
+                self.last_training_ts = now
+                self.last_online_update_ts = now
+                try:
+                    ML_METRICS.record_training_update(now, loss=loss, r2=r2, source="online")
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     #                               Methods
@@ -641,8 +739,21 @@ class SerialBackend:
 
                 if train_model is not None:
                     try:
-                        train_model(data_frame, number_of_epochs=int(max(1, epochs)))
-                        self.last_training_ts = time.time()
+                        metrics = train_model(data_frame, number_of_epochs=int(max(1, epochs)))
+                        now = time.time()
+                        self.last_training_ts = now
+                        self.last_online_update_ts = now
+
+                        try:
+                            if isinstance(metrics, dict):
+                                ML_METRICS.record_training_update(
+                                    now,
+                                    loss=metrics.get("loss"),
+                                    r2=metrics.get("r2"),
+                                    source="sweep",
+                                )
+                        except Exception:
+                            pass
 
                         self.sweep_status.update({
                             "state": "completed",
@@ -658,7 +769,7 @@ class SerialBackend:
                 else:
                     self.sweep_status.update({
                         "state": "completed",
-                        "message": f"Data sweep complete (wihtout training) - {len(data_frame)} samples collected!",
+                        "message": f"Data sweep complete (without training) - {len(data_frame)} samples collected!",
                         "progress": 1.0,
                     })
 
@@ -726,6 +837,9 @@ set_switch_timing_us = getattr(Back_End_Controller, "set_switch_timing_us", None
 set_pin = Back_End_Controller.set_pin
 set_pin_by_name = Back_End_Controller.set_pin_by_name
 get_pins = Back_End_Controller.get_pins
+set_online_window_seconds = getattr(Back_End_Controller, "set_online_window_seconds", None)
+set_online_learning_rate = getattr(Back_End_Controller, "set_online_learning_rate", None)
+get_online_update_config = getattr(Back_End_Controller, "get_online_update_config", None)
 
 lines = Back_End_Controller.lines
 get_status = Back_End_Controller.get_status
@@ -735,17 +849,44 @@ get_status = Back_End_Controller.get_status
 # -------------------------------------------------------------------------
 
 def get_model_info() -> dict:
+    snapshot = {
+        "last_train_ago_sec": None,
+        "last_online_update_ago_sec": None,
+        "online_window_seconds": None,
+        "online_updates_enabled": None,
+        "learning_rate": None,
+        "sweep_state": None,
+    }
+    now = time.time()
     try:
         ts = getattr(Back_End_Controller, "last_training_ts", None)
+        if ts is not None:
+            snapshot["last_train_ago_sec"] = max(0.0, float(now - float(ts)))
     except Exception:
-        ts = None
-    if ts is None:
-        return {"last_train_ago_sec": None}
+        pass
     try:
-        now = time.time()
-        return {"last_train_ago_sec": max(0.0, float(now - float(ts)))}
+        online_ts = getattr(Back_End_Controller, "last_online_update_ts", None)
+        if online_ts is not None:
+            snapshot["last_online_update_ago_sec"] = max(0.0, float(now - float(online_ts)))
     except Exception:
-        return {"last_train_ago_sec": None}
+        pass
+    try:
+        snapshot["online_window_seconds"] = float(getattr(Back_End_Controller, "online_window_seconds", None))
+    except Exception:
+        snapshot["online_window_seconds"] = None
+    try:
+        snapshot["online_updates_enabled"] = bool(getattr(Back_End_Controller, "online_update_enabled", None))
+    except Exception:
+        snapshot["online_updates_enabled"] = None
+    try:
+        snapshot["learning_rate"] = _get_rnn_learning_rate()
+    except Exception:
+        snapshot["learning_rate"] = None
+    try:
+        snapshot["sweep_state"] = str(getattr(Back_End_Controller, "sweep_status", {}).get("state", "idle"))
+    except Exception:
+        snapshot["sweep_state"] = None
+    return snapshot
 
 
 # -------------------------------------------------------------------------

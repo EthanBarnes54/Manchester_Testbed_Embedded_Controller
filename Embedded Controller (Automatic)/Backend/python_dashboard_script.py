@@ -21,7 +21,16 @@ try:
     from python_RNN_Controller import propose_control_vector
 except Exception:
     propose_control_vector = None
-from python_Backend import (get_ml_metrics, Back_End_Controller, start_training_sweep, get_sweep_status, stop_training_sweep, get_model_info)
+from python_Backend import (
+    get_ml_metrics,
+    Back_End_Controller,
+    start_training_sweep,
+    get_sweep_status,
+    stop_training_sweep,
+    get_model_info,
+    set_online_window_seconds,
+    set_online_learning_rate,
+)
 
 # Workaround for Python 3.14 (pkgutil.find_loader has been removed)
 if not hasattr(pkgutil, "find_loader"):
@@ -33,6 +42,10 @@ if not hasattr(pkgutil, "find_loader"):
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S",)
 log = logging.getLogger("Dashboard")
+try:
+    MODEL_INFO_BOOTSTRAP = get_model_info()
+except Exception:
+    MODEL_INFO_BOOTSTRAP = {}
 
 # -------------------------------------------------------------------------
 #                                 Initialize app
@@ -155,12 +168,48 @@ def _control_tab():
                 ],
             ),
 
-            html.Div(id="metrics-bar",
-                style={"display": "flex", "justifyContent": "space-around", "marginTop": "2em", "padding": "1em", "borderTop": "1px solid #ddd", "color": "#333"},
+            html.Div(
+                id="metrics-bar",
+                style={
+                    "display": "flex",
+                    "justifyContent": "space-around",
+                    "marginTop": "2em",
+                    "padding": "1em",
+                    "borderTop": "1px solid #ddd",
+                    "color": "#333",
+                    "gap": "1em",
+                    "flexWrap": "wrap",
+                },
                 children=[
-                    html.Div(id="latest-voltage", children="Voltage: -- V"),
-                    html.Div(id="num-points", children="Samples: --"),
-                    html.Div(id="status", children="OFFLINE", style={"color": "red", "fontWeight": "bold"}),
+                    html.Div(
+                        id="latest-voltage",
+                        children="Live Voltage: -- V",
+                        style={
+                            "border": "1px solid #000",
+                            "borderRadius": "6px",
+                            "padding": "0.4em 0.8em",
+                            "minWidth": "180px",
+                            "textAlign": "center",
+                            "fontWeight": "bold",
+                        },
+                    ),
+                    html.Div(
+                        id="num-points",
+                        children="Sample Count: --",
+                        style={
+                            "border": "1px solid #000",
+                            "borderRadius": "6px",
+                            "padding": "0.4em 0.8em",
+                            "minWidth": "180px",
+                            "textAlign": "center",
+                            "fontWeight": "bold",
+                        },
+                    ),
+                    html.Div(
+                        id="status",
+                        children="OFFLINE",
+                        style={"color": "red", "fontWeight": "bold"},
+                    ),
                 ],
             ),
 
@@ -179,7 +228,7 @@ def _control_tab():
                         children=[
                             html.Div(
                                 children=[
-                                    html.H4("Training Sweep", style={"margin": 0}),
+                                    html.H4("RNN Training Control Panel", style={"margin": 0}),
                                     html.P(
                                         "Generate the training dataset by sweeping over output pin voltages, then train the RNN controller.",
                                         style={"margin": "0.25em 0 0.75em 0", "color": "#555"},
@@ -226,7 +275,7 @@ def _control_tab():
                                     ),
                                     html.Div(
                                         children=[
-                                            html.Small("Step"),
+                                            html.Small("Voltage Step Size (V)"),
                                             dcc.Input(
                                                 id="sweep-step",
                                                 type="number",
@@ -241,7 +290,7 @@ def _control_tab():
                                     ),
                                     html.Div(
                                         children=[
-                                            html.Small("Dwell (s)"),
+                                            html.Small("Time Between Steps (s)"),
                                             dcc.Input(
                                                 id="sweep-dwell",
                                                 type="number",
@@ -255,7 +304,7 @@ def _control_tab():
                                     ),
                                     html.Div(
                                         children=[
-                                            html.Small("Epochs"),
+                                            html.Small("Training Passes"),
                                             dcc.Input(
                                                 id="sweep-epochs",
                                                 type="number",
@@ -367,7 +416,7 @@ def _control_tab():
                             "background": "#fafafa",
                         },
                         children=[
-                            html.Div(children=[html.H4("Automation & Data", style={"margin": 0})]),
+                            html.Div(children=[html.H4("RNN Feedback Control Panel", style={"margin": 0})]),
                             html.Div(
                                 style={
                                     "display": "flex",
@@ -398,19 +447,6 @@ def _control_tab():
                                     ),
                                     html.Div(
                                         children=[
-                                            html.Label("Auto Rate (ms)"),
-                                            dcc.Input(
-                                                id="auto-rate-ms",
-                                                type="number",
-                                                value=500,
-                                                min=100,
-                                                step=50,
-                                                style={"width": "100px"},
-                                            ),
-                                        ]
-                                    ),
-                                    html.Div(
-                                        children=[
                                             html.Button(
                                                 "Save After Sweep: OFF",
                                                 id="save-dataset-button",
@@ -428,6 +464,19 @@ def _control_tab():
                                             ),
                                         ]
                                     ),
+                                    html.Div(
+                                        children=[
+                                            html.Label("Auto Control Interval (ms)"),
+                                            dcc.Input(
+                                                id="auto-rate-ms",
+                                                type="number",
+                                                value=500,
+                                                min=100,
+                                                step=50,
+                                                style={"width": "120px"},
+                                            ),
+                                        ]
+                                    ),
                                     html.Span(id="save-dataset-ack", style={"minWidth": "160px"}),
                                 ],
                             ),
@@ -440,6 +489,13 @@ def _control_tab():
 
 
 def _ml_tab():
+    window_default = MODEL_INFO_BOOTSTRAP.get("online_window_seconds")
+    if window_default is None:
+        window_default = 30.0
+    lr_default = MODEL_INFO_BOOTSTRAP.get("learning_rate")
+    if lr_default is None:
+        lr_default = 1e-3
+
     return html.Div(
         style={"padding": "1em"},
         children=[
@@ -455,6 +511,52 @@ def _ml_tab():
                 ],
             ),
             html.Div(
+                style={
+                    "display": "flex",
+                    "gap": "1em",
+                    "flexWrap": "wrap",
+                    "marginTop": "1em",
+                    "alignItems": "flex-end",
+                },
+                children=[
+                    html.Div(
+                        [
+                            html.Label("Live Retraining Window (s)", style={"fontWeight": "bold"}),
+                            dcc.Input(
+                                id="online-window-seconds",
+                                type="number",
+                                min=5,
+                                max=600,
+                                step=5,
+                                debounce=True,
+                                value=float(window_default),
+                                style={"width": "150px"},
+                            ),
+                        ]
+                    ),
+                    html.Div(
+                        [
+                            html.Label("Learning Rate", style={"fontWeight": "bold"}),
+                            dcc.Input(
+                                id="online-learning-rate",
+                                type="text",
+                                debounce=True,
+                                value=float(lr_default),
+                                style={"width": "150px"},
+                            ),
+                        ]
+                    ),
+                    html.Div(
+                        id="online-update-config-status",
+                        style={
+                            "minWidth": "260px",
+                            "fontWeight": "bold",
+                            "color": "#34495e",
+                        },
+                    ),
+                ],
+            ),
+            html.Div(
                 style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "1em", "marginTop": "1em"},
                 children=[
                     dcc.Graph(id="ml-beam-graph", style={"height": "38vh"}),
@@ -466,6 +568,20 @@ def _ml_tab():
     )
 
 
+def _rig_tab():
+    return html.Div(
+        style={
+            "display": "flex",
+            "alignItems": "center",
+            "justifyContent": "center",
+            "height": "70vh",
+            "color": "#7f8c8d",
+            "fontSize": "1.2em",
+        },
+        children="Rig controls coming soon...",
+    )
+
+
 app.layout = html.Div(
     style={"fontFamily": "Segoe UI, sans-serif", "padding": "2em"},
     children=[
@@ -474,13 +590,36 @@ app.layout = html.Div(
             id="tabs",
             value="control",
             children=[
-                dcc.Tab(label="Control", value="control", children=[_control_tab()]),
-                dcc.Tab(label="ML", value="ml", children=[_ml_tab()]),
+                dcc.Tab(label="Board Controls", value="control", children=[_control_tab()]),
+                dcc.Tab(label="NN Auto Controller", value="ml", children=[_ml_tab()]),
+                dcc.Tab(label="Rig Controls", value="rig", children=[_rig_tab()]),
             ],
         ),
         dcc.Interval(id="update-interval", interval=1000, n_intervals=0),
     ],
 )
+
+
+@app.callback(
+    Output("online-update-config-status", "children"),
+    Input("online-window-seconds", "value"),
+    Input("online-learning-rate", "value"),
+)
+def _configure_online_updates(window_seconds, learning_rate):
+    errors = []
+    if window_seconds is not None and callable(set_online_window_seconds):
+        try:
+            applied_window = set_online_window_seconds(window_seconds)
+        except Exception as fault:
+            errors.append(f"Window error: {fault}")
+    if learning_rate is not None and callable(set_online_learning_rate):
+        try:
+            applied_lr = set_online_learning_rate(learning_rate)
+        except Exception as fault:
+            errors.append(f"LR error: {fault}")
+    if not errors:
+        return html.Span("")
+    return html.Span(" | ".join(errors), style={"color": "#e74c3c"})
 
 # -------------------------------------------------------------------------
 #                                Graph Updates
@@ -764,6 +903,15 @@ def update_pin_status(_):
             pass
 
     def chip(pin_label, pin_value, connection_state):
+        label_map = {
+            "squeeze_plate": "Squeeze Plate",
+            "ion_source": "Ion Source",
+            "wein_filter": "Wein Filter",
+            "cone_1": "Cone 1",
+            "cone_2": "Cone 2",
+            "switch_logic": "Switch Logic",
+        }
+        pretty_label = label_map.get(pin_label, pin_label.replace("_", " ").title())
         color = {
             "CONNECTED": "green",
             "DISCONNECTED": "red",
@@ -786,7 +934,7 @@ def update_pin_status(_):
                 "minWidth": "180px",
             },
             children=[
-                html.Span(f"{pin_label}: ", style={"fontWeight": "bold"}),
+                html.Span(f"{pretty_label}: ", style={"fontWeight": "bold"}),
                 html.Span(display),
                 html.Span(f"  ({connection_state})", style={"marginLeft": "0.4em", "color": color}),
             ],
@@ -971,6 +1119,10 @@ def update_ml_tab(_):
     voltage_time_series = metrics_snapshot.get("Input_Voltage_series", [])
     control_effort_series = metrics_snapshot.get("Pin_Control_Changes_series", [])
     saturation_series = metrics_snapshot.get("Saturation_Indicators_series", [])
+    training_times_series = metrics_snapshot.get("Training_Times", [])
+    training_loss_series = metrics_snapshot.get("Training_Loss", [])
+    training_r2_series = metrics_snapshot.get("Training_R2", [])
+    training_source_series = metrics_snapshot.get("Training_Source", [])
 
     if sample_times_series and voltage_time_series:
         beam_figure = go.Figure(data=[go.Scatter(x=pd.to_datetime(sample_times_series, unit="s"), y=voltage_time_series, mode="lines", line=dict(color="#1f77b4", width=3))])
@@ -1058,22 +1210,108 @@ def update_ml_tab(_):
         except Exception:
             pass
 
-    feature_names = metrics_snapshot.get("Feature_Names", [])
-    feature_saliency = metrics_snapshot.get("Feature_Saliency", [])
-    
-    if feature_names and feature_saliency and len(feature_names) == len(feature_saliency):
-        attribution_figure = go.Figure(data=[go.Bar(x=feature_names, y=np.abs(np.array(feature_saliency)).tolist(), marker_color="#2c3e50")])
-        attribution_figure.update_layout(template="plotly_white", margin=dict(l=40, r=10, t=30, b=30), yaxis_title="|Attribution|")
-    
+    # Training diagnostics: loss and R² over time
+    if training_times_series and (training_loss_series or training_r2_series):
+        try:
+            t_idx = [i for i, v in enumerate(training_times_series) if v is not None]
+        except Exception:
+            t_idx = list(range(len(training_times_series)))
+        times = np.array([training_times_series[i] for i in t_idx], dtype=float)
+        loss_vals = np.array(
+            [training_loss_series[i] for i in t_idx if i < len(training_loss_series)],
+            dtype=float,
+        )
+        r2_vals = np.array(
+            [training_r2_series[i] for i in t_idx if i < len(training_r2_series)],
+            dtype=float,
+        )
+        time_index = pd.to_datetime(times, unit="s") if times.size else []
+
+        training_figure = go.Figure()
+
+        if times.size and loss_vals.size:
+            training_figure.add_trace(
+                go.Scatter(
+                    x=time_index,
+                    y=loss_vals,
+                    mode="lines+markers",
+                    line=dict(color="#1f77b4"),
+                    name="Loss (MSE)",
+                )
+            )
+            try:
+                window = int(min(5, max(2, loss_vals.size)))
+            except Exception:
+                window = 2
+            if loss_vals.size >= window:
+                kernel = np.ones(window, dtype=float) / float(window)
+                smooth_loss = np.convolve(loss_vals, kernel, mode="valid")
+                smooth_times = time_index[window - 1 :]
+                training_figure.add_trace(
+                    go.Scatter(
+                        x=smooth_times,
+                        y=smooth_loss,
+                        mode="lines",
+                        line=dict(color="#3498db", dash="dash"),
+                        name="Loss (rolling avg)",
+                    )
+                )
+
+        if times.size and r2_vals.size:
+            training_figure.add_trace(
+                go.Scatter(
+                    x=time_index,
+                    y=r2_vals,
+                    mode="lines+markers",
+                    line=dict(color="#e67e22"),
+                    name="R²",
+                    yaxis="y2",
+                )
+            )
+
+        # Mark sweep vs online updates (optional)
+        try:
+            for idx, src in enumerate(training_source_series or []):
+                if str(src).lower() == "sweep" and idx < len(time_index):
+                    training_figure.add_vline(
+                        x=time_index[idx],
+                        line=dict(color="rgba(231,76,60,0.6)", width=1, dash="dot"),
+                    )
+        except Exception:
+            pass
+
+        training_figure.update_layout(
+            template="plotly_white",
+            margin=dict(l=40, r=10, t=30, b=30),
+            xaxis_title="Time",
+            yaxis_title="Training loss (MSE)",
+            yaxis2=dict(
+                title="R²",
+                overlaying="y",
+                side="right",
+                range=[-0.1, 1.05],
+                showgrid=False,
+                zeroline=False,
+                tickmode="array",
+                tickvals=[0.0, 0.5, 1.0],
+            ),
+        )
     else:
-        attribution_figure = go.Figure()
-        attribution_figure.add_annotation(text="Attribution unavailable (attach pipeline+controller or install SHAP)", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
-        attribution_figure.update_layout(template="plotly_white", margin=dict(l=40, r=10, t=30, b=30))
+        training_figure = go.Figure()
+        training_figure.add_annotation(
+            text="Training history not available yet.",
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+        )
+        training_figure.update_layout(template="plotly_white", margin=dict(l=40, r=10, t=30, b=30))
 
     try:
-        attribution_figure.update_xaxes(showgrid=False, zeroline=False, linecolor="#444", mirror=True, ticks="outside")
-        attribution_figure.update_yaxes(showgrid=True, gridcolor="#e6e6e6", gridwidth=1, zeroline=False, linecolor="#444", mirror=True, ticks="outside")
-        attribution_figure.update_layout(font=dict(family="Segoe UI, sans-serif", size=12, color="#111"), plot_bgcolor="#ffffff", paper_bgcolor="#ffffff")
+        training_figure.update_xaxes(showgrid=False, zeroline=False, linecolor="#444", mirror=True, ticks="outside")
+        training_figure.update_yaxes(showgrid=True, gridcolor="#e6e6e6", gridwidth=1, zeroline=False, linecolor="#444", mirror=True, ticks="outside")
+        training_figure.update_layout(font=dict(family="Segoe UI, sans-serif", size=12, color="#111"), plot_bgcolor="#ffffff", paper_bgcolor="#ffffff")
     except Exception:
         pass
 
@@ -1086,25 +1324,42 @@ def update_ml_tab(_):
     beam_var_text = f"{beam_variance:.5f}" if beam_variance is not None else "--"
     effort_text = f"{mean_control_effort:.2f}" if mean_control_effort is not None else "--"
     saturation_text = f"{int(saturation_indicators)}"
-    # Model status: compute trained state and age text
-    model_status_text = "Model: not trained"
-    trained = False
-    age_text = ""
+    def _format_age(seconds: float) -> str:
+        if seconds is None:
+            return ""
+        if seconds < 60:
+            return f"{seconds:.0f}s"
+        if seconds < 3600:
+            return f"{seconds/60:.1f} min"
+        return f"{seconds/3600:.1f} h"
+
     try:
-        mi = get_model_info()
-        sec = mi.get("last_train_ago_sec")
-        if sec is not None:
-            sec = float(sec)
-            trained = True
-            if sec < 60:
-                age_text = f"updated {sec:.0f}s ago"
-            elif sec < 3600:
-                age_text = f"updated {sec/60:.1f} min ago"
-            else:
-                age_text = f"updated {sec/3600:.1f} h ago"
+        model_info = get_model_info()
     except Exception:
-        pass
-    state_color = "green" if trained else "red"
+        model_info = {}
+
+    last_train_sec = model_info.get("last_train_ago_sec")
+    sweep_state = str(model_info.get("sweep_state", "")).lower()
+    window_sec = model_info.get("online_window_seconds")
+    if window_sec is None:
+        window_sec = 30.0
+    online_enabled = model_info.get("online_updates_enabled", True)
+    learning_rate_value = model_info.get("learning_rate")
+
+    if sweep_state == "running":
+        model_state_label = "training"
+        state_color = "#2ecc71"
+    elif last_train_sec is None:
+        model_state_label = "not trained"
+        state_color = "#e74c3c"
+    else:
+        stale_threshold = max(120.0, 2.0 * float(window_sec))
+        if float(last_train_sec) <= stale_threshold:
+            model_state_label = "trained"
+            state_color = "#2ecc71"
+        else:
+            model_state_label = "stale"
+            state_color = "#f1c40f"
 
     card_style = {
         "border": "1px solid #ddd",
@@ -1120,26 +1375,49 @@ def update_ml_tab(_):
     value_style = {"fontWeight": "bold", "color": "#111"}
 
     mean_beam_outputs = html.Div([
-        html.Span("Beam mean:", style=label_style), html.Span(beam_mean_text, style=value_style)
+        html.Span("Mean Beam Voltage:", style=label_style), html.Span(beam_mean_text, style=value_style)
     ], style=card_style)
 
     mean_variance_outputs = html.Div([
-        html.Span("Beam var:", style=label_style), html.Span(beam_var_text, style=value_style)
+        html.Span("Variance Beam Voltage:", style=label_style), html.Span(beam_var_text, style=value_style)
     ], style=card_style)
 
     mean_control_effort_outputs = html.Div([
-        html.Span("Effort (avg ||du||^2):", style=label_style), html.Span(effort_text, style=value_style)
+        html.Span("Control Effort:", style=label_style), html.Span(effort_text, style=value_style)
     ], style=card_style)
 
     saturation_indicator_outputs = html.Div([
-        html.Span("Saturations (window):", style=label_style), html.Span(saturation_text, style=value_style)
+        html.Span("Saturations:", style=label_style), html.Span(saturation_text, style=value_style)
     ], style=card_style)
+
+    age_text = _format_age(last_train_sec) if last_train_sec is not None else ""
+
+    config_bits = []
+    if age_text:
+        config_bits.append(f"Time since last retrain: {age_text}")
+    if window_sec is not None:
+        try:
+            config_bits.append(f"Window {float(window_sec):.0f}s")
+        except Exception:
+            pass
+    if learning_rate_value:
+        try:
+            config_bits.append(f"LR {float(learning_rate_value):.3e}")
+        except Exception:
+            pass
 
     model_status_outputs = html.Div(
         [
             html.Span("Model:", style=label_style),
-            html.Span("trained" if trained else "not trained", style={"fontWeight": "bold", "color": state_color}),
-            html.Span(f"  ({age_text})" if trained else "", style={"marginLeft": "0.4em", "color": "#333"}),
+            html.Span(model_state_label.capitalize(), style={"fontWeight": "bold", "color": state_color}),
+            html.Span(
+                "" if online_enabled else " | Online updates paused",
+                style={"marginLeft": "0.4em", "color": "#e67e22"},
+            ),
+            html.Div(
+                " | ".join(config_bits) if config_bits else "",
+                style={"marginTop": "0.25em", "color": "#555"},
+            ),
         ],
         style={**card_style, "border": f"1px solid {state_color}"},
     )
@@ -1147,7 +1425,7 @@ def update_ml_tab(_):
     return (
         beam_figure,
         effort_figure,
-        attribution_figure,
+        training_figure,
         mean_beam_outputs,
         mean_variance_outputs,
         mean_control_effort_outputs,

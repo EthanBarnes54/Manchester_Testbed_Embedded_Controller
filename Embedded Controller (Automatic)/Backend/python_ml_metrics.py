@@ -50,6 +50,10 @@ class MetricCollector:
         self._latest_features: Optional[np.ndarray] = None
         self._feature_names: Optional[List[str]] = None
         self._feature_saliency: Optional[np.ndarray] = None
+        self._training_times: Deque[float] = deque(maxlen=self.max_retrain_length)
+        self._training_loss: Deque[float] = deque(maxlen=self.max_retrain_length)
+        self._training_r2: Deque[float] = deque(maxlen=self.max_retrain_length)
+        self._training_source: Deque[str] = deque(maxlen=self.max_retrain_length)
 
     def update_stream_from_backend(self, new_sample_time: float, new_beam_voltage: float, pin_values: List[int]):
         
@@ -84,6 +88,14 @@ class MetricCollector:
         with self._lock:
             self._feature_saliency = np.array(saliency, dtype=float).reshape(-1)
 
+    def record_training_update(self, timestamp: float, loss: Optional[float], r2: Optional[float], source: str = "online"):
+
+        with self._lock:
+            self._training_times.append(float(timestamp))
+            self._training_loss.append(float(loss) if loss is not None else float("nan"))
+            self._training_r2.append(float(r2) if r2 is not None else float("nan"))
+            self._training_source.append(str(source))
+
     def dashboard_snapshot(self) -> Dict:
       
         with self._lock:
@@ -91,6 +103,10 @@ class MetricCollector:
             input_voltages = np.array(self._window.input_voltage, dtype=float)
             control_effort = np.array(self._window.pin_control_changes, dtype=float)
             saturation_ind = np.array(self._window.saturation_indicators, dtype=int)
+            train_times = np.array(self._training_times, dtype=float)
+            train_loss = np.array(self._training_loss, dtype=float)
+            train_r2 = np.array(self._training_r2, dtype=float)
+            train_source = list(self._training_source)
 
         if sample_times.size == 0:
             return {
@@ -98,6 +114,10 @@ class MetricCollector:
                 "Sample_Times_series": [],
                 "Pin_Control_Changes_series": [],
                 "Saturation_Indicators_series": [],
+                "Training_Times": [],
+                "Training_Loss": [],
+                "Training_R2": [],
+                "Training_Source": [],
                 "Input_Voltage_mean": None,
                 "Input_Voltage_var": None,
                 "Pin_Control_Changes_mean": None,
@@ -119,6 +139,10 @@ class MetricCollector:
             "Sample_Times_series": sample_times.tolist(),
             "Pin_Control_Changes_series": control_effort.tolist(),
             "Saturation_Indicators_series": saturation_ind.tolist(),
+            "Training_Times": train_times.tolist(),
+            "Training_Loss": train_loss.tolist(),
+            "Training_R2": train_r2.tolist(),
+            "Training_Source": train_source,
             "Input_Voltage_mean": beam_mean,
             "Input_Voltage_var": beam_var,
             "Pin_Control_Changes_mean": effort_mean,
