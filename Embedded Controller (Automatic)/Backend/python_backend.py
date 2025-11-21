@@ -215,9 +215,9 @@ class SerialBackend:
             raise RuntimeError("Manual save unavailable (RNN controller import failed).")
         return manual_save_model()
 
-    def compute_feature_importance(self, max_samples: int = 200):
+    def compute_feature_importance(self, max_samples: int = 200, num_permutations: int = 20):
         df = self.get_data()
-        return compute_feature_saliencies(df, max_samples=max_samples)
+        return compute_feature_saliencies(df, max_samples=max_samples, num_permutations=num_permutations)
 
     def get_online_update_config(self) -> dict:
         return {
@@ -968,8 +968,8 @@ def save_model_checkpoint():
     return Back_End_Controller.save_model_checkpoint()
 
 
-def compute_feature_importance(max_samples: int = 200):
-    return Back_End_Controller.compute_feature_importance(max_samples=max_samples)
+def compute_feature_importance(max_samples: int = 200, num_permutations: int = 20):
+    return Back_End_Controller.compute_feature_importance(max_samples=max_samples, num_permutations=num_permutations)
 
 #-------------------------------------------------------------------------#
 #                   Training Sweep Controls

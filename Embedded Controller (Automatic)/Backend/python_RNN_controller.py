@@ -475,7 +475,7 @@ def compute_feature_saliencies(
     if total_counts == 0:
         raise RuntimeError("Failed to compute shap values (no contributions accumulated).")
 
-    impacts = [(required_columns[i], float(contrib_sum[i] / total_counts)) for i in range(feats)]
+    impacts = [(required_columns[i], float(contrib_sum[i] / total_counts)) for i in range(min(feats, len(required_columns)))]
     impacts.sort(key=lambda x: x[1], reverse=True)
     friendly_names = {
         "pin_1": "Squeeze Plate",
