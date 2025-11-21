@@ -26,6 +26,10 @@ try:
         online_update,
         set_learning_rate as _set_rnn_learning_rate,
         get_learning_rate as _get_rnn_learning_rate,
+        set_momentum as _set_rnn_momentum,
+        get_momentum as _get_rnn_momentum,
+        manual_save_model,
+        compute_feature_saliencies,
     )
 except Exception:
     train_model = None
@@ -36,6 +40,18 @@ except Exception:
 
     def _get_rnn_learning_rate():
         return None
+
+    def _set_rnn_momentum(_value):
+        return None
+
+    def _get_rnn_momentum():
+        return None
+
+    def manual_save_model():
+        raise RuntimeError("Manual save unavailable (RNN controller import failed).")
+
+    def compute_feature_saliencies(_df, max_samples=200):
+        raise RuntimeError("Feature saliency unavailable (RNN controller import failed).")
 
 
 # -------------------------------------------------------------------------
@@ -184,11 +200,31 @@ class SerialBackend:
             return None
         return _get_rnn_learning_rate()
 
+    def set_online_momentum(self, momentum: float):
+        if _set_rnn_momentum is None:
+            raise RuntimeError("Momentum control unavailable (RNN controller import failed).")
+        return _set_rnn_momentum(momentum)
+
+    def get_online_momentum(self):
+        if _get_rnn_momentum is None:
+            return None
+        return _get_rnn_momentum()
+
+    def save_model_checkpoint(self):
+        if manual_save_model is None:
+            raise RuntimeError("Manual save unavailable (RNN controller import failed).")
+        return manual_save_model()
+
+    def compute_feature_importance(self, max_samples: int = 200):
+        df = self.get_data()
+        return compute_feature_saliencies(df, max_samples=max_samples)
+
     def get_online_update_config(self) -> dict:
         return {
             "window_seconds": float(self.online_window_seconds),
             "learning_rate": self.get_online_learning_rate(),
             "enabled": bool(self.online_update_enabled),
+            "momentum": self.get_online_momentum(),
         }
 
     def get_latest_point(self):
@@ -883,6 +919,10 @@ def get_model_info() -> dict:
     except Exception:
         snapshot["learning_rate"] = None
     try:
+        snapshot["momentum"] = _get_rnn_momentum()
+    except Exception:
+        snapshot["momentum"] = None
+    try:
         snapshot["sweep_state"] = str(getattr(Back_End_Controller, "sweep_status", {}).get("state", "idle"))
     except Exception:
         snapshot["sweep_state"] = None
@@ -922,6 +962,14 @@ def push_ml_saliency(saliency):
         ML_METRICS.record_feature_saliencies(saliency)
     except Exception:
         pass
+
+
+def save_model_checkpoint():
+    return Back_End_Controller.save_model_checkpoint()
+
+
+def compute_feature_importance(max_samples: int = 200):
+    return Back_End_Controller.compute_feature_importance(max_samples=max_samples)
 
 #-------------------------------------------------------------------------#
 #                   Training Sweep Controls

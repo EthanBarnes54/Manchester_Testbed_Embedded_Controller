@@ -30,6 +30,8 @@ from python_Backend import (
     get_model_info,
     set_online_window_seconds,
     set_online_learning_rate,
+    save_model_checkpoint,
+    compute_feature_importance,
 )
 
 # Workaround for Python 3.14 (pkgutil.find_loader has been removed)
@@ -417,6 +419,10 @@ def _control_tab():
                         },
                         children=[
                             html.Div(children=[html.H4("RNN Feedback Control Panel", style={"margin": 0})]),
+                            html.P(
+                                "Enable auto control to let the RNN propose DAC voltages, manually save the model, or set auto-update timing.",
+                                style={"margin": "0.25em 0 0.75em 0", "color": "#555"},
+                            ),
                             html.Div(
                                 style={
                                     "display": "flex",
@@ -448,6 +454,25 @@ def _control_tab():
                                     html.Div(
                                         children=[
                                             html.Button(
+                                                "Save Model (manual)",
+                                                id="save-model-button",
+                                                n_clicks=0,
+                                                style={
+                                                    "minWidth": "150px",
+                                                    "padding": "0.6em 1.2em",
+                                                    "fontWeight": "bold",
+                                                    "borderRadius": "6px",
+                                                    "border": "none",
+                                                    "background": "#3498db",
+                                                    "color": "#ffffff",
+                                                    "cursor": "pointer",
+                                                },
+                                            ),
+                                        ]
+                                    ),
+                                    html.Div(
+                                        children=[
+                                            html.Button(
                                                 "Save After Sweep: OFF",
                                                 id="save-dataset-button",
                                                 n_clicks=0,
@@ -466,13 +491,12 @@ def _control_tab():
                                     ),
                                     html.Div(
                                         children=[
-                                            html.Label("Auto Control Interval (ms)"),
+                                            html.Label("Auto Control Update Period (ms)"),
                                             dcc.Input(
                                                 id="auto-rate-ms",
                                                 type="number",
                                                 value=500,
-                                                min=100,
-                                                step=50,
+                                                step=25,
                                                 style={"width": "120px"},
                                             ),
                                         ]
@@ -495,6 +519,9 @@ def _ml_tab():
     lr_default = MODEL_INFO_BOOTSTRAP.get("learning_rate")
     if lr_default is None:
         lr_default = 1e-3
+    momentum_default = MODEL_INFO_BOOTSTRAP.get("momentum")
+    if momentum_default is None:
+        momentum_default = 0.9
 
     return html.Div(
         style={"padding": "1em"},
@@ -547,6 +574,53 @@ def _ml_tab():
                         ]
                     ),
                     html.Div(
+                        [
+                            html.Label("Momentum", style={"fontWeight": "bold"}),
+                            dcc.Input(
+                                id="online-momentum",
+                                type="text",
+                                debounce=True,
+                                value=float(momentum_default),
+                                style={"width": "150px"},
+                            ),
+                        ]
+                    ),
+                    html.Div(
+                        [
+                            html.Label("SHAP Permutations", style={"fontWeight": "bold"}),
+                            dcc.Input(
+                                id="shap-permutations",
+                                type="number",
+                                min=1,
+                                step=1,
+                                value=20,
+                                debounce=True,
+                                style={"width": "150px"},
+                            ),
+                        ]
+                    ),
+                    html.Div(
+                        children=[
+                            html.Button(
+                                "Compute SHAP (on-demand)",
+                                id="compute-shap-button",
+                                n_clicks=0,
+                                style={
+                                    "minWidth": "150px",
+                                    "padding": "0.6em 1.2em",
+                                    "fontWeight": "bold",
+                                    "borderRadius": "6px",
+                                    "border": "none",
+                                    "background": "#3498db",
+                                    "color": "#ffffff",
+                                    "cursor": "pointer",
+                                },
+                            ),
+                            html.Span(id="shap-status", style={"marginLeft": "0.5em", "fontWeight": "bold"}),
+                        ],
+                        style={"display": "flex", "alignItems": "center", "gap": "0.5em"},
+                    ),
+                    html.Div(
                         id="online-update-config-status",
                         style={
                             "minWidth": "260px",
@@ -563,7 +637,13 @@ def _ml_tab():
                     dcc.Graph(id="ml-effort-graph", style={"height": "38vh"}),
                 ],
             ),
-            html.Div(style={"marginTop": "1em"}, children=[dcc.Graph(id="ml-attrib-bar", style={"height": "36vh"})]),
+            html.Div(
+                style={"marginTop": "1em", "display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "1em"},
+                children=[
+                    dcc.Graph(id="ml-attrib-bar", style={"height": "36vh"}),
+                    dcc.Graph(id="ml-shap-bar", style={"height": "36vh"}),
+                ],
+            ),
         ],
     )
 
@@ -604,8 +684,9 @@ app.layout = html.Div(
     Output("online-update-config-status", "children"),
     Input("online-window-seconds", "value"),
     Input("online-learning-rate", "value"),
+    Input("online-momentum", "value"),
 )
-def _configure_online_updates(window_seconds, learning_rate):
+def _configure_online_updates(window_seconds, learning_rate, momentum_value):
     errors = []
     if window_seconds is not None and callable(set_online_window_seconds):
         try:
@@ -617,9 +698,29 @@ def _configure_online_updates(window_seconds, learning_rate):
             applied_lr = set_online_learning_rate(learning_rate)
         except Exception as fault:
             errors.append(f"LR error: {fault}")
+    if momentum_value is not None and hasattr(Back_End_Controller, "set_online_momentum"):
+        try:
+            Back_End_Controller.set_online_momentum(momentum_value)
+        except Exception as fault:
+            errors.append(f"Momentum error: {fault}")
     if not errors:
         return html.Span("")
     return html.Span(" | ".join(errors), style={"color": "#e74c3c"})
+
+
+@app.callback(
+    Output("save-dataset-ack", "children"),
+    Input("save-model-button", "n_clicks"),
+    prevent_initial_call=True,
+)
+def _manual_save_model(n_clicks):
+    if not n_clicks:
+        raise PreventUpdate
+    try:
+        path = save_model_checkpoint()
+        return f"Model saved to {path}"
+    except Exception as fault:
+        return f"Save error: {fault}"
 
 # -------------------------------------------------------------------------
 #                                Graph Updates
@@ -754,6 +855,48 @@ def _toggle_save_dataset(n_clicks):
 
     label = f"Save After Sweep: {'ON' if enabled else 'OFF'}"
     return label, style
+
+
+@app.callback(
+    Output("shap-status", "children"),
+    Output("ml-shap-bar", "figure"),
+    Input("compute-shap-button", "n_clicks"),
+    State("shap-permutations", "value"),
+    prevent_initial_call=True,
+)
+def _compute_shap_on_demand(n_clicks, shap_perm):
+    if not n_clicks:
+        raise PreventUpdate
+    try:
+        perms = 20
+        try:
+            perms = max(1, int(shap_perm)) if shap_perm is not None else 20
+        except Exception:
+            perms = 20
+        shap_info = compute_feature_importance(max_samples=200, num_permutations=perms)
+        names = shap_info.get("feature_names", [])
+        values = shap_info.get("importances", [])
+        fig = go.Figure(
+            data=[
+                go.Bar(
+                    x=values,
+                    y=names,
+                    orientation="h",
+                    marker=dict(color="#1f77b4"),
+                )
+            ]
+        )
+        fig.update_layout(
+            template="plotly_white",
+            xaxis_title="SHAP value (approx)",
+            yaxis_title="",
+            margin=dict(l=80, r=20, t=40, b=40),
+        )
+        fig.update_xaxes(showgrid=True, gridcolor="#e6e6e6", zeroline=False)
+        fig.update_yaxes(autorange="reversed", showgrid=False)
+        return f"SHAP computed ({len(values)} features)", fig
+    except Exception as fault:
+        return f"SHAP error: {fault}", go.Figure()
 
 # -------------------------------------------------------------------------
 #                     Input validation (UI Interface)
