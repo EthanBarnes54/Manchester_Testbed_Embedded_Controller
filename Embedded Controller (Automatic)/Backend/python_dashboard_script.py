@@ -18,7 +18,7 @@ import numpy as np
 import logging
 import time
 try:
-    from python_RNN_Controller import propose_control_vector
+    from python_RNN_controller import propose_control_vector
 except Exception:
     propose_control_vector = None
 from python_Backend import (
