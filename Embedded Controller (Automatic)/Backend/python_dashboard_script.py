@@ -17,10 +17,15 @@ import pkgutil, importlib.util
 import numpy as np
 import logging
 import time
+
+log = logging.getLogger("Dashboard")
+
 try:
-    from python_RNN_controller import propose_control_vector
-except Exception:
+    from python_RNN_Controller import propose_control_vector
+except Exception as fault:
+    log.warning(f"WARNING: Unable to contact the RNN - {fault}!")
     propose_control_vector = None
+
 from python_Backend import (
     get_ml_metrics,
     Back_End_Controller,
@@ -28,9 +33,9 @@ from python_Backend import (
     get_sweep_status,
     stop_training_sweep,
     get_model_info,
-    set_online_window_seconds,
+    set_window_update_time,
     set_online_learning_rate,
-    save_model_checkpoint,
+    save_model_parameters,
     compute_feature_importance,
 )
 
@@ -43,10 +48,11 @@ if not hasattr(pkgutil, "find_loader"):
 # -------------------------------------------------------------------------
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S",)
-log = logging.getLogger("Dashboard")
+
 try:
     MODEL_INFO_BOOTSTRAP = get_model_info()
-except Exception:
+except Exception as fault:
+    log.warning(f"WARNING: Unable to obtain model history - {fault}!")
     MODEL_INFO_BOOTSTRAP = {}
 
 # -------------------------------------------------------------------------
@@ -70,13 +76,13 @@ def _control_tab():
             html.Div(
                 style={"marginTop": "1em"},
                 children=[
-                    html.H4("Pin Controls: 5 PWM + Switch Timing"),
+                    html.H4("Pin Controls: 5 Pin Channels + Switch Timing"),
                     html.Div(
                         style={"display": "grid", "gridTemplateColumns": "repeat(2, 1fr)", "gap": "1em"},
                         children=[
                             html.Div(
                                 [
-                                    html.Label("Squeeze Plate Target (V)"),
+                                    html.Label("Squeeze Plate (V)"),
                                     dcc.Input(
                                         id="pwm1",
                                         type="number",
@@ -91,7 +97,7 @@ def _control_tab():
                             ),
                             html.Div(
                                 [
-                                    html.Label("Ion Source Target (V)"),
+                                    html.Label("Ion Source (V)"),
                                     dcc.Input(
                                         id="pwm2",
                                         type="number",
@@ -106,7 +112,7 @@ def _control_tab():
                             ),
                             html.Div(
                                 [
-                                    html.Label("Wein Filter Target (V)"),
+                                    html.Label("Wein Filter (V)"),
                                     dcc.Input(
                                         id="pwm3",
                                         type="number",
@@ -121,7 +127,7 @@ def _control_tab():
                             ),
                             html.Div(
                                 [
-                                    html.Label("Upper Cone Target (V)"),
+                                    html.Label("Upper Cone (V)"),
                                     dcc.Input(
                                         id="pwm4",
                                         type="number",
@@ -136,7 +142,7 @@ def _control_tab():
                             ),
                             html.Div(
                                 [
-                                    html.Label("Lower Cone Target (V)"),
+                                    html.Label("Lower Cone (V)"),
                                     dcc.Input(
                                         id="pwm5",
                                         type="number",
@@ -182,6 +188,7 @@ def _control_tab():
                     "gap": "1em",
                     "flexWrap": "wrap",
                 },
+
                 children=[
                     html.Div(
                         id="latest-voltage",
@@ -195,6 +202,7 @@ def _control_tab():
                             "fontWeight": "bold",
                         },
                     ),
+
                     html.Div(
                         id="num-points",
                         children="Sample Count: --",
@@ -207,6 +215,7 @@ def _control_tab():
                             "fontWeight": "bold",
                         },
                     ),
+
                     html.Div(
                         id="status",
                         children="OFFLINE",
@@ -227,16 +236,18 @@ def _control_tab():
                             "borderRadius": "8px",
                             "background": "#fafafa",
                         },
+
                         children=[
                             html.Div(
                                 children=[
                                     html.H4("RNN Training Control Panel", style={"margin": 0}),
                                     html.P(
-                                        "Generate the training dataset by sweeping over output pin voltages, then train the RNN controller.",
+                                        "Generate a new training dataset by sweeping over output pin voltages, then intiate a training cycle of the RNN controller.",
                                         style={"margin": "0.25em 0 0.75em 0", "color": "#555"},
                                     ),
                                 ]
                             ),
+
                             html.Div(
                                 style={
                                     "display": "grid",
@@ -244,6 +255,7 @@ def _control_tab():
                                     "gap": "0.75em",
                                     "alignItems": "end",
                                 },
+
                                 children=[
                                     html.Div(
                                         children=[
@@ -260,6 +272,7 @@ def _control_tab():
                                             ),
                                         ]
                                     ),
+
                                     html.Div(
                                         children=[
                                             html.Small("Max V"),
@@ -275,6 +288,7 @@ def _control_tab():
                                             ),
                                         ]
                                     ),
+
                                     html.Div(
                                         children=[
                                             html.Small("Voltage Step Size (V)"),
@@ -290,6 +304,7 @@ def _control_tab():
                                             ),
                                         ]
                                     ),
+
                                     html.Div(
                                         children=[
                                             html.Small("Time Between Steps (s)"),
@@ -304,9 +319,10 @@ def _control_tab():
                                             ),
                                         ]
                                     ),
+
                                     html.Div(
                                         children=[
-                                            html.Small("Training Passes"),
+                                            html.Small("Training Epochs (number of passes over sweep data)"),
                                             dcc.Input(
                                                 id="sweep-epochs",
                                                 type="number",
@@ -318,9 +334,10 @@ def _control_tab():
                                             ),
                                         ]
                                     ),
+
                                     html.Div(
                                         children=[
-                                            html.Small("Baseline levels"),
+                                            html.Small("Baseline Voltages (grid points in the sweep range)"),
                                             dcc.Input(
                                                 id="sweep-baselines",
                                                 type="number",
@@ -332,9 +349,10 @@ def _control_tab():
                                             ),
                                         ]
                                     ),
+
                                     html.Div(
                                         children=[
-                                            html.Small("Factorial levels"),
+                                            html.Small("Factorial Depth (combinations per pin)"),
                                             dcc.Input(
                                                 id="sweep-factorials",
                                                 type="number",
@@ -346,9 +364,10 @@ def _control_tab():
                                             ),
                                         ]
                                     ),
+
                                     html.Div(
                                         children=[
-                                            html.Small("Random samples"),
+                                            html.Small("Random Samples (additional/random data variations)"),
                                             dcc.Input(
                                                 id="sweep-random-samples",
                                                 type="number",
@@ -362,6 +381,7 @@ def _control_tab():
                                     ),
                                 ],
                             ),
+
                             html.Div(
                                 style={"display": "flex", "alignItems": "center", "gap": "1em", "marginTop": "0.5em"},
                                 children=[
@@ -371,20 +391,24 @@ def _control_tab():
                                         n_clicks=0,
                                         style={"padding": "0.5em 1em"},
                                     ),
+
                                     html.Button(
                                         "Stop",
                                         id="sweep-stop-btn",
                                         n_clicks=0,
                                         style={"padding": "0.5em 1em"},
                                     ),
+
                                     html.Span(
                                         id="sweep-status",
                                         children="Sweep: idle",
                                         style={"fontWeight": "bold"},
                                     ),
+
                                     html.Span(id="sweep-eta", children=""),
                                 ],
                             ),
+
                             html.Div(
                                 id="sweep-progress",
                                 style={
@@ -395,6 +419,7 @@ def _control_tab():
                                     "overflow": "hidden",
                                     "marginTop": "0.5em",
                                 },
+
                                 children=[
                                     html.Div(
                                         id="sweep-progress-inner",
@@ -409,6 +434,7 @@ def _control_tab():
                             ),
                         ],
                     ),
+
                     html.Div(
                         style={
                             "flex": "1 1 280px",
@@ -417,12 +443,12 @@ def _control_tab():
                             "borderRadius": "8px",
                             "background": "#fafafa",
                         },
+
                         children=[
                             html.Div(children=[html.H4("RNN Feedback Control Panel", style={"margin": 0})]),
-                            html.P(
-                                "Enable auto control to let the RNN propose DAC voltages, manually save the model, or set auto-update timing.",
-                                style={"margin": "0.25em 0 0.75em 0", "color": "#555"},
-                            ),
+                            
+                            html.P("Enable auto control to let the RNN propose DAC voltages, manually save the model, or set auto-update timing.",style={"margin": "0.25em 0 0.75em 0", "color": "#555"},),
+                            
                             html.Div(
                                 style={
                                     "display": "flex",
@@ -431,6 +457,7 @@ def _control_tab():
                                     "flexWrap": "wrap",
                                     "marginTop": "0.5em",
                                 },
+
                                 children=[
                                     html.Div(
                                         children=[
@@ -451,10 +478,11 @@ def _control_tab():
                                             ),
                                         ]
                                     ),
+
                                     html.Div(
                                         children=[
                                             html.Button(
-                                                "Save Model (manual)",
+                                                "Save Model Parameters",
                                                 id="save-model-button",
                                                 n_clicks=0,
                                                 style={
@@ -470,6 +498,7 @@ def _control_tab():
                                             ),
                                         ]
                                     ),
+
                                     html.Div(
                                         children=[
                                             html.Button(
@@ -489,6 +518,7 @@ def _control_tab():
                                             ),
                                         ]
                                     ),
+
                                     html.Div(
                                         children=[
                                             html.Label("Auto Control Update Period (ms)"),
@@ -501,6 +531,7 @@ def _control_tab():
                                             ),
                                         ]
                                     ),
+
                                     html.Span(id="save-dataset-ack", style={"minWidth": "160px"}),
                                 ],
                             ),
@@ -514,12 +545,17 @@ def _control_tab():
 
 def _ml_tab():
     window_default = MODEL_INFO_BOOTSTRAP.get("online_window_seconds")
+
     if window_default is None:
         window_default = 30.0
+
     lr_default = MODEL_INFO_BOOTSTRAP.get("learning_rate")
+
     if lr_default is None:
         lr_default = 1e-3
+
     momentum_default = MODEL_INFO_BOOTSTRAP.get("momentum")
+
     if momentum_default is None:
         momentum_default = 0.9
 
@@ -527,6 +563,7 @@ def _ml_tab():
         style={"padding": "1em"},
         children=[
             html.H3("ML Metrics"),
+
             html.Div(
                 style={"display": "flex", "gap": "1em", "flexWrap": "wrap"},
                 children=[
@@ -537,6 +574,7 @@ def _ml_tab():
                     html.Div(id="ml-model-status", style={"minWidth": "220px"}),
                 ],
             ),
+
             html.Div(
                 style={
                     "display": "flex",
@@ -545,6 +583,7 @@ def _ml_tab():
                     "marginTop": "1em",
                     "alignItems": "flex-end",
                 },
+
                 children=[
                     html.Div(
                         [
@@ -561,6 +600,7 @@ def _ml_tab():
                             ),
                         ]
                     ),
+
                     html.Div(
                         [
                             html.Label("Learning Rate", style={"fontWeight": "bold"}),
@@ -573,9 +613,10 @@ def _ml_tab():
                             ),
                         ]
                     ),
+
                     html.Div(
                         [
-                            html.Label("Momentum", style={"fontWeight": "bold"}),
+                            html.Label("Learning Momentum", style={"fontWeight": "bold"}),
                             dcc.Input(
                                 id="online-momentum",
                                 type="text",
@@ -585,9 +626,10 @@ def _ml_tab():
                             ),
                         ]
                     ),
+
                     html.Div(
                         [
-                            html.Label("SHAP Permutations", style={"fontWeight": "bold"}),
+                            html.Label("SHAP Permutations (Sampling Depth)", style={"fontWeight": "bold"}),
                             dcc.Input(
                                 id="shap-permutations",
                                 type="number",
@@ -599,10 +641,11 @@ def _ml_tab():
                             ),
                         ]
                     ),
+
                     html.Div(
                         children=[
                             html.Button(
-                                "Compute SHAP (on-demand)",
+                                "Compute SHAP Values",
                                 id="compute-shap-button",
                                 n_clicks=0,
                                 style={
@@ -620,6 +663,7 @@ def _ml_tab():
                         ],
                         style={"display": "flex", "alignItems": "center", "gap": "0.5em"},
                     ),
+
                     html.Div(
                         id="online-update-config-status",
                         style={
@@ -630,6 +674,7 @@ def _ml_tab():
                     ),
                 ],
             ),
+
             html.Div(
                 style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "1em", "marginTop": "1em"},
                 children=[
@@ -637,6 +682,7 @@ def _ml_tab():
                     dcc.Graph(id="ml-effort-graph", style={"height": "38vh"}),
                 ],
             ),
+
             html.Div(
                 style={"marginTop": "1em", "display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "1em"},
                 children=[
@@ -658,7 +704,7 @@ def _rig_tab():
             "color": "#7f8c8d",
             "fontSize": "1.2em",
         },
-        children="Rig controls coming soon...",
+        children="Rig controls coming to a testbed near you... (soon!)",
     )
 
 
@@ -686,23 +732,34 @@ app.layout = html.Div(
     Input("online-learning-rate", "value"),
     Input("online-momentum", "value"),
 )
+
 def _configure_online_updates(window_seconds, learning_rate, momentum_value):
     errors = []
-    if window_seconds is not None and callable(set_online_window_seconds):
+
+    if window_seconds is not None and callable(set_window_update_time):
         try:
-            applied_window = set_online_window_seconds(window_seconds)
+            applied_window = set_window_update_time(window_seconds)
+
         except Exception as fault:
-            errors.append(f"Window error: {fault}")
+            log.error(f"ERROR: Unable to set retraining window time - {fault}!")
+            errors.append(f"ERROR: Unable to set retraining window time - {fault}!")
+
     if learning_rate is not None and callable(set_online_learning_rate):
         try:
             applied_lr = set_online_learning_rate(learning_rate)
+
         except Exception as fault:
-            errors.append(f"LR error: {fault}")
+            log.error(f"ERROR: Unable to set the model's learning rate - {fault}!") 
+            errors.append(f"ERROR: Unable to set the model's learning rate - {fault}!")
+            
     if momentum_value is not None and hasattr(Back_End_Controller, "set_online_momentum"):
         try:
             Back_End_Controller.set_online_momentum(momentum_value)
+
         except Exception as fault:
-            errors.append(f"Momentum error: {fault}")
+            log.error(f"ERROR: Unbale to set the model's learning momentum  - {fault}!")
+            errors.append(f"ERROR: Unbale to set the model's learning momentum  - {fault}!")
+
     if not errors:
         return html.Span("")
     return html.Span(" | ".join(errors), style={"color": "#e74c3c"})
@@ -713,14 +770,16 @@ def _configure_online_updates(window_seconds, learning_rate, momentum_value):
     Input("save-model-button", "n_clicks"),
     prevent_initial_call=True,
 )
-def _manual_save_model(n_clicks):
-    if not n_clicks:
+
+def _manual_save_model(user_input):
+    if not user_input:
         raise PreventUpdate
+    
     try:
-        path = save_model_checkpoint()
-        return f"Model saved to {path}"
+        path = save_model_parameters()
+        return f"SUCCESS: Model saved to {path} succesfully..."
     except Exception as fault:
-        return f"Save error: {fault}"
+        return f"ERROR: Unable to save model parameters - {fault}!"
 
 # -------------------------------------------------------------------------
 #                                Graph Updates
@@ -767,14 +826,18 @@ def update_graph(_, auto_mode_enabled, auto_rate_ms):
     try:
         auto_on = bool(auto_mode_enabled)
         rate_ms = 500 if auto_rate_ms is None else max(100, int(auto_rate_ms))
-    except Exception:
+
+    except Exception as fault:
+        log.error(f"ERROR: Recieving invalid auto control parameters - {fault}!")
         auto_on, rate_ms = False, 500
         
     try:
         st = get_sweep_status()
         if isinstance(st, dict) and str(st.get("state", "")).lower() == "running":
             auto_on = False
-    except Exception:
+
+    except Exception as fault:
+        log.error(f"ERROR: Unable to determine sweep status - {fault}!")
         pass
 
     if auto_on and propose_control_vector is not None:
@@ -785,8 +848,10 @@ def update_graph(_, auto_mode_enabled, auto_rate_ms):
                 targets = propose_control_vector(data_frame)
                 Back_End_Controller.set_pin_voltages(targets)
                 LAST_AUTO_TS = now
+
         except Exception as fault:
-            log.warning(f"ERROR: Auto control update failed - {fault}!")
+            log.error(f"ERROR: Auto control update failed - {fault}!")
+
     return figure, recent_voltage_measurement, number_of_points
 
 
@@ -797,7 +862,7 @@ def update_graph(_, auto_mode_enabled, auto_rate_ms):
     Input("auto-mode-button", "n_clicks"),
 )
 
-def _toggle_auto_mode(n_clicks):
+def _toggle_auto_mode(User_Input):
     base_style = {
         "minWidth": "130px",
         "padding": "0.6em 1.2em",
@@ -809,11 +874,13 @@ def _toggle_auto_mode(n_clicks):
     }
 
     try:
-        clicks = 0 if n_clicks is None else int(n_clicks)
-    except Exception:
-        clicks = 0
+        Input = 0 if User_Input is None else int(User_Input)
 
-    if clicks % 2 == 1:
+    except Exception as fault:
+        log.error(f"ERROR: Invalid user toggle input - {fault}!")
+        Input = 0
+
+    if Input % 2 == 1:
         style = {**base_style, "background": "#2ecc71", "boxShadow": "0 0 4px rgba(46,204,113,0.6)"}
         return True, "Auto Control: ON", style
 
@@ -826,7 +893,8 @@ def _toggle_auto_mode(n_clicks):
     Output("save-dataset-button", "style"),
     Input("save-dataset-button", "n_clicks"),
 )
-def _toggle_save_dataset(n_clicks):
+
+def _toggle_save_dataset(User_Input):
     base_style = {
         "minWidth": "150px",
         "padding": "0.6em 1.2em",
@@ -838,22 +906,27 @@ def _toggle_save_dataset(n_clicks):
     }
 
     try:
-        clicks = 0 if n_clicks is None else int(n_clicks)
-    except Exception:
-        clicks = 0
+        Input = 0 if User_Input is None else int(User_Input)
 
-    enabled = (clicks % 2) == 1
+    except Exception as fault:
+        log.error(f"ERROR: Invalid user toggle input - {fault}!")
+        Input = 0
+
+    user_enabled = (Input % 2) == 1
+
     try:
-        getattr(Back_End_Controller, "set_save_dataset_enabled", lambda _: None)(enabled)
-    except Exception:
+        getattr(Back_End_Controller, "set_save_dataset_enabled", lambda _: None)(user_enabled)
+
+    except Exception as fault:
+        log.error(f"ERROR: Unable to set save dataset flag - {fault}!")
         pass
 
-    if enabled:
+    if user_enabled:
         style = {**base_style, "background": "#2ecc71", "boxShadow": "0 0 4px rgba(46,204,113,0.6)"}
     else:
         style = {**base_style, "background": "#e74c3c", "boxShadow": "0 0 4px rgba(231,76,60,0.6)"}
 
-    label = f"Save After Sweep: {'ON' if enabled else 'OFF'}"
+    label = f"Save After Sweep: {'ON' if user_enabled else 'OFF'}"
     return label, style
 
 
@@ -864,39 +937,50 @@ def _toggle_save_dataset(n_clicks):
     State("shap-permutations", "value"),
     prevent_initial_call=True,
 )
-def _compute_shap_on_demand(n_clicks, shap_perm):
-    if not n_clicks:
+
+def _compute_shap_on_demand(User_Input, shap_permutations):
+    if not User_Input:
+        log.warning("WARNING: SHAP computation requested without user input!")
         raise PreventUpdate
+    
     try:
         perms = 20
         try:
-            perms = max(1, int(shap_perm)) if shap_perm is not None else 20
-        except Exception:
+            perms = max(1, int(shap_permutations)) if shap_permutations is not None else 20
+
+        except Exception as fault:
+            log.error(f"ERROR: Invalid SHAP permutations input - {fault}! (Using 20 as default...)")
             perms = 20
-        shap_info = compute_feature_importance(max_samples=200, num_permutations=perms)
-        names = shap_info.get("feature_names", [])
-        values = shap_info.get("importances", [])
+
+        shap_values = compute_feature_importance(max_samples=200, num_permutations=perms)
+        feauture_names = shap_values.get("feature_names", [])
+        importance_values = shap_values.get("importances", [])
+        
         fig = go.Figure(
             data=[
                 go.Bar(
-                    x=values,
-                    y=names,
+                    x = importance_values,
+                    y = feauture_names,
                     orientation="h",
                     marker=dict(color="#1f77b4"),
                 )
             ]
         )
+
         fig.update_layout(
             template="plotly_white",
-            xaxis_title="SHAP value (approx)",
+            xaxis_title="SHAP values (Accuracy dictated by User)",
             yaxis_title="",
             margin=dict(l=80, r=20, t=40, b=40),
         )
+
         fig.update_xaxes(showgrid=True, gridcolor="#e6e6e6", zeroline=False)
         fig.update_yaxes(autorange="reversed", showgrid=False)
-        return f"SHAP computed ({len(values)} features)", fig
+
+        return f"SHAP computed ({len(importance_values)} features)", fig
+    
     except Exception as fault:
-        return f"SHAP error: {fault}", go.Figure()
+        return log.error(f"ERROR: Unable to compute SHAP values - {fault}!"), go.Figure()
 
 # -------------------------------------------------------------------------
 #                     Input validation (UI Interface)
@@ -906,6 +990,7 @@ def _compute_shap_on_demand(n_clicks, shap_perm):
     Output("switch-time-us", "style"),
     Input("switch-time-us", "value"),
 )
+
 def _validate_switch_time_input(input_value):
     base_style = {"width": "120px"}
 
@@ -914,7 +999,9 @@ def _validate_switch_time_input(input_value):
 
     try:
         fval = float(input_value)
-    except Exception:
+
+    except Exception  as fault:
+        log.error(f"ERROR: Invalid switch time - {fault}! (Must be in 1-20 us range...)")
         return {**base_style, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
 
     if 1.0 <= fval <= 20.0:
@@ -935,13 +1022,17 @@ def _validate_switch_time_input(input_value):
 def update_status(_):
     try:
         status_text = getattr(Back_End_Controller, "get_status", lambda: "Connecting...")()
-    except Exception:
+
+    except Exception as fault:
+        log.error(f"ERROR: Unable to retrieve controller status - {fault}!")
         status_text = "Connecting..."
 
     if str(status_text).startswith("Simulated"):
         return "OFFLINE", {"color": "red", "fontWeight": "bold"}
+    
     elif "Connected" in str(status_text):
         return "CONNECTED", {"color": "green", "fontWeight": "bold"}
+    
     else:
         return "OFFLINE", {"color": "red", "fontWeight": "bold"}
 
@@ -967,38 +1058,45 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
     pin_voltages = [pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_voltage_5]
 
     try:
-        if any(value is None for value in pin_voltages):
+        if any(voltage is None for voltage in pin_voltages):
             return "Enter all five target voltages (0.0-3.3 V).", {"color": "red", "fontWeight": "bold"}
 
         targets = []
-        for idx, value in enumerate(pin_voltages, start=1):
-            try:
-                fval = float(value)
-            except (TypeError, ValueError):
-                return f"ERROR: Invalid target for pin {idx}", {"color": "red", "fontWeight": "bold"}
 
-            if not (0.0 <= fval <= 3.3):
-                return f"ERROR: Pin {idx} target out of range (0.0-3.3 V)!", {"color": "red", "fontWeight": "bold"}
-            targets.append(fval)
+        for i, voltage in enumerate(pin_voltages, start=1):
+            try:
+                float_voltages = float(voltage)
+
+            except (TypeError, ValueError):
+                return f"ERROR: Invalid target for pin {i}", {"color": "red", "fontWeight": "bold"}
+
+            if not (0.0 <= float_voltages <= 3.3):
+                return f"ERROR: Pin {i} target out of range (0.0-3.3 V)!", {"color": "red", "fontWeight": "bold"}
+            
+            targets.append(float_voltages)
 
         Back_End_Controller.set_pin_voltages(targets)
 
-        switch_time_text = "not set"
+        switch_timing_messgae = "not set"
+
         if switch_time_us is not None:
             try:
-                fval = float(switch_time_us)
-            except Exception as parse_fault:
-                return f"ERROR: Invalid switch time - {parse_fault}!", {"color": "red", "fontWeight": "bold"}
+                float_switch_timing = float(switch_time_us)
 
-            if not (1.0 <= fval <= 20.0):
+            except Exception as fault:
+                return f"ERROR: Invalid switch time - {fault}!", {"color": "red", "fontWeight": "bold"}
+
+            if not (1.0 <= float_switch_timing <= 20.0):
                 return "ERROR: Switch time out of range (1-20 us)!", {"color": "red", "fontWeight": "bold"}
 
             try:
-                getattr(Back_End_Controller, "set_switch_timing_us", lambda *_: None)(fval)
-            except Exception:
+                getattr(Back_End_Controller, "set_switch_timing_us", lambda *_: None)(float_switch_timing)
+
+            except Exception as fault:
+                log.error(f"ERROR: Unable to set switch timing - {fault}!")
                 pass
 
-            switch_time_text = f"{fval:.1f} us"
+            switch_timing_messgae = f"{float_switch_timing:.1f} us"
 
         status_message = (
             f"Targets updated (V): squeeze_plate={targets[0]:.3f}, "
@@ -1006,7 +1104,7 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
             f"wein_filter={targets[2]:.3f}, "
             f"cone_1={targets[3]:.3f}, "
             f"cone_2={targets[4]:.3f}, "
-            f"switch_time={switch_time_text}"
+            f"switch_time={switch_timing_messgae}"
         )
 
         return status_message, {"color": "green", "fontWeight": "bold"}
@@ -1027,7 +1125,9 @@ def update_pin_status(_):
 
     try:
         connection_status = getattr(Back_End_Controller, "get_status", lambda: "Connecting...")()
-    except Exception:
+
+    except Exception as fault:
+        log.error(f"ERROR: Unable to retrieve controller status - {fault}!")
         connection_status = "Connecting..."
 
     pin_snapshot = getattr(
@@ -1042,10 +1142,13 @@ def update_pin_status(_):
     if "Connected" in str(connection_status):
         try:
             Back_End_Controller.send_command("PINS")
-        except Exception:
+
+        except Exception as fault:
+            log.error(f"ERROR: Unable to request pin update from board - {fault}!")
             pass
 
     def chip(pin_label, pin_value, connection_state):
+
         label_map = {
             "squeeze_plate": "Squeeze Plate",
             "ion_source": "Ion Source",
@@ -1054,17 +1157,22 @@ def update_pin_status(_):
             "cone_2": "Cone 2",
             "switch_logic": "Switch Logic",
         }
+
         pretty_label = label_map.get(pin_label, pin_label.replace("_", " ").title())
         color = {
             "CONNECTED": "green",
             "DISCONNECTED": "red",
         }.get(connection_state, "#333")
+
         try:
             numeric_value = float(pin_value)
-        except Exception:
+
+        except Exception as fault:
+            log.warning(f"WARNING: Non-numeric pin value for {pin_label} - {fault}! (value set to None...)")
             numeric_value = None
 
         display = str(pin_value)
+
         if pin_label != "switch_logic" and numeric_value is not None:
             volts = (numeric_value / 1023.0) * 3.3
             display = f"{int(numeric_value)} ({volts:.3f} V)"
@@ -1076,6 +1184,7 @@ def update_pin_status(_):
                 "padding": "0.25em 0.5em",
                 "minWidth": "180px",
             },
+
             children=[
                 html.Span(f"{pretty_label}: ", style={"fontWeight": "bold"}),
                 html.Span(display),
@@ -1086,23 +1195,26 @@ def update_pin_status(_):
     if not pin_names or not pin_values:
         return [chip("Pins", "--", "DISCONNECTED")]
 
-    # Determine connection state from status text
     if str(connection_status).startswith("Simulated"):
         connection_state = "DISCONNECTED"
+
     elif "Connected" in str(connection_status):
         connection_state = "CONNECTED"
+
     else:
         connection_state = "DISCONNECTED"
 
     value_display = list(pin_values)
+
     if len(value_display) >= 6:
         value_display[5] = "ON" if int(value_display[5]) else "OFF"
 
-    pin_status_chips = [
-        chip(name, value_display[i] if i < len(value_display) else "--", connection_state)
-        for i, name in enumerate(pin_names)
+    pin_status_updates = [
+        chip(pin_names, value_display[i] if i < len(value_display) else "--", connection_state)
+        for i, pin_names in enumerate(pin_names)
     ]
-    return pin_status_chips
+
+    return pin_status_updates
 
 
 # -------------------------------------------------------------------------
@@ -1133,7 +1245,7 @@ def update_pin_status(_):
 
 def handle_training_sweep(
     _,
-    start_click_count,
+    input_counter,
     stop_click_count,
     min_voltage,
     max_voltage,
@@ -1151,32 +1263,40 @@ def handle_training_sweep(
         if ctx and ctx.triggered:
             trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
 
-    except Exception:
+    except Exception as fault:
+        log.error(f"ERROR: Unable to determine sweep trigger from user - {fault}!")
         trigger_id = None
 
-    if trigger_id == "sweep-btn" and start_click_count and int(start_click_count) > 0:
+    if trigger_id == "sweep-btn" and input_counter and int(input_counter) > 0:
 
         try:
             min_sweep_voltage = 0.0 if min_voltage is None else float(min_voltage)
             max_sweep_voltage = 3.3 if max_voltage is None else float(max_voltage)
+
             sweep_step = 0.05 if step is None or step <= 0 else float(step)
             dwell_seconds = 0.05 if dwell_s is None or dwell_s < 0 else float(dwell_s)
 
             try:
                 epochs_value = int(number_of_epochs) if number_of_epochs is not None else 10
-            except Exception:
-                epochs_value = 10
-            if epochs_value <= 0:
+
+            except Exception as fault:
+                log.error(f"ERROR: Invalid epochs input - {fault}! (Using 10 as default...)")
                 epochs_value = 10
 
-            def _clean_positive_int(raw_value):
-                if raw_value is None:
+            if epochs_value <= 0:
+                log.warning("WARNING: Negative epochs input! (Using 10 as default...)")
+                epochs_value = 10
+
+            def _clean_positive_int(messy_data_point):
+                if messy_data_point is None:
                     return None
                 try:
-                    val = int(raw_value)
-                except Exception:
+                    clean_data_point = int(messy_data_point)
+
+                except Exception as fault:
+                    log.error(f"ERROR: Invalid integer input - {fault}!")
                     return None
-                return val if val > 0 else None
+                return clean_data_point if clean_data_point > 0 else None
 
             baseline_count = _clean_positive_int(baseline_levels_value)
             factorial_count = _clean_positive_int(factorial_levels_value)
@@ -1203,12 +1323,15 @@ def handle_training_sweep(
         try:
             stop_training_sweep()
             log.info("Training sweep cancelled by user...")
+
         except Exception as fault:
             log.error(f"ERROR: Failed to stop training sweep - {fault}!")
 
     try:
         sweep_status = get_sweep_status()
-    except Exception:
+
+    except Exception as fault:
+        log.error(f"ERROR: Unable to retrieve sweep status - {fault}!")
         sweep_status = {"state": "unknown", "progress": 0.0, "message": ""}
 
     sweep_state = str(sweep_status.get("state", "idle"))
@@ -1255,7 +1378,9 @@ def update_ml_tab(_):
 
     try:
         metrics_snapshot = get_ml_metrics()
-    except Exception:
+
+    except Exception as fault:
+        log.error(f"ERROR: Unable to retrieve ML metrics - {fault}!")
         metrics_snapshot = {}
 
     sample_times_series = metrics_snapshot.get("Sample_Times_series", [])
@@ -1278,7 +1403,7 @@ def update_ml_tab(_):
 
     if sample_times_series and control_effort_series:
         effort_figure = go.Figure(data=[go.Scatter(x=pd.to_datetime(sample_times_series, unit="s"), y=control_effort_series, mode="lines", line=dict(color="#2e7d32", width=3))])
-        effort_figure.update_layout(template="plotly_white", margin=dict(l=40, r=10, t=30, b=30), xaxis_title="Time", yaxis_title="Control effort (||ÃŽâ€u||^2)")
+        effort_figure.update_layout(template="plotly_white", margin=dict(l=40, r=10, t=30, b=30), xaxis_title="Time", yaxis_title="Control effort")
     
     else:
         effort_figure = go.Figure()
@@ -1286,8 +1411,10 @@ def update_ml_tab(_):
     try:
         effort_figure.update_xaxes(showgrid=True, gridcolor="#e6e6e6", gridwidth=1, zeroline=False, linecolor="#444", mirror=True, ticks="outside")
         effort_figure.update_yaxes(showgrid=True, gridcolor="#e6e6e6", gridwidth=1, zeroline=False, linecolor="#444", mirror=True, ticks="outside")
-        effort_figure.update_layout(font=dict(family="Segoe UI, sans-serif", size=12, color="#111"), plot_bgcolor="#ffffff", paper_bgcolor="#ffffff", yaxis_title="Control effort (||du||^2)")
-    except Exception:
+        effort_figure.update_layout(font=dict(family="Segoe UI, sans-serif", size=12, color="#111"), plot_bgcolor="#ffffff", paper_bgcolor="#ffffff", yaxis_title="Control effort")
+
+    except Exception as fault:
+        log.error(f"ERROR: Unable to construct appropriate figure axes - {fault}!")
         pass
 
     if sample_times_series and saturation_series:
@@ -1302,6 +1429,7 @@ def update_ml_tab(_):
                     yaxis="y2",
                 )
             )
+
             effort_figure.update_layout(
                 yaxis2=dict(
                     title="Saturation",
@@ -1321,7 +1449,9 @@ def update_ml_tab(_):
                 for tr in list(effort_figure.data):
                     if getattr(tr, "mode", "") == "lines":
                         tr.showlegend = False
-            except Exception:
+
+            except Exception as fault:
+                log.error(f"ERROR: Unable to update figure legends - {fault}!")
                 pass
             
             effort_figure.add_trace(
@@ -1332,6 +1462,7 @@ def update_ml_tab(_):
                     showlegend=True,
                 )
             )
+
             effort_figure.add_trace(
                 go.Scatter(
                     x=[None], y=[None], mode="markers",
@@ -1340,6 +1471,7 @@ def update_ml_tab(_):
                     showlegend=True,
                 )
             )
+
             effort_figure.update_layout(
                 legend=dict(
                     orientation="v",
@@ -1350,45 +1482,54 @@ def update_ml_tab(_):
                     font=dict(size=11, color="#111"),
                 )
             )
-        except Exception:
+
+        except Exception as fault:
+            log.error(f"ERROR: Unable to plot saturations - {fault}!")
             pass
 
-    # Training diagnostics: loss and R² over time
     if training_times_series and (training_loss_series or training_r2_series):
         try:
-            t_idx = [i for i, v in enumerate(training_times_series) if v is not None]
-        except Exception:
-            t_idx = list(range(len(training_times_series)))
-        times = np.array([training_times_series[i] for i in t_idx], dtype=float)
-        loss_vals = np.array(
-            [training_loss_series[i] for i in t_idx if i < len(training_loss_series)],
+            training_time_stamp = [i for i, j in enumerate(training_times_series) if j is not None]
+
+        except Exception as fault:
+            log.error(f"ERROR: Unable to understand training time stamps - {fault}!")
+            training_time_stamp = list(range(len(training_times_series)))
+
+        times = np.array([training_times_series[i] for i in training_time_stamp], dtype=float)
+        losses = np.array(
+            [training_loss_series[i] for i in training_time_stamp if i < len(training_loss_series)],
             dtype=float,
         )
-        r2_vals = np.array(
-            [training_r2_series[i] for i in t_idx if i < len(training_r2_series)],
+
+        regression_score = np.array(
+            [training_r2_series[i] for i in training_time_stamp if i < len(training_r2_series)],
             dtype=float,
         )
+
         time_index = pd.to_datetime(times, unit="s") if times.size else []
 
         training_figure = go.Figure()
 
-        if times.size and loss_vals.size:
+        if times.size and losses.size:
             training_figure.add_trace(
                 go.Scatter(
                     x=time_index,
-                    y=loss_vals,
+                    y=losses,
                     mode="lines+markers",
                     line=dict(color="#1f77b4"),
                     name="Loss (MSE)",
                 )
             )
+
             try:
-                window = int(min(5, max(2, loss_vals.size)))
-            except Exception:
+                window = int(min(5, max(2, losses.size)))
+            except Exception as fault:
+                log.error(f"ERROR: Unable to determine smoothing window size - {fault}! (Using 2 as default...)")
                 window = 2
-            if loss_vals.size >= window:
+
+            if losses.size >= window:
                 kernel = np.ones(window, dtype=float) / float(window)
-                smooth_loss = np.convolve(loss_vals, kernel, mode="valid")
+                smooth_loss = np.convolve(losses, kernel, mode="valid")
                 smooth_times = time_index[window - 1 :]
                 training_figure.add_trace(
                     go.Scatter(
@@ -1400,27 +1541,27 @@ def update_ml_tab(_):
                     )
                 )
 
-        if times.size and r2_vals.size:
+        if times.size and regression_score.size:
             training_figure.add_trace(
                 go.Scatter(
                     x=time_index,
-                    y=r2_vals,
+                    y=regression_score,
                     mode="lines+markers",
                     line=dict(color="#e67e22"),
                     name="R²",
                     yaxis="y2",
                 )
             )
-
-        # Mark sweep vs online updates (optional)
         try:
-            for idx, src in enumerate(training_source_series or []):
-                if str(src).lower() == "sweep" and idx < len(time_index):
+            for i, training_source in enumerate(training_source_series or []):
+                if str(training_source).lower() == "sweep" and i < len(time_index):
                     training_figure.add_vline(
-                        x=time_index[idx],
+                        x=time_index[i],
                         line=dict(color="rgba(231,76,60,0.6)", width=1, dash="dot"),
                     )
-        except Exception:
+
+        except Exception as fault:
+            log.error(f"ERROR: Unable to add sweep data to figures - {fault}!")
             pass
 
         training_figure.update_layout(
@@ -1439,6 +1580,7 @@ def update_ml_tab(_):
                 tickvals=[0.0, 0.5, 1.0],
             ),
         )
+
     else:
         training_figure = go.Figure()
         training_figure.add_annotation(
@@ -1455,7 +1597,9 @@ def update_ml_tab(_):
         training_figure.update_xaxes(showgrid=False, zeroline=False, linecolor="#444", mirror=True, ticks="outside")
         training_figure.update_yaxes(showgrid=True, gridcolor="#e6e6e6", gridwidth=1, zeroline=False, linecolor="#444", mirror=True, ticks="outside")
         training_figure.update_layout(font=dict(family="Segoe UI, sans-serif", size=12, color="#111"), plot_bgcolor="#ffffff", paper_bgcolor="#ffffff")
-    except Exception:
+   
+    except Exception as fault:
+        log.error(f"ERROR: Unable to construct appropriate figure axes - {fault}!")
         pass
 
     mean_beam_voltage = metrics_snapshot.get("Input_Voltage_mean")
@@ -1467,36 +1611,48 @@ def update_ml_tab(_):
     beam_var_text = f"{beam_variance:.5f}" if beam_variance is not None else "--"
     effort_text = f"{mean_control_effort:.2f}" if mean_control_effort is not None else "--"
     saturation_text = f"{int(saturation_indicators)}"
+
     def _format_age(seconds: float) -> str:
         if seconds is None:
             return ""
+        
         if seconds < 60:
             return f"{seconds:.0f}s"
+        
         if seconds < 3600:
             return f"{seconds/60:.1f} min"
+        
         return f"{seconds/3600:.1f} h"
 
     try:
         model_info = get_model_info()
-    except Exception:
+
+    except Exception as fault:
+        log.error(f"ERROR: Unable to retrieve model info - {fault}!")
         model_info = {}
 
     last_train_sec = model_info.get("last_train_ago_sec")
     sweep_state = str(model_info.get("sweep_state", "")).lower()
     window_sec = model_info.get("online_window_seconds")
+
     if window_sec is None:
+        log.warning("WARNING: Online window size not available from model info! (Using 30s as default...)")
         window_sec = 30.0
+
     online_enabled = model_info.get("online_updates_enabled", True)
     learning_rate_value = model_info.get("learning_rate")
 
     if sweep_state == "running":
         model_state_label = "training"
         state_color = "#2ecc71"
+
     elif last_train_sec is None:
         model_state_label = "not trained"
         state_color = "#e74c3c"
+
     else:
         stale_threshold = max(120.0, 2.0 * float(window_sec))
+
         if float(last_train_sec) <= stale_threshold:
             model_state_label = "trained"
             state_color = "#2ecc71"
@@ -1536,17 +1692,24 @@ def update_ml_tab(_):
     age_text = _format_age(last_train_sec) if last_train_sec is not None else ""
 
     config_bits = []
+
     if age_text:
         config_bits.append(f"Time since last retrain: {age_text}")
+
     if window_sec is not None:
         try:
             config_bits.append(f"Window {float(window_sec):.0f}s")
-        except Exception:
+
+        except Exception as fault:
+            log.error(f"ERROR: Unable to format window size - {fault}!")
             pass
+
     if learning_rate_value:
         try:
             config_bits.append(f"LR {float(learning_rate_value):.3e}")
-        except Exception:
+
+        except Exception as fault:
+            log.error(f"ERROR: Unable to format learning rate - {fault}!")
             pass
 
     model_status_outputs = html.Div(

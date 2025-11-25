@@ -23,11 +23,11 @@ import numpy as np
 import pandas as pd
 import serial
 
-from python_ml_metrics import MetricCollector
+from python_ML_Metrics import MetricCollector
 
 try:
 
-    from python_RNN_controller import (
+    from python_RNN_Controller import (
         train_model,
         online_update,
         set_learning_rate as _set_rnn_learning_rate,
@@ -65,11 +65,7 @@ except Exception:
 #                                 Logging                                   # 
 # ------------------------------------------------------------------------- # 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S",)
 log = logging.getLogger("ESP32_Backend")
 
 
@@ -975,6 +971,7 @@ class SerialBackend:
 # ------------------------------------------------------------------------- #
 
 # change once connection is ensured to prevent error logs during startup
+OFFLINE = False
 status = OFFLINE
 
 Back_End_Controller = SerialBackend(status = status)
@@ -986,7 +983,7 @@ send_command = Back_End_Controller.send_command
 set_pin_voltage = Back_End_Controller.set_pin_voltage
 set_pin_voltages = Back_End_Controller.set_pin_voltages
 set_pwm = Back_End_Controller.set_pwm
-set_switch = Back_End_Controller.set_switch
+set_switch = Back_End_Controller.set_switch_timing
 set_switch_timing = getattr(Back_End_Controller, "set_switch_timing", None)
 set_pin = Back_End_Controller.set_pin
 set_pin_by_name = Back_End_Controller.set_pin_by_name
