@@ -20,7 +20,7 @@
 #include "freertos/semphr.h"
 #include "soc/gpio_struct.h"
 
-namespace {
+namespace{
 
 constexpr int LED_PIN = 2;
 
@@ -32,32 +32,29 @@ constexpr int CONE_2_PIN = 33;
 constexpr int SWITCH_LOGIC_PIN = 16;
 
 constexpr int CHANNEL_COUNT = 6;
-constexpr int CONTROLLED_PWM_CHANNELS = 5;
+constexpr int CONTROLLED_PULSE_CHANNELS = 5;
 
-constexpr int CHANNEL_PINS[CHANNEL_COUNT] = {
-  SQUEEZE_PLATE_PIN, ION_SOURCE_PIN, WEIN_FILTER_PIN, CONE_1_PIN, CONE_2_PIN, SWITCH_LOGIC_PIN
-};
+constexpr int CHANNEL_PINS[CHANNEL_COUNT] = {SQUEEZE_PLATE_PIN, ION_SOURCE_PIN, WEIN_FILTER_PIN, CONE_1_PIN, CONE_2_PIN, SWITCH_LOGIC_PIN};
 
 constexpr int MODULATION_FREQUENCY = 5000;
 constexpr int MODULATION_RESOLUTION = 10;
 constexpr int MAX_MODULATION_VALUE = (1 << MODULATION_RESOLUTION) - 1;
-constexpr int LED_CONTROL_CHANNELS[CONTROLLED_PWM_CHANNELS] = {0, 1, 2, 3, 4};
+constexpr int LED_CONTROL_CHANNELS[CONTROLLED_PULSE_CHANNELS] = {0, 1, 2, 3, 4};
 
-constexpr unsigned long MEASUREMENT_INTERVAL_MS = 50;    // periodic ADC read
-constexpr unsigned long HEARTBEAT_INTERVAL_MS = 2000;    // LED heartbeat
-constexpr int COMMAND_BUFFER_LIMIT = 256;                // serial command size cap
+constexpr unsigned long MEASUREMENT_INTERVAL_MS = 50;    
+constexpr unsigned long HEARTBEAT_INTERVAL_MS = 2000;    
+constexpr int COMMAND_BUFFER_LIMIT = 256;               
 
-// Allow wider bounds for future flexibility; clamp internally
 constexpr int SWITCH_PERIOD_MIN_US = 1;
-constexpr int SWITCH_PERIOD_MAX_US = 2000000;            // 2 seconds max
+constexpr int SWITCH_PERIOD_MAX_US = 2000000;           
 
-// WiFi/OTA configuration (replace with secure credentials / provisioning)
+// WiFi/OTA configuration (replace when known)
 constexpr const char* WIFI_SSID = "YourSSID";
 constexpr const char* WIFI_PASSWORD = "YourPassword";
 constexpr const char* OTA_HOSTNAME = "esp32dev";
-constexpr int WIFI_CONNECT_ATTEMPTS = 40;  // ~20s at 500ms per attempt
+constexpr int WIFI_CONNECT_ATTEMPTS = 50;
 
-}  // namespace
+}
 
 Adafruit_ADS1115 ads;
 
@@ -79,7 +76,7 @@ class ChannelController {
 
     const uint8_t channel_index = channel_number - 1;
 
-    if (channel_index < CONTROLLED_PWM_CHANNELS) {
+    if (channel_index < CONTROLLED_PULSE_CHANNELS) {
       if (value < 0) value = 0;
       if (value > MAX_MODULATION_VALUE) value = MAX_MODULATION_VALUE;
 
@@ -94,13 +91,13 @@ class ChannelController {
   }
 
   bool apply_target_voltages(const String& args) {
-    float targets[CONTROLLED_PWM_CHANNELS];
+    float targets[CONTROLLED_PULSE_CHANNELS];
 
-    if (!parse_voltage_targets(args, targets, CONTROLLED_PWM_CHANNELS)) {
+    if (!parse_voltage_targets(args, targets, CONTROLLED_PULSE_CHANNELS)) {
       return false;
     }
 
-    for (int i = 0; i < CONTROLLED_PWM_CHANNELS; ++i) {
+    for (int i = 0; i < CONTROLLED_PULSE_CHANNELS; ++i) {
       const int pwm_value = convert_voltage_to_pwm(targets[i]);
       set_channel(static_cast<uint8_t>(i + 1), pwm_value);
     }
@@ -198,7 +195,7 @@ class ChannelController {
   }
 
   void init_pwm_channels() {
-    for (int i = 0; i < CONTROLLED_PWM_CHANNELS; ++i) {
+    for (int i = 0; i < CONTROLLED_PULSE_CHANNELS; ++i) {
       pinMode(CHANNEL_PINS[i], OUTPUT);
       ledcSetup(LED_CONTROL_CHANNELS[i], MODULATION_FREQUENCY, MODULATION_RESOLUTION);
       ledcAttachPin(CHANNEL_PINS[i], LED_CONTROL_CHANNELS[i]);
@@ -379,13 +376,16 @@ class OtaWifiService {
   }
 
   void loop() {
+    
     if (WiFi.status() != WL_CONNECTED) {
+
       reconnect();
       return;
     }
 
     if (ota_enabled_) {
-      ArduinoOTA.handle();
+
+    ArduinoOTA.handle();
     }
   }
 
