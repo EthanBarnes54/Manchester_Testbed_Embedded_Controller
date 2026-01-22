@@ -8,7 +8,6 @@
 # Run locally in a new terminal and open http://127.0.0.1:8050 in a browser.
 # ------------------------------------------------------------------------#
 
-import dash
 from dash import Dash, dcc, html, Input, Output, State, ctx
 from dash.exceptions import PreventUpdate
 import plotly.graph_objs as go
@@ -17,6 +16,7 @@ import pkgutil, importlib.util
 import numpy as np
 import logging
 import time
+import os
 
 log = logging.getLogger("Dashboard")
 
@@ -59,7 +59,8 @@ except Exception as fault:
 #                                 Initialize app
 # -------------------------------------------------------------------------
 
-app = Dash(__name__, title="Manchester Ion Beam Testbed: Control Dashboard")
+ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
+app = Dash(__name__, title="Manchester Ion Beam Testbed: Control Dashboard", assets_folder=ASSETS_DIR)
 server = app.server
 
 LAST_AUTO_TS = 0.0
@@ -85,12 +86,13 @@ def _control_tab():
                                     html.Label("Squeeze Plate (V)"),
                                     dcc.Input(
                                         id="pwm1",
-                                        type="number",
+                                        type="text",
                                         min=0.0,
-                                        max=3.3,
+                                        max=2000.0,
                                         step=0.01,
-                                        value=0.0,
-                                        debounce=True,
+                                        value="0.00",
+                                        debounce=False,
+                                        className="digit-nudge",
                                         style={"width": "140px"},
                                     ),
                                 ]
@@ -100,12 +102,13 @@ def _control_tab():
                                     html.Label("Ion Source (V)"),
                                     dcc.Input(
                                         id="pwm2",
-                                        type="number",
+                                        type="text",
                                         min=0.0,
-                                        max=3.3,
+                                        max=2000.0,
                                         step=0.01,
-                                        value=0.0,
-                                        debounce=True,
+                                        value="0.00",
+                                        debounce=False,
+                                        className="digit-nudge",
                                         style={"width": "140px"},
                                     ),
                                 ]
@@ -115,12 +118,13 @@ def _control_tab():
                                     html.Label("Wein Filter (V)"),
                                     dcc.Input(
                                         id="pwm3",
-                                        type="number",
+                                        type="text",
                                         min=0.0,
-                                        max=3.3,
+                                        max=2000.0,
                                         step=0.01,
-                                        value=0.0,
-                                        debounce=True,
+                                        value="0.00",
+                                        debounce=False,
+                                        className="digit-nudge",
                                         style={"width": "140px"},
                                     ),
                                 ]
@@ -130,12 +134,13 @@ def _control_tab():
                                     html.Label("Upper Cone (V)"),
                                     dcc.Input(
                                         id="pwm4",
-                                        type="number",
+                                        type="text",
                                         min=0.0,
-                                        max=3.3,
+                                        max=2000.0,
                                         step=0.01,
-                                        value=0.0,
-                                        debounce=True,
+                                        value="0.00",
+                                        debounce=False,
+                                        className="digit-nudge",
                                         style={"width": "140px"},
                                     ),
                                 ]
@@ -145,12 +150,13 @@ def _control_tab():
                                     html.Label("Lower Cone (V)"),
                                     dcc.Input(
                                         id="pwm5",
-                                        type="number",
+                                        type="text",
                                         min=0.0,
-                                        max=3.3,
+                                        max=2000.0,
                                         step=0.01,
-                                        value=0.0,
-                                        debounce=True,
+                                        value="0.00",
+                                        debounce=False,
+                                        className="digit-nudge",
                                         style={"width": "140px"},
                                     ),
                                 ]
@@ -165,7 +171,7 @@ def _control_tab():
                                         max=20,
                                         step=1,
                                         value=5,
-                                        debounce=True,
+                                        debounce=False,
                                         style={"width": "120px"},
                                     ),
                                 ]
@@ -1058,20 +1064,26 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
     pin_voltages = [pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_voltage_5]
 
     try:
-        if any(voltage is None for voltage in pin_voltages):
-            return "Enter all five target voltages (0.0-3.3 V).", {"color": "red", "fontWeight": "bold"}
+        def _coerce_float(val):
+            if val is None:
+                return None
+            if isinstance(val, str) and not val.strip():
+                return None
+            try:
+                return float(val)
+            except Exception:
+                return "INVALID"
 
         targets = []
 
         for i, voltage in enumerate(pin_voltages, start=1):
-            try:
-                float_voltages = float(voltage)
-
-            except (TypeError, ValueError):
+            float_voltages = _coerce_float(voltage)
+            if float_voltages is None:
+                return "Enter all five target voltages (0-2000).", {"color": "red", "fontWeight": "bold"}
+            if float_voltages == "INVALID":
                 return f"ERROR: Invalid target for pin {i}", {"color": "red", "fontWeight": "bold"}
-
-            if not (0.0 <= float_voltages <= 3.3):
-                return f"ERROR: Pin {i} target out of range (0.0-3.3 V)!", {"color": "red", "fontWeight": "bold"}
+            if not (0.0 <= float_voltages <= 2000.0):
+                return f"ERROR: Pin {i} target out of range (0-2000)!", {"color": "red", "fontWeight": "bold"}
             
             targets.append(float_voltages)
 
@@ -1079,7 +1091,7 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
 
         switch_timing_messgae = "not set"
 
-        if switch_time_us is not None:
+        if switch_time_us is not None and not (isinstance(switch_time_us, str) and not switch_time_us.strip()):
             try:
                 float_switch_timing = float(switch_time_us)
 
@@ -1107,10 +1119,10 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
             f"switch_time={switch_timing_messgae}"
         )
 
-        return status_message, {"color": "green", "fontWeight": "bold"}
+        return "", {"display": "none"}
 
     except Exception as fault:
-        return f"ERROR: Pin update failed - {fault}!", {"color": "red", "fontWeight": "bold"}
+        return f"ERROR: Pin update failed - {fault}!", {"color": "red", "fontWeight": "bold", "display": "block"}
 
 # -------------------------------------------------------------------------
 #                               Pin statuses
@@ -1394,7 +1406,7 @@ def update_ml_tab(_):
 
     if sample_times_series and voltage_time_series:
         beam_figure = go.Figure(data=[go.Scatter(x=pd.to_datetime(sample_times_series, unit="s"), y=voltage_time_series, mode="lines", line=dict(color="#1f77b4", width=3))])
-        beam_figure.update_layout(template="plotly_white", margin=dict(l=40, r=10, t=30, b=30), xaxis_title="Time", yaxis_title="Diode voltage (V)")
+        beam_figure.update_layout(template="plotly_white", margin=dict(l=40, r=10, t=30, b=30), xaxis_title="Time", yaxis_title="Output voltage (V)")
         beam_figure.update_xaxes(showgrid=True, gridcolor="#e6e6e6", gridwidth=1, zeroline=False, linecolor="#444", mirror=True, ticks="outside")
         beam_figure.update_yaxes(showgrid=True, gridcolor="#e6e6e6", gridwidth=1, zeroline=False, linecolor="#444", mirror=True, ticks="outside")
     
@@ -1746,11 +1758,3 @@ if __name__ == "__main__":
 
     log.info("Launching ESP-12F Control Dashboard...")
     app.run(debug=False, host="0.0.0.0", port=8050)
-
-
-
-
-
-
-
-
