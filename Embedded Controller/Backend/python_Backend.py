@@ -97,8 +97,25 @@ ONLINE_WINDOW_MAX_SEC = 600.0
 
 
 class SerialBackend:
+    """Serial (or simulated) backend for the ESP32 embedded controller.
+
+    This class owns the serial connection and background threads for:
+
+    - reading and parsing messages from the embedded firmware
+    - buffer data into an in-memory DataFrame
+    - send control commands
+    - perform periodic online model updates and training sweeps when prompted by user
+    """
 
     def __init__(self, port=SERIAL_PORT, baud=BAUD_RATE, status: bool = False):
+
+        """Creates and starts the backend.
+
+        Arguments:
+            port: Serial port name (for example, "COM4").
+            baud: Serial baud rate.
+            status: When True, starts in offline/simulated mode.
+        """
 
         self.port = port
         self.baud = baud
@@ -152,6 +169,11 @@ class SerialBackend:
     # ------------------------------------------------------------------ # 
 
     def connect(self):
+        """Opens the serial connection to the ESP32.
+
+        On connection failure, the backend switches to offline mode to avoid
+        continuous reconnect attempts.
+        """
 
         if self.offline:
             time.sleep(0.1)
@@ -170,6 +192,7 @@ class SerialBackend:
                 return
 
     def disconnect(self):
+        """Close the serial connection (if open)."""
 
         if self.serial and self.serial.is_open:
             try:
@@ -182,6 +205,8 @@ class SerialBackend:
         self.serial = None
 
     def set_save_dataset_enabled(self, enabled: bool):
+        """Toggles dataset saving."""
+
         try:
             self.save_dataset_enabled = bool(enabled)
 
@@ -189,6 +214,14 @@ class SerialBackend:
             self.save_dataset_enabled = False
 
     def set_window_update_time(self, window_seconds: float):
+        """Set the online ML learning update window length.
+
+        Arguments:
+            window_seconds: Desired window length in seconds.
+
+        Returns:
+            The clamped window length in seconds.
+        """
         try:
             value = float(window_seconds)
 
@@ -202,38 +235,53 @@ class SerialBackend:
         return bounded
 
     def get_window_update_time(self) -> float:
+        """Retrieve the current online-learning update window length."""
+
         return float(self.online_window_seconds)
 
     def set_online_learning_rate(self, learning_rate: float):
+        """Sets the RNN online-learning rate."""
+
         if _set_rnn_learning_rate is None:
             raise RuntimeError("ERROR: Learning rate unavailable for upload! (RNN controller import failed...)")
         return _set_rnn_learning_rate(learning_rate)
 
     def get_learning_rate(self):
+        """Return the current RNN learning rate."""
+
         if _get_rnn_learning_rate is None:
             return None
         return _get_rnn_learning_rate()
 
     def set_model_momentum(self, momentum: float):
+        """Set the RNN learning momentum."""
         if _set_rnn_momentum is None:
             raise RuntimeError("ERROR: Momentum unavailable for upload! (RNN controller import failed...)")
         return _set_rnn_momentum(momentum)
 
     def get_model_momentum(self):
+        """Return the current learning momentum."""
+
         if _get_model_momentum is None:
             return None
         return _get_model_momentum()
 
     def save_model_parameters(self):
+        """Saves RNN model parameters to machine."""
+
         if manual_save_model is None:
             raise RuntimeError("ERROR: Manual save unavailable! (RNN controller import failed...)")
         return manual_save_model()
 
     def compute_feature_importance(self, max_samples: int = 200, num_permutations: int = 20):
+        """Compute feature importances/saliencies from recent backend data, using shapley permutation."""
+
         data_frame = self.get_data()
         return compute_feature_saliencies(data_frame, max_samples=max_samples, num_permutations=num_permutations)
 
     def get_online_update_config(self) -> dict:
+        """Returns a snapshot of online update settings."""
+
         return {
             "window_seconds": float(self.online_window_seconds),
             "learning_rate": self.get_learning_rate(),
@@ -242,6 +290,7 @@ class SerialBackend:
         }
 
     def get_latest_point(self):
+        """Return the most recent (timestamp, voltage) pair."""
         with self.data_lock:
 
             if self.data_frame.empty:
@@ -258,6 +307,10 @@ class SerialBackend:
     
     @staticmethod
     def _name_to_pin_index(pin_name: str) -> int:
+        """Map a pin label (or numeric string) to a 1-based pin index (1..6).
+
+        Returns 0 when the name/index is invalid.
+        """
         if pin_name is None:
             return 0
         
@@ -284,6 +337,7 @@ class SerialBackend:
 
     @staticmethod
     def _clamp_signal_pulse(value) -> int:
+        """Clamp a PWM pulse command to the acceptible range."""
         try:
             signal_value = int(round(float(value)))
 
@@ -294,6 +348,7 @@ class SerialBackend:
 
     @staticmethod
     def clamp_voltage(voltage: float) -> float:
+        """Clamp a voltage command to the acceptable range."""
         try:
             voltage_value = float(voltage)
 
@@ -304,6 +359,7 @@ class SerialBackend:
 
     @classmethod
     def pulse_to_voltage(cls, value: float) -> float:
+        """Convert a PWM pulse to volts."""
 
         pulse_signal = cls._clamp_signal_pulse(value)
 
@@ -311,6 +367,7 @@ class SerialBackend:
 
     @classmethod
     def voltage_to_pulse(cls, voltage: float) -> int:
+        """Convert voltage to a PWM pulse."""
 
         voltage_output = cls.clamp_voltage(voltage)
         scaled_voltage_output = (voltage_output / MAX_CONTROL_VOLTAGE) * MAX_MODULATION_VALUE
@@ -318,6 +375,10 @@ class SerialBackend:
         return cls._clamp_signal_pulse(scaled_voltage_output)
 
     def update_pin_values(self, pin_index: int, pin_value: int) -> bool:
+        """Updates cached pin values and timestamp.
+
+        This is used both when reading from the ESP32 and when simulating.
+        """
 
         if not (1 <= int(pin_index) <= 6):
             log.warning(f"WARNING: Pin index out of range to send update!")
@@ -335,6 +396,8 @@ class SerialBackend:
         return True
 
     def _append_measurement(self, timestamp: float, voltage: float, message: str):
+        """Append a measurement row to the internal DataFrame."""
+
         status_snapshot = list(self.pins)
 
         row = {
@@ -354,6 +417,9 @@ class SerialBackend:
             self.data_frame = self.data_frame.tail(1000).reset_index(drop=True)
 
     def operating_system(self):
+        """ Reads serial messages, parses measurement / pin snapshots, and updates
+        the internal buffers. When offline, generates simulated readings.
+        """
 
         while self.alive.is_set():
 
@@ -443,6 +509,7 @@ class SerialBackend:
                 time.sleep(0.5)
 
     def _update_manager(self):
+        """Background loop for periodic online model updates."""
         
         while self.alive.is_set():
 
@@ -502,6 +569,7 @@ class SerialBackend:
     # ------------------------------------------------------------------ #
 
     def send_command(self, command_string: str):
+        """Sends a command string to the ESP32."""
         try:
             if self.offline:
 
@@ -555,11 +623,13 @@ class SerialBackend:
             log.error(f"ERROR: Failed to send command '{command_string}' - {fault}!")
 
     def get_data(self) -> pd.DataFrame:
+        """Return a copy of the current rolling DataFrame."""
         with self.data_lock:
             data_frame = self.data_frame.copy()
             return data_frame
 
     def get_status(self) -> str:
+        """Return a human-readable connection/status string."""
         if self.offline:
             return "Simulating operation..."
         if self.serial and getattr(self.serial, "is_open", False):
@@ -567,6 +637,7 @@ class SerialBackend:
         return "Connecting..."
 
     def get_pin_value(self, i: int, value: int):
+        """Clamp a requested pin value based on pin type (PWM pins 1..5 vs switch pin 6)."""
 
         if not (1 <= i <= 6):
             log.warning("WARNING: Pin index must be 1-6!")
@@ -577,6 +648,7 @@ class SerialBackend:
         return 1 if int(value) else 0
 
     def set_pin_voltage(self, i: int, value: int):
+        """Set a single pin by index (1..6) using raw PWM duty (pins 1..5) or 0/1 (pin 6)."""
         if i < 1 or i > 6:
             raise ValueError("ERROR: index must be 1-6!")
         
@@ -588,6 +660,11 @@ class SerialBackend:
         self.send_command(f"PIN {int(i)} {int(value)}")
 
     def set_pin_voltages(self, voltages):
+        """Set the first 5 control pins using volt targets (sends a TARGETS command).
+
+        Args:
+            voltages: Iterable of voltages; first 5 values are used.
+        """
 
         if voltages is None:
             raise ValueError("ERROR: Missing voltage targets!")
@@ -605,6 +682,7 @@ class SerialBackend:
         self.send_command(voltage_payload)
 
     def set_pwm(self, channel: int, duty: int):
+        """Alias for setting PWM duty on control pins 1..5."""
 
         if channel < 1 or channel > 5:
             raise ValueError("ERROR: Pulse source must be a channel in range: 1-5!")
@@ -612,6 +690,7 @@ class SerialBackend:
         self.set_pin_voltage(channel, duty)
 
     def set_switch_timing(self, timing_input: float):
+        """Set the switch timing (microseconds) used by the embedded controller."""
         try:
             switch_timing = float(timing_input)
 
@@ -636,10 +715,9 @@ class SerialBackend:
         except Exception as fault:
             log.error(f"ERROR: Failed to send switch timing '{board_switch_timing}': {fault}!")
 
-    def set_pin(self, i: int, value: int):
-        self.set_pin_voltage(i, value)
-
     def set_pin_by_name(self, name: str, value: int):
+        """Set a pin name."""
+
         i = self._name_to_pin_index(name)
 
         if not (1 <= i <= 6):
@@ -653,6 +731,8 @@ class SerialBackend:
         self.send_command(f"PIN {int(i)} {int(value)}")
 
     def get_pins(self):
+        """Return cached pin names/values and the last-update timestamp."""
+
         names = [
             "squeeze_plate",
             "ion_source",
@@ -661,9 +741,12 @@ class SerialBackend:
             "cone_2",
             "switch_logic",
         ]
+
         return {"names": names, "values": list(self.pins), "timestamp": self.pins_timestamp,}
 
     def stop(self):
+        """Stop background threads and close the serial connection."""
+
         log.info("Backend thread disconnecting...")
         self.alive.clear()
         self.disconnect()
@@ -674,6 +757,8 @@ class SerialBackend:
     # ------------------------------------------------------------------ #
 
     def _RNN_training_sweeps(self, minimum_voltage: float, maximum_voltage: float, step: float, hold_time: float, epochs: int, baseline_levels: int | None = None, factorial_levels: int | None = None, random_samples: int | None = None):
+        """Internal worker for parameter sweeps + optional RNN training."""
+
         try:
 
             self.sweep_status = {"state": "running", "progress": 0.0, "message": ""}
@@ -935,6 +1020,11 @@ class SerialBackend:
         factorial_levels: int | None = None,
         random_samples: int | None = None,
     ):
+        """Start a background training sweep.
+
+        Returns:
+            True if the sweep was started, False if one is already running.
+        """
 
         if self.sweep_thread and self.sweep_thread.is_alive():
             log.info("Sweep already running...")
@@ -960,9 +1050,13 @@ class SerialBackend:
         return True
 
     def get_sweep_status(self) -> dict:
+        """Return the latest sweep status (state/progress/message)."""
+
         return dict(self.sweep_status)
 
     def stop_training_sweep(self):
+        """Request cancellation of an in-progress sweep."""
+
         self.sweep_cancel.set()
 
 
@@ -985,7 +1079,6 @@ set_pin_voltages = Back_End_Controller.set_pin_voltages
 set_pwm = Back_End_Controller.set_pwm
 set_switch = Back_End_Controller.set_switch_timing
 set_switch_timing = getattr(Back_End_Controller, "set_switch_timing", None)
-set_pin = Back_End_Controller.set_pin
 set_pin_by_name = Back_End_Controller.set_pin_by_name
 get_pins = Back_End_Controller.get_pins
 set_window_update_time = getattr(Back_End_Controller, "set_window_update_time", None)
@@ -1000,6 +1093,7 @@ get_status = Back_End_Controller.get_status
 # ------------------------------------------------------------------------- #
 
 def get_model_info() -> dict:
+    """Returns a lightweight snapshot of model/online-update state to be displayed opn the UI Dashboard."""
 
     status_snapshot = {
         "last_train_ago_sec": None,
@@ -1077,6 +1171,7 @@ def get_model_info() -> dict:
 ML_METRICS = MetricCollector(maxlen=4000)
 
 def get_ml_metrics():
+    """Update and return the ML metrics for display on the dashboard."""
 
     try:
         latest_reading = Back_End_Controller.get_latest_point()
@@ -1093,6 +1188,8 @@ def get_ml_metrics():
 
 
 def push_ml_features(features, names=None):
+    """Record a set of feature values for debugging."""
+
     try:
         ML_METRICS.record_features(features, feature_names = names)
     except Exception as fault:
@@ -1101,6 +1198,8 @@ def push_ml_features(features, names=None):
 
 
 def push_ml_saliency(saliency):
+    """Record feature saliency values for debugging."""
+
     try:
         ML_METRICS.record_feature_saliencies(saliency)
     except Exception as fault:
@@ -1109,10 +1208,14 @@ def push_ml_saliency(saliency):
 
 
 def save_model_parameters():
+    """Saves the model parameters via user input in the backend controller."""
+
     return Back_End_Controller.save_model_parameters()
 
 
 def compute_feature_importance(max_samples: int = 200, num_permutations: int = 20):
+    """Computes feature saliency from backend data."""
+    
     return Back_End_Controller.compute_feature_importance(max_samples=max_samples, num_permutations=num_permutations)
 
 #-------------------------------------------------------------------------#
