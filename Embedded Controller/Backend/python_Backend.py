@@ -1,4 +1,5 @@
-﻿# --------- Backend Communication Layer - ESP32 Cntrol System --------- #
+﻿"""
+# --------- Backend Communication Layer - ESP32 Cntrol System --------- #
 
 # Handles serial communication between the ESP32 board and the Python environment.
 # Provides live data streaming, thread-safe buffering, and command
@@ -6,7 +7,7 @@
 # pipeline, and RNN controller modules.
 
 #------------------------------------------------------------------------#
-
+"""
 # ---------------------------------------------------------------------- #
 #                               Imports                                  #
 # ---------------------------------------------------------------------- #

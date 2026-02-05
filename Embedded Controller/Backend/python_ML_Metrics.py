@@ -1,4 +1,5 @@
 
+"""
 #-------------- Machine Learning Metrics Module ------------#
 
 #   Pyhton module to collect time-series metrics from the 
@@ -7,6 +8,7 @@
 #   and analysis.
 
 # ----------------------------------------------------------#
+"""
 
 import threading
 from collections import deque
@@ -33,6 +35,9 @@ class MetricWindow:
 #----------------------------------------------------------#
 
 class MetricCollector:
+    """
+    Collects and maintains time-series learning metrics for the ESP32 backend RNN Auto-controller.
+    """
 
     def __init__(self, maxlen: Optional[int] = None, max_retrain_length: int = 2000):
 
@@ -56,6 +61,7 @@ class MetricCollector:
         self._training_source: Deque[str] = deque(maxlen=self.max_retrain_length)
 
     def update_stream_from_backend(self, new_sample_time: float, new_beam_voltage: float, pin_values: List[int]):
+        """Updates the live metrics with new data from the backend control system."""
         
         pin_values = list(pin_values) if pin_values is not None else [0, 0, 0, 0, 0, 0]
         control_vector = np.array(pin_values[:5], dtype=float)
@@ -77,6 +83,7 @@ class MetricCollector:
             self._window.saturation_indicators.append(saturation)
 
     def record_features(self, features: np.ndarray, feature_names: Optional[List[str]] = None):
+        """Records the latest feature vector and optional feature names for dashboard display."""
 
         with self._lock:
             self._latest_features = np.array(features, dtype=float).reshape(-1)
@@ -84,11 +91,13 @@ class MetricCollector:
                 self._feature_names = list(feature_names)
 
     def record_feature_saliencies(self, saliency: np.ndarray):
+        """"Records the latest feature saliency values for dashboard display."""
     
         with self._lock:
             self._feature_saliency = np.array(saliency, dtype=float).reshape(-1)
 
     def record_training_update(self, timestamp: float, loss: Optional[float], r2: Optional[float], source: str = "online"):
+        """Records a new training update with timestamp, loss, R2 score, and source identifier."""
 
         with self._lock:
             self._training_times.append(float(timestamp))
@@ -97,6 +106,7 @@ class MetricCollector:
             self._training_source.append(str(source))
 
     def dashboard_snapshot(self) -> Dict:
+        """Returns a snapshot of the current metrics for dashboard display, including time-series data and summary statistics."""
       
         with self._lock:
             sample_times = np.array(self._window.sample_times, dtype=float)

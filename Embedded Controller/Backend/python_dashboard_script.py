@@ -1,4 +1,5 @@
-﻿#--------------- ESP32 Control and Monitoring Dashboard -------------------#
+﻿"""
+#--------------- ESP32 Control and Monitoring Dashboard -------------------#
 
 # A Dash-based web interface for real-time control and data visualization
 # of the ESP32-based embedded control system. Communicates with the backend
@@ -7,7 +8,7 @@
 
 # Run locally in a new terminal and open http://127.0.0.1:8050 in a browser.
 # ------------------------------------------------------------------------#
-
+"""
 from dash import Dash, dcc, html, Input, Output, State, ctx
 from dash.exceptions import PreventUpdate
 import plotly.graph_objs as go

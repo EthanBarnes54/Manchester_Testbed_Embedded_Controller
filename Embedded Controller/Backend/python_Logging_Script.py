@@ -1,10 +1,12 @@
 
-#----------- Data logger for ESP12F serial instrument. -------------#
+"""
+#----------- Data logger for ESP32 serial instrument. -------------#
 
 #   Python module which reads measurement data from the backend queue, 
 #   logs to CSV, and visualizes the voltage in real time. 
 
 #----------------------------------------------------------------------#
+"""
 
 import time
 import pandas as pd
