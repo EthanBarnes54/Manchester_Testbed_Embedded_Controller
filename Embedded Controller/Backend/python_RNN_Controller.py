@@ -38,6 +38,8 @@ __all__ = [
     "get_learning_rate",
     "set_momentum",
     "get_momentum",
+    "set_optimizer_type",
+    "get_optimizer_type",
     "manual_save_model",
 ]
 
@@ -177,7 +179,31 @@ def _make_optimizer(parameters, learning_rate: float | None = None):
 
     if opt == "sgd":
         return optim.SGD(parameters, lr=learning_rate_value, momentum=_current_momentum, nesterov=True)
-    
+
+    if opt == "adamw":
+        return optim.AdamW(parameters, lr=learning_rate_value, betas=(_current_momentum, 0.999))
+
+    if opt == "rmsprop":
+        return optim.RMSprop(parameters, lr=learning_rate_value, momentum=_current_momentum)
+
+    if opt == "adagrad":
+        return optim.Adagrad(parameters, lr=learning_rate_value)
+
+    if opt == "adadelta":
+        return optim.Adadelta(parameters, lr=learning_rate_value)
+
+    if opt == "adamax":
+        return optim.Adamax(parameters, lr=learning_rate_value, betas=(_current_momentum, 0.999))
+
+    if opt == "nadam":
+        return optim.NAdam(parameters, lr=learning_rate_value, betas=(_current_momentum, 0.999))
+
+    if opt == "lbfgs":
+        return optim.LBFGS(parameters, lr=learning_rate_value)
+
+    if opt == "asgd":
+        return optim.ASGD(parameters, lr=learning_rate_value)
+
     return optim.Adam(parameters, lr=learning_rate_value, betas=(_current_momentum, 0.999))
 
 
@@ -251,6 +277,27 @@ def get_momentum() -> float:
     return float(_current_momentum)
 
 
+def set_optimizer_type(optimizer_type: str) -> str:
+    """Sets the optimiser type and rebuilds the optimiser instance."""
+
+    global OPTIMIZER_TYPE, optimiser
+    opt = str(optimizer_type).lower()
+    valid_options = {"adam", "sgd", "adamw", "rmsprop", "adagrad", "adadelta", "adamax", "nadam", "lbfgs", "asgd"}
+
+    if opt not in valid_options:
+        raise ValueError(f"ERROR: Unknown optimizer type '{optimizer_type}'.")
+
+    OPTIMIZER_TYPE = opt
+    optimiser = _make_optimizer(model.parameters())
+    log.info(f"Optimizer set to {OPTIMIZER_TYPE}...")
+    return OPTIMIZER_TYPE
+
+
+def get_optimizer_type() -> str:
+    """Returns the currently configured optimiser type."""
+    return str(OPTIMIZER_TYPE)
+
+
 # -------------------------------------------------------
 #                   Data Preparation
 # -------------------------------------------------------
@@ -316,16 +363,30 @@ def train_model(data_frame: pd.DataFrame, number_of_epochs: int = 10, grad_clip_
 
     for epoch in range(number_of_epochs):
 
-        optimiser.zero_grad(set_to_none=True)
-        preds = model(input_sequences)
+        if isinstance(optimiser, optim.LBFGS):
+            def closure():
+                optimiser.zero_grad(set_to_none=True)
+                preds = model(input_sequences)
+                loss = Mean_error_loss(preds, target_values)
+                loss.backward()
+                if grad_clip_threshold is not None and grad_clip_threshold > 0:
+                    nn.utils.clip_grad_norm_(model.parameters(), grad_clip_threshold)
+                return loss
 
-        loss = Mean_error_loss(preds, target_values)
-        loss.backward()
+            loss = optimiser.step(closure)
+            preds = model(input_sequences)
 
-        if grad_clip_threshold is not None and grad_clip_threshold > 0:
-            nn.utils.clip_grad_norm_(model.parameters(), grad_clip_threshold)
+        else:
+            optimiser.zero_grad(set_to_none=True)
+            preds = model(input_sequences)
 
-        optimiser.step()
+            loss = Mean_error_loss(preds, target_values)
+            loss.backward()
+
+            if grad_clip_threshold is not None and grad_clip_threshold > 0:
+                nn.utils.clip_grad_norm_(model.parameters(), grad_clip_threshold)
+
+            optimiser.step()
 
         with torch.no_grad():
             r2 = r2_score(target_values.cpu().numpy(), preds.cpu().numpy())
@@ -432,17 +493,31 @@ def online_update(new_data_frame: pd.DataFrame, grad_clip_threshold: float = 1.0
     except Exception as fault:
         return log.error(f"ERROR: Online update data preparation failed - {fault}"), False, None, None
     
-    optimiser.zero_grad(set_to_none=True)
+    if isinstance(optimiser, optim.LBFGS):
+        def closure():
+            optimiser.zero_grad(set_to_none=True)
+            predictions = model(scaled_input_sequence)
+            mse_losses = Mean_error_loss(predictions, target_voltage)
+            mse_losses.backward()
+            if grad_clip_threshold is not None and grad_clip_threshold > 0:
+                nn.utils.clip_grad_norm_(model.parameters(), grad_clip_threshold)
+            return mse_losses
 
-    predictions = model(scaled_input_sequence)
-    mse_losses = Mean_error_loss(predictions, target_voltage)
+        mse_losses = optimiser.step(closure)
+        predictions = model(scaled_input_sequence)
 
-    mse_losses.backward()
+    else:
+        optimiser.zero_grad(set_to_none=True)
 
-    if grad_clip_threshold is not None and grad_clip_threshold > 0:
-        nn.utils.clip_grad_norm_(model.parameters(), grad_clip_threshold)
+        predictions = model(scaled_input_sequence)
+        mse_losses = Mean_error_loss(predictions, target_voltage)
 
-    optimiser.step()
+        mse_losses.backward()
+
+        if grad_clip_threshold is not None and grad_clip_threshold > 0:
+            nn.utils.clip_grad_norm_(model.parameters(), grad_clip_threshold)
+
+        optimiser.step()
 
     if save:
         save_nn_weights(model, scaler)

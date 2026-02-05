@@ -36,6 +36,7 @@ from python_Backend import (
     get_model_info,
     set_window_update_time,
     set_online_learning_rate,
+    set_optimizer_type,
     save_model_parameters,
     compute_feature_importance,
 )
@@ -584,6 +585,24 @@ def _ml_tab():
     if momentum_default is None:
         momentum_default = 0.9
 
+    optimizer_default = MODEL_INFO_BOOTSTRAP.get("optimizer_type")
+
+    if optimizer_default is None:
+        optimizer_default = "adam"
+
+    optimizer_options = [
+        {"label": "Adam", "value": "adam"},
+        {"label": "SGD", "value": "sgd"},
+        {"label": "AdamW (decay)", "value": "adamw"},
+        {"label": "RMSprop (noisy)", "value": "rmsprop"},
+        {"label": "Adagrad (sparse)", "value": "adagrad"},
+        {"label": "Adadelta (adaptive)", "value": "adadelta"},
+        {"label": "Adamax (stable)", "value": "adamax"},
+        {"label": "NAdam", "value": "nadam"},
+        {"label": "LBFGS", "value": "lbfgs"},
+        {"label": "ASGD", "value": "asgd"},
+    ]
+
     return html.Div(
         style={"padding": "1em"},
         children=[
@@ -648,6 +667,20 @@ def _ml_tab():
                                 debounce=True,
                                 value=float(momentum_default),
                                 style={"width": "150px"},
+                            ),
+                        ]
+                    ),
+
+                    html.Div(
+                        [
+                            html.Label("Optimizer", style={"fontWeight": "bold"}),
+                            dcc.Dropdown(
+                                id="optimizer-type",
+                                options=optimizer_options,
+                                value=optimizer_default,
+                                clearable=False,
+                                searchable=False,
+                                style={"width": "180px"},
                             ),
                         ]
                     ),
@@ -757,9 +790,10 @@ app.layout = html.Div(
     Input("online-window-seconds", "value"),
     Input("online-learning-rate", "value"),
     Input("online-momentum", "value"),
+    Input("optimizer-type", "value"),
 )
 
-def _configure_online_updates(window_seconds, learning_rate, momentum_value):
+def _configure_online_updates(window_seconds, learning_rate, momentum_value, optimizer_type):
     """Applies online-update settings and return the relevant status message."""
 
     errors = []
@@ -787,6 +821,14 @@ def _configure_online_updates(window_seconds, learning_rate, momentum_value):
         except Exception as fault:
             log.error(f"ERROR: Unbale to set the model's learning momentum  - {fault}!")
             errors.append(f"ERROR: Unbale to set the model's learning momentum  - {fault}!")
+
+    if optimizer_type is not None and callable(set_optimizer_type):
+        try:
+            set_optimizer_type(optimizer_type)
+
+        except Exception as fault:
+            log.error(f"ERROR: Unable to set the model's optimizer - {fault}!")
+            errors.append(f"ERROR: Unable to set the model's optimizer - {fault}!")
 
     if not errors:
         return html.Span("")
@@ -1697,6 +1739,7 @@ def update_ml_tab(_):
 
     online_enabled = model_info.get("online_updates_enabled", True)
     learning_rate_value = model_info.get("learning_rate")
+    optimizer_type_value = model_info.get("optimizer_type")
 
     if sweep_state == "running":
         model_state_label = "training"
@@ -1766,6 +1809,14 @@ def update_ml_tab(_):
 
         except Exception as fault:
             log.error(f"ERROR: Unable to format learning rate - {fault}!")
+            pass
+
+    if optimizer_type_value:
+        try:
+            config_bits.append(f"Opt {str(optimizer_type_value).upper()}")
+
+        except Exception as fault:
+            log.error(f"ERROR: Unable to format optimizer type - {fault}!")
             pass
 
     model_status_outputs = html.Div(

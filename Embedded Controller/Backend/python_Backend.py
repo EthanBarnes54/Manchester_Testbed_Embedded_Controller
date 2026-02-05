@@ -35,6 +35,8 @@ try:
         get_learning_rate as _get_rnn_learning_rate,
         set_momentum as _set_rnn_momentum,
         get_momentum as _get_model_momentum,
+        set_optimizer_type as _set_rnn_optimizer_type,
+        get_optimizer_type as _get_rnn_optimizer_type,
         save_nn_weights,
         model,
         scaler,
@@ -55,6 +57,12 @@ except Exception:
         return None
 
     def _get_model_momentum():
+        return None
+
+    def _set_rnn_optimizer_type(_value):
+        return None
+
+    def _get_rnn_optimizer_type():
         return None
 
     def save_nn_weights(_model, _scaler):
@@ -271,6 +279,20 @@ class SerialBackend:
         if _get_model_momentum is None:
             return None
         return _get_model_momentum()
+
+    def set_optimizer_type(self, optimizer_type: str):
+        """Set the optimiser type for the RNN controller."""
+
+        if _set_rnn_optimizer_type is None:
+            raise RuntimeError("ERROR: Optimizer selection unavailable! (RNN controller import failed...)")
+        return _set_rnn_optimizer_type(optimizer_type)
+
+    def get_optimizer_type(self):
+        """Return the current optimiser type."""
+
+        if _get_rnn_optimizer_type is None:
+            return None
+        return _get_rnn_optimizer_type()
 
     def save_model_parameters(self):
         """Saves RNN model parameters to machine."""
@@ -1089,6 +1111,7 @@ set_pin_by_name = Back_End_Controller.set_pin_by_name
 get_pins = Back_End_Controller.get_pins
 set_window_update_time = getattr(Back_End_Controller, "set_window_update_time", None)
 set_online_learning_rate = getattr(Back_End_Controller, "set_online_learning_rate", None)
+set_optimizer_type = getattr(Back_End_Controller, "set_optimizer_type", None)
 get_online_update_config = getattr(Back_End_Controller, "get_online_update_config", None)
 
 lines = Back_End_Controller.lines
@@ -1107,6 +1130,7 @@ def get_model_info() -> dict:
         "online_window_seconds": None,
         "online_updates_enabled": None,
         "learning_rate": None,
+        "optimizer_type": None,
         "sweep_state": None,
     }
 
@@ -1159,6 +1183,13 @@ def get_model_info() -> dict:
     except Exception as fault:
         log.warning(f"WARNING: Couldnot access the momentum: {fault}!")
         status_snapshot["momentum"] = None
+
+    try:
+        status_snapshot["optimizer_type"] = _get_rnn_optimizer_type()
+
+    except Exception as fault:
+        log.warning(f"WARNING: Couldnot access the optimizer type: {fault}!")
+        status_snapshot["optimizer_type"] = None
    
     try:
         status_snapshot["sweep_state"] = str(getattr(Back_End_Controller, "sweep_status", {}).get("state", "idle"))
