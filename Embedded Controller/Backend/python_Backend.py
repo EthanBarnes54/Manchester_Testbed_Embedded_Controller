@@ -103,6 +103,9 @@ ONLINE_UPDATE_INTERVAL_SEC = 5.0
 DEFAULT_UPDATE_WINDOW = 30.0
 UPDATE_WINDOW_TIME = 5.0
 ONLINE_WINDOW_MAX_SEC = 600.0
+DEFAULT_DATA_BUFFER_SAMPLES = 1000
+DATA_BUFFER_MIN_SAMPLES = 100
+DATA_BUFFER_MAX_SAMPLES = 100000
 
 
 # ------------------------------------------------------------------------- # 
@@ -152,6 +155,8 @@ class SerialBackend:
                 "raw_message",
             ]
         )
+
+        self.max_buffer_samples = DEFAULT_DATA_BUFFER_SAMPLES
 
         self.offline = status
 
@@ -423,6 +428,34 @@ class SerialBackend:
 
         return True
 
+    def set_buffer_samples(self, sample_count: int) -> int:
+        """Sets the maximum number of samples stored in the rolling buffer."""
+
+        try:
+            requested_float = float(sample_count)
+            if not requested_float.is_integer():
+                raise ValueError("Buffer size must be an integer value")
+            requested = int(requested_float)
+        except Exception as fault:
+            raise ValueError(f"ERROR: Invalid buffer sample count - {fault}!")
+
+        if requested < DATA_BUFFER_MIN_SAMPLES or requested > DATA_BUFFER_MAX_SAMPLES:
+            raise ValueError(
+                f"ERROR: Buffer sample count out of range ({DATA_BUFFER_MIN_SAMPLES}-{DATA_BUFFER_MAX_SAMPLES})!"
+            )
+
+        self.max_buffer_samples = requested
+
+        with self.data_lock:
+            if len(self.data_frame) > requested:
+                self.data_frame = self.data_frame.tail(requested).reset_index(drop=True)
+
+        return self.max_buffer_samples
+
+    def get_buffer_samples(self) -> int:
+        """Returns the current rolling buffer size."""
+        return int(self.max_buffer_samples)
+
     def _append_measurement(self, timestamp: float, voltage: float, message: str):
         """Append a measurement row to the internal DataFrame."""
 
@@ -442,7 +475,7 @@ class SerialBackend:
 
         with self.data_lock:
             self.data_frame.loc[len(self.data_frame)] = row
-            self.data_frame = self.data_frame.tail(1000).reset_index(drop=True)
+            self.data_frame = self.data_frame.tail(self.max_buffer_samples).reset_index(drop=True)
 
     def operating_system(self):
         """ Reads serial messages, parses measurement / pin snapshots, and updates
@@ -1113,6 +1146,8 @@ set_window_update_time = getattr(Back_End_Controller, "set_window_update_time", 
 set_online_learning_rate = getattr(Back_End_Controller, "set_online_learning_rate", None)
 set_optimizer_type = getattr(Back_End_Controller, "set_optimizer_type", None)
 get_online_update_config = getattr(Back_End_Controller, "get_online_update_config", None)
+set_buffer_samples = getattr(Back_End_Controller, "set_buffer_samples", None)
+get_buffer_samples = getattr(Back_End_Controller, "get_buffer_samples", None)
 
 lines = Back_End_Controller.lines
 get_status = Back_End_Controller.get_status
@@ -1132,6 +1167,7 @@ def get_model_info() -> dict:
         "learning_rate": None,
         "optimizer_type": None,
         "sweep_state": None,
+        "data_buffer_samples": None,
     }
 
     current_time = time.time()
@@ -1197,6 +1233,12 @@ def get_model_info() -> dict:
     except Exception as fault:
         log.warning(f"WARNING: Couldnot access the sweep state: {fault}!")
         status_snapshot["sweep_state"] = None
+
+    try:
+        status_snapshot["data_buffer_samples"] = int(getattr(Back_End_Controller, "max_buffer_samples", None))
+    except Exception as fault:
+        log.warning(f"WARNING: Couldnot access the buffer sample size: {fault}!")
+        status_snapshot["data_buffer_samples"] = None
     
     return status_snapshot
 

@@ -18,6 +18,7 @@ import numpy as np
 import logging
 import time
 import os
+import threading
 
 log = logging.getLogger("Dashboard")
 
@@ -37,6 +38,10 @@ from python_Backend import (
     set_window_update_time,
     set_online_learning_rate,
     set_optimizer_type,
+    set_buffer_samples,
+    get_buffer_samples,
+    DATA_BUFFER_MIN_SAMPLES,
+    DATA_BUFFER_MAX_SAMPLES,
     save_model_parameters,
     compute_feature_importance,
 )
@@ -66,17 +71,134 @@ app = Dash(__name__, title="Manchester Ion Beam Testbed: Control Dashboard", ass
 server = app.server
 
 LAST_AUTO_TS = 0.0
+PLOT_HISTORY_LOCK = threading.Lock()
+PLOT_HISTORY = pd.DataFrame(columns=["timestamp", "voltage"])
 # -------------------------------------------------------------------------
 #                                     Layout
 # -------------------------------------------------------------------------
 
 def _control_tab():
     """Builds the main control dashboard layout."""
-    
+
+    buffer_default = 1000
+    try:
+        if callable(get_buffer_samples):
+            buffer_default = int(get_buffer_samples())
+    except Exception as fault:
+        log.warning(f"WARNING: Unable to read buffer sample size - {fault}!")
+
     return html.Div(
         children=[
             html.H2("ESP12-F Control Dashboard", style={"textAlign": "center"}),
             dcc.Graph(id="live-graph", style={"height": "60vh"}),
+            html.Div(
+                style={"display": "flex", "gap": "1em", "flexWrap": "wrap", "alignItems": "center", "marginTop": "0.75em"},
+                children=[
+                    html.Div(
+                        [
+                            html.Label("Plot Range", style={"fontWeight": "bold", "display": "block"}),
+                            dcc.RadioItems(
+                                id="plot-range-mode",
+                                options=[
+                                    {"label": "All Data", "value": "all"},
+                                    {"label": "Window", "value": "window"},
+                                ],
+                                value="all",
+                                labelStyle={"marginRight": "0.75em"},
+                                style={"display": "flex", "gap": "0.5em"},
+                            ),
+                        ]
+                    ),
+                    html.Div(
+                        [
+                            html.Label("Window (s)", style={"fontWeight": "bold", "display": "block"}),
+                            dcc.Input(
+                                id="plot-window-seconds",
+                                type="number",
+                                min=1,
+                                step=1,
+                                value=30,
+                                style={"width": "120px"},
+                            ),
+                        ]
+                    ),
+                    html.Div(
+                        [
+                            html.Label("Window (samples)", style={"fontWeight": "bold", "display": "block"}),
+                            dcc.Input(
+                                id="plot-window-samples",
+                                type="number",
+                                min=1,
+                                step=1,
+                                value=500,
+                                style={"width": "120px"},
+                            ),
+                            html.Div(id="plot-window-samples-warning", style={"color": "#e74c3c", "fontSize": "0.8em", "marginTop": "0.25em"}),
+                        ]
+                    ),
+                    html.Div(
+                        [
+                            html.Label(" ", style={"display": "block"}),
+                            html.Button(
+                                "Apply Plot Settings",
+                                id="apply-plot-window",
+                                n_clicks=0,
+                                style={
+                                    "minWidth": "150px",
+                                    "padding": "0.5em 1em",
+                                    "fontWeight": "bold",
+                                    "borderRadius": "6px",
+                                    "border": "none",
+                                    "background": "#3498db",
+                                    "color": "#ffffff",
+                                    "cursor": "pointer",
+                                },
+                            ),
+                        ]
+                    ),
+                ],
+            ),
+            html.Div(
+                style={"display": "flex", "gap": "1em", "flexWrap": "wrap", "alignItems": "center", "marginTop": "0.5em"},
+                children=[
+                    html.Div(
+                        [
+                            html.Label("Backend Buffer (samples)", style={"fontWeight": "bold", "display": "block"}),
+                            dcc.Input(
+                                id="buffer-samples",
+                                type="number",
+                                min=DATA_BUFFER_MIN_SAMPLES,
+                                max=DATA_BUFFER_MAX_SAMPLES,
+                                step=1,
+                                value=buffer_default,
+                                style={"width": "160px"},
+                            ),
+                            html.Div(id="buffer-samples-warning", style={"color": "#e74c3c", "fontSize": "0.8em", "marginTop": "0.25em"}),
+                        ]
+                    ),
+                    html.Div(
+                        [
+                            html.Label(" ", style={"display": "block"}),
+                            html.Button(
+                                "Apply Buffer Size",
+                                id="apply-buffer-samples",
+                                n_clicks=0,
+                                style={
+                                    "minWidth": "150px",
+                                    "padding": "0.5em 1em",
+                                    "fontWeight": "bold",
+                                    "borderRadius": "6px",
+                                    "border": "none",
+                                    "background": "#2ecc71",
+                                    "color": "#ffffff",
+                                    "cursor": "pointer",
+                                },
+                            ),
+                        ]
+                    ),
+                    html.Div(id="buffer-samples-ack", style={"fontWeight": "bold"}),
+                ],
+            ),
 
             html.Div(
                 style={"marginTop": "1em"},
@@ -777,6 +899,10 @@ app.layout = html.Div(
     style={"fontFamily": "Segoe UI, sans-serif", "padding": "2em"},
     children=[
         dcc.Store(id="auto-mode", data=False),
+        dcc.Store(
+            id="plot-window-config",
+            data={"mode": "all", "seconds": 30, "samples": 500, "priority": "seconds"},
+        ),
         dcc.Tabs(
             id="tabs",
             value="control",
@@ -789,6 +915,59 @@ app.layout = html.Div(
         dcc.Interval(id="update-interval", interval=1000, n_intervals=0),
     ],
 )
+
+
+@app.callback(
+    Output("plot-window-config", "data"),
+    Input("apply-plot-window", "n_clicks"),
+    State("plot-range-mode", "value"),
+    State("plot-window-seconds", "value"),
+    State("plot-window-samples", "value"),
+    State("plot-window-config", "data"),
+    prevent_initial_call=True,
+)
+
+def _update_plot_window_config(_apply_clicks, range_mode, window_seconds, window_samples, current_config):
+    """Stores plot window preferences when the user applies the settings."""
+
+    config = current_config or {}
+    config = {
+        "mode": config.get("mode", "all"),
+        "seconds": config.get("seconds", 30),
+        "samples": config.get("samples", 500),
+        "priority": config.get("priority", "seconds"),
+    }
+
+    if range_mode is not None:
+        config["mode"] = range_mode
+
+    seconds_changed = window_seconds is not None and window_seconds != config.get("seconds")
+    samples_changed = window_samples is not None and window_samples != config.get("samples")
+
+    if seconds_changed and not samples_changed:
+        config["priority"] = "seconds"
+    elif samples_changed and not seconds_changed:
+        config["priority"] = "samples"
+    elif seconds_changed and samples_changed:
+        config["priority"] = "seconds"
+
+    if window_seconds is not None:
+        config["seconds"] = window_seconds
+    if window_samples is not None:
+        config["samples"] = window_samples
+
+    if str(config.get("mode", "all")).lower() == "window" and config.get("priority") == "samples":
+        try:
+            sample_value = float(config.get("samples"))
+            if not sample_value.is_integer():
+                raise ValueError("Sample count must be an integer")
+            sample_value = int(sample_value)
+        except Exception:
+            sample_value = None
+        if sample_value is None or sample_value < 1:
+            raise PreventUpdate
+
+    return config
 
 
 @app.callback(
@@ -870,23 +1049,72 @@ def _manual_save_model(user_input):
     State("auto-mode", "data"),
     State("auto-rate-ms", "value"),
     State("auto-change-penalty", "value"),
+    State("plot-window-config", "data"),
 )
 
 
-def update_graph(_, auto_mode_enabled, auto_rate_ms, auto_change_penalty):
+def update_graph(_, auto_mode_enabled, auto_rate_ms, auto_change_penalty, plot_window_config):
     """Updates the live plot and optionally issue auto-control updates."""
-    
+
+    global PLOT_HISTORY
+
     data_frame = Back_End_Controller.get_data()
 
-    if data_frame.empty:
+    if data_frame.empty and PLOT_HISTORY.empty:
         return go.Figure(), "Voltage: -- V", "Samples: 0"
+
+    with PLOT_HISTORY_LOCK:
+        if not data_frame.empty:
+            if PLOT_HISTORY.empty:
+                PLOT_HISTORY = data_frame.loc[:, ["timestamp", "voltage"]].copy()
+            else:
+                last_ts = PLOT_HISTORY["timestamp"].iloc[-1]
+                new_rows = data_frame[data_frame["timestamp"] > last_ts][["timestamp", "voltage"]]
+                if not new_rows.empty:
+                    PLOT_HISTORY = pd.concat([PLOT_HISTORY, new_rows], ignore_index=True)
+        plot_history_frame = PLOT_HISTORY.copy()
+
+    plot_source = plot_history_frame if not plot_history_frame.empty else data_frame
+    plot_frame = plot_source
+
+    config = plot_window_config or {}
+    plot_range_mode = str(config.get("mode", "all")).lower()
+    priority = str(config.get("priority", "seconds")).lower()
+
+    try:
+        window_seconds = float(config.get("seconds")) if config.get("seconds") is not None else None
+    except Exception:
+        window_seconds = None
+
+    try:
+        window_samples = int(config.get("samples")) if config.get("samples") is not None else None
+    except Exception:
+        window_samples = None
+
+    if plot_range_mode == "window":
+        try:
+            if priority == "samples":
+                if window_samples is not None and window_samples > 0:
+                    plot_frame = plot_source.tail(window_samples)
+                elif window_seconds is not None and window_seconds > 0:
+                    cutoff_time = float(plot_source["timestamp"].iloc[-1]) - window_seconds
+                    plot_frame = plot_source[plot_source["timestamp"] >= cutoff_time]
+            else:
+                if window_seconds is not None and window_seconds > 0:
+                    cutoff_time = float(plot_source["timestamp"].iloc[-1]) - window_seconds
+                    plot_frame = plot_source[plot_source["timestamp"] >= cutoff_time]
+                elif window_samples is not None and window_samples > 0:
+                    plot_frame = plot_source.tail(window_samples)
+        except Exception as fault:
+            log.error(f"ERROR: Invalid plot window - {fault}! (Using all data...)")
+            plot_frame = plot_source
 
     figure = go.Figure()
 
     figure.add_trace(
         go.Scatter(
-            x=pd.to_datetime(data_frame["timestamp"], unit="s"),
-            y=data_frame["voltage"],
+            x=pd.to_datetime(plot_frame["timestamp"], unit="s"),
+            y=plot_frame["voltage"],
             mode="lines",
             line=dict(color="royalblue"),
         )
@@ -899,7 +1127,10 @@ def update_graph(_, auto_mode_enabled, auto_rate_ms, auto_change_penalty):
         template="plotly_white",
     )
 
-    recent_voltage_measurement = f"Voltage: {data_frame['voltage'].iloc[-1]:.3f} V"
+    if not data_frame.empty:
+        recent_voltage_measurement = f"Voltage: {data_frame['voltage'].iloc[-1]:.3f} V"
+    else:
+        recent_voltage_measurement = f"Voltage: {plot_source['voltage'].iloc[-1]:.3f} V"
     number_of_points = f"Samples: {len(data_frame)}"
 
     try:
@@ -1016,6 +1247,8 @@ def _toggle_save_dataset(User_Input):
 
 
 @app.callback(
+    Output("compute-shap-button", "children"),
+    Output("compute-shap-button", "style"),
     Output("shap-status", "children"),
     Output("ml-shap-bar", "figure"),
     Input("compute-shap-button", "n_clicks"),
@@ -1025,6 +1258,17 @@ def _toggle_save_dataset(User_Input):
 
 def _compute_shap_on_demand(User_Input, shap_permutations):
     """Computes Shapley feature importance on user demand and returns a basic bar chart figure."""
+
+    base_button_style = {
+        "minWidth": "150px",
+        "padding": "0.6em 1.2em",
+        "fontWeight": "bold",
+        "borderRadius": "6px",
+        "border": "none",
+        "background": "#3498db",
+        "color": "#ffffff",
+        "cursor": "pointer",
+    }
 
     if not User_Input:
         log.warning("WARNING: SHAP computation requested without user input!")
@@ -1064,14 +1308,128 @@ def _compute_shap_on_demand(User_Input, shap_permutations):
         fig.update_xaxes(showgrid=True, gridcolor="#e6e6e6", zeroline=False)
         fig.update_yaxes(autorange="reversed", showgrid=False)
 
-        return f"SHAP computed ({len(importance_values)} features)", fig
+        return "Compute SHAP Values", base_button_style, f"SHAP computed ({len(importance_values)} features)", fig
     
     except Exception as fault:
-        return log.error(f"ERROR: Unable to compute SHAP values - {fault}!"), go.Figure()
+        return "Compute SHAP Values", base_button_style, log.error(f"ERROR: Unable to compute SHAP values - {fault}!"), go.Figure()
+
+
+app.clientside_callback(
+    """
+    function(n_clicks) {
+        if (!n_clicks) {
+            return [window.dash_clientside.no_update, window.dash_clientside.no_update];
+        }
+        return [
+            "Calculating SHAP values...",
+            {
+                minWidth: "150px",
+                padding: "0.6em 1.2em",
+                fontWeight: "bold",
+                borderRadius: "6px",
+                border: "none",
+                background: "#e74c3c",
+                color: "#ffffff",
+                cursor: "pointer"
+            }
+        ];
+    }
+    """,
+    Output("compute-shap-button", "children", allow_duplicate=True),
+    Output("compute-shap-button", "style", allow_duplicate=True),
+    Input("compute-shap-button", "n_clicks"),
+    prevent_initial_call=True,
+)
 
 # -------------------------------------------------------------------------
 #                     Input validation (UI Interface)
 # -------------------------------------------------------------------------
+
+@app.callback(
+    Output("plot-window-samples", "style"),
+    Output("plot-window-samples-warning", "children"),
+    Input("plot-window-samples", "value"),
+)
+
+def _validate_plot_window_samples(sample_value):
+    """Validates plot window sample input for display."""
+
+    base_style = {"width": "120px"}
+
+    if sample_value is None:
+        return base_style, ""
+
+    try:
+        value = int(sample_value)
+    except Exception:
+        return (
+            {**base_style, "border": "2px solid #e74c3c", "boxShadow": "0 0 4px rgba(231,76,60,0.6)"},
+            "Out of range (integer required)",
+        )
+
+    if value < 1:
+        return (
+            {**base_style, "border": "2px solid #e74c3c", "boxShadow": "0 0 4px rgba(231,76,60,0.6)"},
+            "Out of range (>= 1)",
+        )
+
+    return base_style, ""
+
+
+@app.callback(
+    Output("buffer-samples", "style"),
+    Output("buffer-samples-warning", "children"),
+    Input("buffer-samples", "value"),
+)
+
+def _validate_buffer_samples(sample_value):
+    """Validates backend buffer size input for display."""
+
+    base_style = {"width": "160px"}
+
+    if sample_value is None:
+        return base_style, ""
+
+    try:
+        value = int(sample_value)
+    except Exception:
+        return (
+            {**base_style, "border": "2px solid #e74c3c", "boxShadow": "0 0 4px rgba(231,76,60,0.6)"},
+            "Out of range (integer required)",
+        )
+
+    if value < DATA_BUFFER_MIN_SAMPLES or value > DATA_BUFFER_MAX_SAMPLES:
+        return (
+            {**base_style, "border": "2px solid #e74c3c", "boxShadow": "0 0 4px rgba(231,76,60,0.6)"},
+            f"Out of range ({DATA_BUFFER_MIN_SAMPLES}-{DATA_BUFFER_MAX_SAMPLES})",
+        )
+
+    return base_style, ""
+
+
+@app.callback(
+    Output("buffer-samples-ack", "children"),
+    Input("apply-buffer-samples", "n_clicks"),
+    State("buffer-samples", "value"),
+    prevent_initial_call=True,
+)
+
+def _apply_buffer_samples(_apply_clicks, sample_value):
+    """Applies the backend buffer size change when requested."""
+
+    if sample_value is None:
+        return html.Span("Enter a buffer size before applying.", style={"color": "#e74c3c"})
+
+    try:
+        applied = set_buffer_samples(sample_value) if callable(set_buffer_samples) else None
+    except Exception as fault:
+        return html.Span(f"ERROR: {fault}", style={"color": "#e74c3c"})
+
+    if applied is None:
+        return html.Span("ERROR: Backend buffer update unavailable.", style={"color": "#e74c3c"})
+
+    return ""
+
 
 @app.callback(
     Output("switch-time-us", "style"),
