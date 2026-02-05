@@ -1,11 +1,12 @@
+"""
 # -------------- Machine Learning Utilities Module -------------- #
 
 #   Provides shared preprocessing, feature engineering, 
 #   evaluation, and stability analysis for the embedded 
-#   control system.
+#   RNN control system.
 
 # --------------------------------------------------------------- #
-
+"""
 import logging
 import numpy as np
 import pandas as pd
@@ -32,6 +33,7 @@ standard_scaler = StandardScaler()
 
 
 def scale_features(data_frame: pd.DataFrame, columns):
+    """Scales the specified feature columns in the data-frame using a standard scaler. Returns the scaled data-frame and the scaler object."""
 
     missing = [col for col in columns if col not in data_frame.columns]
     if missing:
@@ -48,12 +50,9 @@ def scale_features(data_frame: pd.DataFrame, columns):
 #                    RNN Data Preparation
 # ---------------------------------------------------------------
 
-def data_windows(
-    data_frame: pd.DataFrame,
-    sequence_length: int = 10,
-    features=("voltage", "response"),
-):
-    
+def data_windows(data_frame: pd.DataFrame, sequence_length: int = 10, features=("voltage", "response")):
+    """Prepares windowed data for RNN training. Returns feature and target arrays suitable for sequence modeling."""
+
     if len(data_frame) <= sequence_length:
         raise ValueError("ERROR: Not enough data to form a data window!")
 
@@ -64,9 +63,8 @@ def data_windows(
         y.append(data[i + sequence_length, 1])
 
     X_window, y_window = np.array(X), np.array(y)
-    log.debug(
-        f"Windowed data: {X_window.shape[0]} (samples of length {sequence_length})"
-    )
+    log.debug(f"Windowed data: {X_window.shape[0]} (samples of length {sequence_length})")
+
     return X_window, y_window
 
 
@@ -75,14 +73,20 @@ def data_windows(
 # ---------------------------------------------------------------
 
 def compute_r2(y_true, y_pred) -> float:
+    """Computes the R² score between true and predicted values. Returns the R² score as a float."""
+
     return float(r2_score(y_true, y_pred))
 
 
 def compute_rmse(y_true, y_pred) -> float:
+    """Computes the Root Mean Squared Error (RMSE) between true and predicted values. Returns the RMSE as a float."""
+
     return float(np.sqrt(mean_squared_error(y_true, y_pred)))
 
 
 def compute_mae(y_true, y_pred) -> float:
+    """Computes the Mean Absolute Error (MAE) between true and predicted values. Returns the MAE as a float."""
+
     return float(np.mean(np.abs(np.array(y_true) - np.array(y_pred))))
 
 
@@ -90,24 +94,26 @@ def compute_mae(y_true, y_pred) -> float:
 #              Stability and Signal Diagnostics
 # ---------------------------------------------------------------
 
-def signal_stability(
-    series,
-    data_window: int = 20,
-    variance_threshold: float = 0.001,
-) -> bool:
+def signal_stability(series, data_window: int = 20, variance_threshold: float = 0.001) -> bool:
+    """Checks if the signal in the series is stable based on variance over a recent data window. Returns True if stable, False otherwise."""
+
     if len(series) < data_window:
         return False
+    
     variance = np.var(series[-data_window:])
     stability_condition = variance < variance_threshold
-    log.debug(
-        f"Stability check :: Var={variance:.6f}, Stable={stability_condition}"
-    )
+
+    log.debug(f"Stability check :: Var={variance:.6f}, Stable={stability_condition}")
+
     return stability_condition
 
 
 def moving_average(series, data_window: int = 5):
+    """Computes the moving average of the series over a specified data window. Returns the smoothed series as a NumPy array."""
+
     if len(series) < data_window:
         return np.array(series)
+    
     return np.convolve(series, np.ones(data_window) / data_window, mode="valid")
 
 
@@ -116,15 +122,19 @@ def moving_average(series, data_window: int = 5):
 # ---------------------------------------------------------------
 
 def add_derived_features(data_frame: pd.DataFrame) -> pd.DataFrame:
+    """Adds derived features such as differences and moving averages to the data-frame. Returns the augmented data-frame with new features."""
+
     data_frame = data_frame.copy()
+
     if "voltage" in data_frame.columns:
         data_frame["dV"] = data_frame["voltage"].diff().fillna(0)
+
     if "response" in data_frame.columns:
         data_frame["dResponse"] = data_frame["response"].diff().fillna(0)
-        data_frame["Response_MA"] = (
-            data_frame["response"].rolling(5).mean().fillna(method="bfill")
-        )
+        data_frame["Response_MA"] = (data_frame["response"].rolling(5).mean().fillna(method="bfill"))
+
     log.debug("Derived features added to the data-frame...")
+
     return data_frame
 
 
@@ -132,22 +142,23 @@ def add_derived_features(data_frame: pd.DataFrame) -> pd.DataFrame:
 #                       Dataset Actions
 # ---------------------------------------------------------------
 
-def anomaly_filter(
-    data_frame: pd.DataFrame,
-    columns,
-    z_thresh: float = 3.0,
-) -> pd.DataFrame:
+def anomaly_filter(data_frame: pd.DataFrame, columns, z_thresh: float = 3.0) -> pd.DataFrame:
+    """Removes rows from the data-frame where the specified columns have outliers based on a Z-score threshold. Returns the cleaned data-frame."""
+
     cleaned = data_frame.copy()
+
     for col in columns:
         z = np.abs((cleaned[col] - cleaned[col].mean()) / cleaned[col].std())
         cleaned = cleaned[z < z_thresh]
-    log.info(
-        f"Outlier removal complete: {len(data_frame)} \u27f6 {len(cleaned)} rows"
-    )
+
+    log.info(f"Outlier removal complete: {len(data_frame)} \u27f6 {len(cleaned)} rows")
+
     return cleaned.reset_index(drop=True)
 
 
 def split_train_test(data_frame: pd.DataFrame, desired_tt_ratio: float = 0.8):
+    """Splits the data-frame into training and testing sets based on the desired train-test ratio. Returns the training and testing data-frames."""
+    
     idx = int(len(data_frame) * desired_tt_ratio)
     return data_frame.iloc[:idx], data_frame.iloc[idx:]
 

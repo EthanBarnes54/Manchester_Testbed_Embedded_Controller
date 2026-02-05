@@ -541,6 +541,20 @@ def _control_tab():
                                         ]
                                     ),
 
+                                    html.Div(
+                                        children=[
+                                            html.Label("Change Penalty"),
+                                            dcc.Input(
+                                                id="auto-change-penalty",
+                                                type="number",
+                                                value=0.1,
+                                                min=0.0,
+                                                step=0.01,
+                                                style={"width": "120px"},
+                                            ),
+                                        ]
+                                    ),
+
                                     html.Span(id="save-dataset-ack", style={"minWidth": "160px"}),
                                 ],
                             ),
@@ -807,10 +821,11 @@ def _manual_save_model(user_input):
     Input("update-interval", "n_intervals"),
     State("auto-mode", "data"),
     State("auto-rate-ms", "value"),
+    State("auto-change-penalty", "value"),
 )
 
 
-def update_graph(_, auto_mode_enabled, auto_rate_ms):
+def update_graph(_, auto_mode_enabled, auto_rate_ms, auto_change_penalty):
     """Updates the live plot and optionally issue auto-control updates."""
     
     data_frame = Back_End_Controller.get_data()
@@ -842,10 +857,11 @@ def update_graph(_, auto_mode_enabled, auto_rate_ms):
     try:
         auto_on = bool(auto_mode_enabled)
         rate_ms = 500 if auto_rate_ms is None else max(100, int(auto_rate_ms))
+        change_penalty = 0.1 if auto_change_penalty is None else max(0.0, float(auto_change_penalty))
 
     except Exception as fault:
         log.error(f"ERROR: Recieving invalid auto control parameters - {fault}!")
-        auto_on, rate_ms = False, 500
+        auto_on, rate_ms, change_penalty = False, 500, 0.1
         
     try:
         st = get_sweep_status()
@@ -861,7 +877,8 @@ def update_graph(_, auto_mode_enabled, auto_rate_ms):
             global LAST_AUTO_TS
             now = time.time()
             if now - LAST_AUTO_TS >= (rate_ms / 1000.0):
-                targets = propose_control_vector(data_frame)
+                # TODO: Replace manual change-penalty tuning with Bayesian optimization.
+                targets = propose_control_vector(data_frame, change_penalty=change_penalty)
                 Back_End_Controller.set_pin_voltages(targets)
                 LAST_AUTO_TS = now
 

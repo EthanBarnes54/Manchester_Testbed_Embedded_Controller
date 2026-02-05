@@ -35,7 +35,9 @@ try:
         get_learning_rate as _get_rnn_learning_rate,
         set_momentum as _set_rnn_momentum,
         get_momentum as _get_model_momentum,
-        manual_save_model,
+        save_nn_weights,
+        model,
+        scaler,
         compute_feature_saliencies,
     )
 
@@ -55,8 +57,11 @@ except Exception:
     def _get_model_momentum():
         return None
 
-    def manual_save_model():
+    def save_nn_weights(_model, _scaler):
         raise RuntimeError("ERROR: Manual save unavailable! (RNN controller import failed...)")
+
+    model = None
+    scaler = None
 
     def compute_feature_saliencies(_df, max_samples=200):
         raise RuntimeError("ERROR: Feature saliencies unavailable! (RNN controller import failed...)")
@@ -270,9 +275,9 @@ class SerialBackend:
     def save_model_parameters(self):
         """Saves RNN model parameters to machine."""
 
-        if manual_save_model is None:
+        if save_nn_weights is None:
             raise RuntimeError("ERROR: Manual save unavailable! (RNN controller import failed...)")
-        return manual_save_model()
+        return save_nn_weights(model, scaler)
 
     def compute_feature_importance(self, max_samples: int = 200, num_permutations: int = 20):
         """Compute feature importances/saliencies from recent backend data, using shapley permutation."""
