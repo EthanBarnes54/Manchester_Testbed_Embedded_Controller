@@ -69,6 +69,8 @@ LAST_AUTO_TS = 0.0
 # -------------------------------------------------------------------------
 
 def _control_tab():
+    """Builds the main control dashboard layout."""
+    
     return html.Div(
         children=[
             html.H2("ESP12-F Control Dashboard", style={"textAlign": "center"}),
@@ -550,6 +552,8 @@ def _control_tab():
 
 
 def _ml_tab():
+    """Builds the ML metrics tab layout."""
+
     window_default = MODEL_INFO_BOOTSTRAP.get("online_window_seconds")
 
     if window_default is None:
@@ -701,6 +705,7 @@ def _ml_tab():
 
 
 def _rig_tab():
+    """Builds the placeholder rig-control tab layout."""
     return html.Div(
         style={
             "display": "flex",
@@ -740,6 +745,8 @@ app.layout = html.Div(
 )
 
 def _configure_online_updates(window_seconds, learning_rate, momentum_value):
+    """Applies online-update settings and return the relevant status message."""
+
     errors = []
 
     if window_seconds is not None and callable(set_window_update_time):
@@ -778,6 +785,7 @@ def _configure_online_updates(window_seconds, learning_rate, momentum_value):
 )
 
 def _manual_save_model(user_input):
+    """Triggers a manual machine learning model parameter save and returns a status message."""
     if not user_input:
         raise PreventUpdate
     
@@ -802,6 +810,7 @@ def _manual_save_model(user_input):
 
 
 def update_graph(_, auto_mode_enabled, auto_rate_ms):
+    """Updates the live plot and optionally issue auto-control updates."""
     
     data_frame = Back_End_Controller.get_data()
 
@@ -869,6 +878,8 @@ def update_graph(_, auto_mode_enabled, auto_rate_ms):
 )
 
 def _toggle_auto_mode(User_Input):
+    """Toggle auto-control mode and updates the toggle (button) state."""
+
     base_style = {
         "minWidth": "130px",
         "padding": "0.6em 1.2em",
@@ -901,6 +912,8 @@ def _toggle_auto_mode(User_Input):
 )
 
 def _toggle_save_dataset(User_Input):
+    """Toggles automatic dataset saving and update the toggle (button) state."""
+
     base_style = {
         "minWidth": "150px",
         "padding": "0.6em 1.2em",
@@ -945,6 +958,8 @@ def _toggle_save_dataset(User_Input):
 )
 
 def _compute_shap_on_demand(User_Input, shap_permutations):
+    """Computes Shapley feature importance on user demand and returns a basic bar chart figure."""
+
     if not User_Input:
         log.warning("WARNING: SHAP computation requested without user input!")
         raise PreventUpdate
@@ -998,6 +1013,8 @@ def _compute_shap_on_demand(User_Input, shap_permutations):
 )
 
 def _validate_switch_time_input(input_value):
+    """Validates the switch timing input and return a style for display."""
+
     base_style = {"width": "120px"}
 
     if input_value is None:
@@ -1026,6 +1043,7 @@ def _validate_switch_time_input(input_value):
 )
 
 def update_status(_):
+    """Updates the connection status label and returns a style for display."""
     try:
         status_text = getattr(Back_End_Controller, "get_status", lambda: "Connecting...")()
 
@@ -1060,6 +1078,7 @@ def update_status(_):
 )
 
 def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_voltage_5, switch_time_us):
+    """Send voltage targets and switch timing to the backend."""
 
     pin_voltages = [pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_voltage_5]
 
@@ -1134,6 +1153,7 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
 )
 
 def update_pin_status(_):
+    """Updates the pin-status chips based on the latest backend snapshot."""
 
     try:
         connection_status = getattr(Back_End_Controller, "get_status", lambda: "Connecting...")()
@@ -1160,6 +1180,7 @@ def update_pin_status(_):
             pass
 
     def chip(pin_label, pin_value, connection_state):
+        """Builds a display chip (small UI label) for a single pin."""
 
         label_map = {
             "squeeze_plate": "Squeeze Plate",
@@ -1268,6 +1289,7 @@ def handle_training_sweep(
     factorial_levels_value,
     random_samples_value,
 ):
+    """Handles sweep start/stop and updatse the sweep progress indicator for the UI."""
     
     trigger_id = None
     
@@ -1300,6 +1322,8 @@ def handle_training_sweep(
                 epochs_value = 10
 
             def _clean_positive_int(messy_data_point):
+                """Ensures user inputs are positive integers."""
+
                 if messy_data_point is None:
                     return None
                 try:
@@ -1387,6 +1411,7 @@ def handle_training_sweep(
 )
 
 def update_ml_tab(_):
+    """Updates ML plots and summary cards from the latest metrics snapshot."""
 
     try:
         metrics_snapshot = get_ml_metrics()
@@ -1625,6 +1650,7 @@ def update_ml_tab(_):
     saturation_text = f"{int(saturation_indicators)}"
 
     def _format_age(seconds: float) -> str:
+        """Formats Machine learning model age into seconds."""
         if seconds is None:
             return ""
         
