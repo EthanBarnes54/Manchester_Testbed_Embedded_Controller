@@ -1,4 +1,4 @@
-﻿"""
+"""
 #--------------- ESP32 Control and Monitoring Dashboard -------------------#
 
 # A Dash-based web interface for real-time control and data visualization
@@ -625,13 +625,14 @@ def _ml_tab():
                     "gap": "1em",
                     "flexWrap": "wrap",
                     "marginTop": "1em",
-                    "alignItems": "flex-end",
+                    "alignItems": "flex-start",
+                    "justifyContent": "space-between",
                 },
 
                 children=[
                     html.Div(
                         [
-                            html.Label("Live Retraining Window (s)", style={"fontWeight": "bold"}),
+                            html.Label("Live Retraining Window (s)", style={"fontWeight": "bold", "display": "block"}),
                             dcc.Input(
                                 id="online-window-seconds",
                                 type="number",
@@ -642,12 +643,13 @@ def _ml_tab():
                                 value=float(window_default),
                                 style={"width": "150px"},
                             ),
-                        ]
+                        ],
+                        style={"flex": "1 1 180px", "minWidth": "180px"},
                     ),
 
                     html.Div(
                         [
-                            html.Label("Learning Rate", style={"fontWeight": "bold"}),
+                            html.Label("Learning Rate", style={"fontWeight": "bold", "display": "block"}),
                             dcc.Input(
                                 id="online-learning-rate",
                                 type="text",
@@ -655,12 +657,13 @@ def _ml_tab():
                                 value=float(lr_default),
                                 style={"width": "150px"},
                             ),
-                        ]
+                        ],
+                        style={"flex": "1 1 180px", "minWidth": "180px"},
                     ),
 
                     html.Div(
                         [
-                            html.Label("Learning Momentum", style={"fontWeight": "bold"}),
+                            html.Label("Learning Momentum", style={"fontWeight": "bold", "display": "block"}),
                             dcc.Input(
                                 id="online-momentum",
                                 type="text",
@@ -668,12 +671,13 @@ def _ml_tab():
                                 value=float(momentum_default),
                                 style={"width": "150px"},
                             ),
-                        ]
+                        ],
+                        style={"flex": "1 1 180px", "minWidth": "180px"},
                     ),
 
                     html.Div(
                         [
-                            html.Label("Optimizer", style={"fontWeight": "bold"}),
+                            html.Label("Optimizer", style={"fontWeight": "bold", "display": "block"}),
                             dcc.Dropdown(
                                 id="optimizer-type",
                                 options=optimizer_options,
@@ -682,12 +686,13 @@ def _ml_tab():
                                 searchable=False,
                                 style={"width": "180px"},
                             ),
-                        ]
+                        ],
+                        style={"flex": "1 1 180px", "minWidth": "180px"},
                     ),
 
                     html.Div(
                         [
-                            html.Label("SHAP Permutations (Sampling Depth)", style={"fontWeight": "bold"}),
+                            html.Label("SHAP Permutations (Sampling Depth)", style={"fontWeight": "bold", "display": "block"}),
                             dcc.Input(
                                 id="shap-permutations",
                                 type="number",
@@ -697,7 +702,8 @@ def _ml_tab():
                                 debounce=True,
                                 style={"width": "150px"},
                             ),
-                        ]
+                        ],
+                        style={"flex": "1 1 180px", "minWidth": "180px"},
                     ),
 
                     html.Div(
@@ -1300,7 +1306,7 @@ def update_pin_status(_):
     value_display = list(pin_values)
 
     if len(value_display) >= 6:
-        value_display[5] = "ON" if int(value_display[5]) else "OFF"
+        value_display[5] = "ON" if str(value_display[5]).strip().lower() in ("1", "true", "on") else "OFF"
 
     pin_status_updates = [
         chip(pin_names, value_display[i] if i < len(value_display) else "--", connection_state)
@@ -1399,10 +1405,10 @@ def handle_training_sweep(
             random_sample_override = _clean_positive_int(random_samples_value)
 
             started = start_training_sweep(
-                min_v=min_sweep_voltage,
-                max_v=max_sweep_voltage,
+                min_voltage=min_sweep_voltage,
+                max_voltage=max_sweep_voltage,
                 step=sweep_step,
-                dwell_s=dwell_seconds,
+                step_linger_time=dwell_seconds,
                 epochs=epochs_value,
                 baseline_levels=baseline_count,
                 factorial_levels=factorial_count,

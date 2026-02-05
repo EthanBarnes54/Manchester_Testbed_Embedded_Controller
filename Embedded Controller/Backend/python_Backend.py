@@ -577,7 +577,7 @@ class SerialBackend:
                 continue
 
             try:
-                updated, loss, r2 = online_update(window_data_frame, grad_clip=1.0)
+                updated, loss, r2 = online_update(window_data_frame, grad_clip_threshold=1.0)
             except Exception as fault:
                 log.warning(f"ERROR: Failed to update the model training data - {fault}!")
                 continue
@@ -900,9 +900,9 @@ class SerialBackend:
                     log.warning(f"ERROR: Failed to set sweep voltages - {fault}!")
 
                 time.sleep(hold_time)
-                completed += 1
+                completion_indicator += 1
 
-                self.sweep_status["progress"] = min(1.0, completed / total_steps)
+                self.sweep_status["progress"] = min(1.0, completion_indicator / total_steps)
                 self.sweep_status["message"] = stage_label
 
             try:

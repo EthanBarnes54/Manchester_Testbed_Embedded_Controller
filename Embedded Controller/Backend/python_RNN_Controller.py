@@ -274,6 +274,7 @@ def set_momentum(momentum: float) -> float:
     return _current_momentum
 
 def get_momentum() -> float:
+    """Returns the current learning momentum."""
     return float(_current_momentum)
 
 
