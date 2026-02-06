@@ -57,7 +57,7 @@ LEARNING_RATE = 1e-3
 MIN_LEARNING_RATE = 1e-5
 MAX_LEARNING_RATE = 1e-1
 MOMENTUM = 0.9
-OPTIMIZER_TYPE = "adam"  # Optimizer for weight updates: AdamW (decay), RMSprop (noisy), Adagrad (sparse), Adadelta (adaptive), Adamax (stable), NAdam, LBFGS, ASGD --- DROP DOPWN BOX SOON!!!
+OPTIMISER_TYPE = "adam"  # Optimiser for weight updates: AdamW (decay), RMSprop (noisy), Adagrad (sparse), Adadelta (adaptive), Adamax (stable), NAdam, LBFGS, ASGD --- DROP DOPWN BOX SOON!!!
 
 # Inputs: [Squeeze_plate_voltage, Ion_source_voltage, Wein_filter_voltage, Upper_cone_voltage, Lower_cone_voltage,  Diode_voltage]
 
@@ -278,25 +278,25 @@ def get_momentum() -> float:
     return float(_current_momentum)
 
 
-def set_optimizer_type(optimizer_type: str) -> str:
+def set_optimiser_type(optimiser_type: str) -> str:
     """Sets the optimiser type and rebuilds the optimiser instance."""
 
-    global OPTIMIZER_TYPE, optimiser
-    opt = str(optimizer_type).lower()
-    valid_options = {"adam", "sgd", "adamw", "rmsprop", "adagrad", "adadelta", "adamax", "nadam", "lbfgs", "asgd"}
+    global OPTIMISER_TYPE, optimiser
+    optimiser = str(optimiser_type).lower()
+    optimiser_options = {"adam", "sgd", "adamw", "rmsprop", "adagrad", "adadelta", "adamax", "nadam", "lbfgs", "asgd"}
 
-    if opt not in valid_options:
-        raise ValueError(f"ERROR: Unknown optimizer type '{optimizer_type}'.")
-
-    OPTIMIZER_TYPE = opt
+    if optimiser not in optimiser_options:
+        raise ValueError(f"ERROR: Unknown optimiser type '{optimiser_type}'.")
+    
+    OPTIMISER_TYPE = optimiser
     optimiser = _make_optimizer(model.parameters())
-    log.info(f"Optimizer set to {OPTIMIZER_TYPE}...")
-    return OPTIMIZER_TYPE
+    log.info(f"Optimiser set to {OPTIMISER_TYPE}...")
+    return OPTIMISER_TYPE
 
 
-def get_optimizer_type() -> str:
+def get_optimiser_type() -> str:
     """Returns the currently configured optimiser type."""
-    return str(OPTIMIZER_TYPE)
+    return str(OPTIMISER_TYPE)
 
 
 # -------------------------------------------------------

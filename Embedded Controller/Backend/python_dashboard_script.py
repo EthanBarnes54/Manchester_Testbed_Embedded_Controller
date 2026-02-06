@@ -84,6 +84,7 @@ def _control_tab():
     try:
         if callable(get_buffer_samples):
             buffer_default = int(get_buffer_samples())
+            
     except Exception as fault:
         log.warning(f"WARNING: Unable to read buffer sample size - {fault}!")
 

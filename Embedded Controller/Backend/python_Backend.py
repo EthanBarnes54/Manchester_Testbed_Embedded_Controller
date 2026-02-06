@@ -35,8 +35,8 @@ try:
         get_learning_rate as _get_rnn_learning_rate,
         set_momentum as _set_rnn_momentum,
         get_momentum as _get_model_momentum,
-        set_optimizer_type as _set_rnn_optimizer_type,
-        get_optimizer_type as _get_rnn_optimizer_type,
+        set_optimiser_type as _set_rnn_optimizer_type,
+        get_optimiser_type as _get_rnn_optimiser_type,
         save_nn_weights,
         model,
         scaler,
@@ -44,6 +44,8 @@ try:
     )
 
 except Exception:
+    logging.warning("WARNING: RNN controller module import failed - online learning, controll and training will be unavailable!")
+
     train_model = None
     online_update = None
 
@@ -82,7 +84,6 @@ except Exception:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S",)
 log = logging.getLogger("ESP32_Backend")
 
-
 # -------------------------------------------------------------------------
 #                             Configuration
 # -------------------------------------------------------------------------
@@ -99,10 +100,12 @@ OFFLINE = os.getenv("OFFLINE", "").strip() not in ("", "0", "false", "False")
 MAX_MODULATION_VALUE = 1023
 MAX_CONTROL_VOLTAGE = 3.3
 CONTROL_PIN_COUNT = 5
+
 ONLINE_UPDATE_INTERVAL_SEC = 5.0
 DEFAULT_UPDATE_WINDOW = 30.0
 UPDATE_WINDOW_TIME = 5.0
 ONLINE_WINDOW_MAX_SEC = 600.0
+
 DEFAULT_DATA_BUFFER_SAMPLES = 1000
 DATA_BUFFER_MIN_SAMPLES = 100
 DATA_BUFFER_MAX_SAMPLES = 100000
@@ -158,7 +161,10 @@ class SerialBackend:
 
         self.max_buffer_samples = DEFAULT_DATA_BUFFER_SAMPLES
 
-        self.offline = status
+        self.force_offline = bool(status)
+        self.offline = False
+        self.last_connection_attempt = 0.0
+        self._set_offline_state(status)
 
         self.pins = [0, 0, 0, 0, 0, 0]
         self.pins_timestamp = 0.0
@@ -187,31 +193,44 @@ class SerialBackend:
     #                     Connect / Disconnect Functions                 # 
     # ------------------------------------------------------------------ # 
 
+    def _set_offline_state(self, value: bool):
+        """Keep instance and module offline flags in sync."""
+        global OFFLINE
+        self.offline = bool(value)
+        OFFLINE = self.offline
+
     def connect(self):
-        """Opens the serial connection to the ESP32.
+        """Attempts one serial connection and updates live connectivity state."""
 
-        On connection failure, the backend switches to offline mode to avoid
-        continuous reconnect attempts.
-        """
+        if self.force_offline:
+            self._set_offline_state(True)
+            return False
 
-        if self.offline:
-            time.sleep(0.1)
-            return
+        if self.serial and self.serial.is_open:
+            self._set_offline_state(False)
+            return True
 
-        while self.alive.is_set():
-            try:
-                log.info("Connecting to ESP32...")
-                self.serial = serial.Serial(self.port, self.baud, timeout=1)
-                log.info(f"Connected to ESP32 on {self.port} at {self.baud} baud...")
-                return
-            
-            except serial.SerialException as fault:
-                log.warning(f"ERROR: Connection to board failed - {fault}! Reverting to offline...")
-                self.offline = True
-                return
+        try:
+            log.info("Connecting to ESP32...")
+            self.serial = serial.Serial(self.port, self.baud, timeout=1)
+            self._set_offline_state(False)
+            log.info(f"Connected to ESP32 on {self.port} at {self.baud} baud...")
+            return True
+
+        except serial.SerialException as fault:
+            self.serial = None
+            self._set_offline_state(True)
+            log.warning(f"ERROR: Connection to board failed - {fault}! Operating in offline mode...")
+            return False
+
+        except Exception as fault:
+            self.serial = None
+            self._set_offline_state(True)
+            log.warning(f"ERROR: Unexpected connection fault - {fault}! Operating in offline mode...")
+            return False
 
     def disconnect(self):
-        """Close the serial connection (if open)."""
+        """Closes the serial connection to the control board."""
 
         if self.serial and self.serial.is_open:
             try:
@@ -221,7 +240,9 @@ class SerialBackend:
 
             except Exception:
                 pass
+
         self.serial = None
+        self._set_offline_state(True)
 
     def set_save_dataset_enabled(self, enabled: bool):
         """Toggles dataset saving."""
@@ -233,7 +254,7 @@ class SerialBackend:
             self.save_dataset_enabled = False
 
     def set_window_update_time(self, window_seconds: float):
-        """Set the online ML learning update window length.
+        """Sets the ML learning update window length.
 
         Arguments:
             window_seconds: Desired window length in seconds.
@@ -242,19 +263,20 @@ class SerialBackend:
             The clamped window length in seconds.
         """
         try:
-            value = float(window_seconds)
+            window_time = float(window_seconds)
 
         except Exception as fault:
             raise ValueError(f"ERROR: Invalid time window '{window_seconds}' : {fault}!")
         
-        bounded = max(UPDATE_WINDOW_TIME, min(ONLINE_WINDOW_MAX_SEC, value))
-        self.online_window_seconds = bounded
-        log.info(f"Update window duration set to {bounded:.1f} s...")
+        window_bounds = max(UPDATE_WINDOW_TIME, min(ONLINE_WINDOW_MAX_SEC, window_time))
+        self.online_window_seconds = window_bounds
 
-        return bounded
+        log.info(f"Update window duration set to {window_bounds:.1f} s...")
 
+        return window_bounds
+    
     def get_window_update_time(self) -> float:
-        """Retrieve the current online-learning update window length."""
+        """Retrieves the current online-learning update window length."""
 
         return float(self.online_window_seconds)
 
@@ -266,54 +288,65 @@ class SerialBackend:
         return _set_rnn_learning_rate(learning_rate)
 
     def get_learning_rate(self):
-        """Return the current RNN learning rate."""
+        """Returns the current RNN learning rate."""
 
         if _get_rnn_learning_rate is None:
+            log.warning("WARNING: Cannot retrieve learning rate, continuing without momentum...")
             return None
+        
         return _get_rnn_learning_rate()
 
     def set_model_momentum(self, momentum: float):
-        """Set the RNN learning momentum."""
+        """Sets the RNN learning momentum."""
+
         if _set_rnn_momentum is None:
             raise RuntimeError("ERROR: Momentum unavailable for upload! (RNN controller import failed...)")
+        
         return _set_rnn_momentum(momentum)
 
     def get_model_momentum(self):
-        """Return the current learning momentum."""
+        """Returns the current learning momentum."""
 
         if _get_model_momentum is None:
+            log.warning("WARNING: Cannot retrieve momentum, continuing without momentum...")
+
             return None
+        
         return _get_model_momentum()
 
     def set_optimizer_type(self, optimizer_type: str):
-        """Set the optimiser type for the RNN controller."""
+        """Sets the optimiser type for the RNN controller."""
 
         if _set_rnn_optimizer_type is None:
-            raise RuntimeError("ERROR: Optimizer selection unavailable! (RNN controller import failed...)")
+            raise RuntimeError("ERROR: Optimizer selection unavailable! Please try again...")
+        
         return _set_rnn_optimizer_type(optimizer_type)
 
-    def get_optimizer_type(self):
-        """Return the current optimiser type."""
+    def get_optimiser_type(self):
+        """Returns the current optimiser type."""
 
-        if _get_rnn_optimizer_type is None:
+        if _get_rnn_optimiser_type is None:
+            log.warning("WARNING: Cannot retrieve optimizer type, continuing without explicit knowledge and trusting the RNN...")
             return None
-        return _get_rnn_optimizer_type()
+        
+        return _get_rnn_optimiser_type()
 
     def save_model_parameters(self):
-        """Saves RNN model parameters to machine."""
+        """Saves RNN model parameters to local machine in working folder."""
 
         if save_nn_weights is None:
             raise RuntimeError("ERROR: Manual save unavailable! (RNN controller import failed...)")
+        
         return save_nn_weights(model, scaler)
 
     def compute_feature_importance(self, max_samples: int = 200, num_permutations: int = 20):
-        """Compute feature importances/saliencies from recent backend data, using shapley permutation."""
+        """Computes feature importances/saliencies from recent backend data, using shapley permutations."""
 
         data_frame = self.get_data()
         return compute_feature_saliencies(data_frame, max_samples=max_samples, num_permutations=num_permutations)
 
     def get_online_update_config(self) -> dict:
-        """Returns a snapshot of online update settings."""
+        """Returns a snapshot of the current, online update settings."""
 
         return {
             "window_seconds": float(self.online_window_seconds),
@@ -323,10 +356,12 @@ class SerialBackend:
         }
 
     def get_latest_point(self):
-        """Return the most recent (timestamp, voltage) pair."""
+        """Returns the most recent (timestamp, voltage) pair from the datastream/pipeline ."""
+
         with self.data_lock:
 
             if self.data_frame.empty:
+                log.warning("WARNING: No data available in data frame!")
                 return None
             
             row = self.data_frame.iloc[-1]
@@ -340,11 +375,10 @@ class SerialBackend:
     
     @staticmethod
     def _name_to_pin_index(pin_name: str) -> int:
-        """Map a pin label (or numeric string) to a 1-based pin index (1..6).
+        """Maps a pin label (or numeric string) to a 1-based pin index (1-6)."""
 
-        Returns 0 when the name/index is invalid.
-        """
         if pin_name is None:
+            log.error("ERROR: Pin name is invalid or empty! Please enter a valid pin name/index...")
             return 0
         
         pin_number = str(pin_name).strip().lower()
@@ -370,7 +404,8 @@ class SerialBackend:
 
     @staticmethod
     def _clamp_signal_pulse(value) -> int:
-        """Clamp a PWM pulse command to the acceptible range."""
+        """Clamps a PWM pulse command to the acceptible range."""
+
         try:
             signal_value = int(round(float(value)))
 
@@ -381,7 +416,8 @@ class SerialBackend:
 
     @staticmethod
     def clamp_voltage(voltage: float) -> float:
-        """Clamp a voltage command to the acceptable range."""
+        """Clamps a voltage command to the acceptable range."""
+
         try:
             voltage_value = float(voltage)
 
@@ -392,7 +428,7 @@ class SerialBackend:
 
     @classmethod
     def pulse_to_voltage(cls, value: float) -> float:
-        """Convert a PWM pulse to volts."""
+        """Converts a PWM pulse to volts."""
 
         pulse_signal = cls._clamp_signal_pulse(value)
 
@@ -400,7 +436,7 @@ class SerialBackend:
 
     @classmethod
     def voltage_to_pulse(cls, voltage: float) -> int:
-        """Convert voltage to a PWM pulse."""
+        """Converts voltage to a PWM pulse."""
 
         voltage_output = cls.clamp_voltage(voltage)
         scaled_voltage_output = (voltage_output / MAX_CONTROL_VOLTAGE) * MAX_MODULATION_VALUE
@@ -408,10 +444,7 @@ class SerialBackend:
         return cls._clamp_signal_pulse(scaled_voltage_output)
 
     def update_pin_values(self, pin_index: int, pin_value: int) -> bool:
-        """Updates cached pin values and timestamp.
-
-        This is used both when reading from the ESP32 and when simulating.
-        """
+        """Updates cached pin values and timestamp."""
 
         if not (1 <= int(pin_index) <= 6):
             log.warning(f"WARNING: Pin index out of range to send update!")
@@ -484,8 +517,15 @@ class SerialBackend:
 
         while self.alive.is_set():
 
-            # purely offline mode - simulate data to test functionality and conectivity
-            if self.offline:
+            if self.serial is None or not self.serial.is_open:
+                now = time.time()
+
+                if now - self.last_connection_attempt >= RETRY_DELAY:
+                    self.last_connection_attempt = now
+                    self.connect()
+
+            # Purely offline mode - simulate data to test functionality and connectivity.
+            if self.offline or self.serial is None or not self.serial.is_open:
 
                 timestamp = time.time()
 
@@ -502,9 +542,6 @@ class SerialBackend:
 
                 time.sleep(0.05)
                 continue
-
-            if self.serial is None or not self.serial.is_open:
-                self.connect()
 
             try:
                 message = self.serial.readline().decode("utf-8", "ignore").strip()
@@ -632,7 +669,7 @@ class SerialBackend:
     def send_command(self, command_string: str):
         """Sends a command string to the ESP32."""
         try:
-            if self.offline:
+            if self.offline or not self.serial or not self.serial.is_open:
 
                 pin_assignments = command_string.strip().split()
 
@@ -663,7 +700,7 @@ class SerialBackend:
                         log.warning(f"[SIMULATED] Invalid TARGETS payload: {command_string} - {fault}!")
 
                     else:
-                        for offset, volts in enumerate(raw_values, start=1):
+                        for offset, volts in enumerate(raw_values, start = 1):
 
                             pwm_value = self.voltage_to_pulse(volts)
                             self.update_pin_values(offset, pwm_value)
@@ -674,9 +711,6 @@ class SerialBackend:
                     log.info(f"[SIMULATED] Received command: {command_string}")
                 return
 
-            if not self.serial or not self.serial.is_open:
-                raise ConnectionError("ERROR: Serial port not open!")
-
             self.serial.write((command_string + "\n").encode("utf-8"))
             log.info(f"Command sent to board: {command_string}...")
 
@@ -684,17 +718,24 @@ class SerialBackend:
             log.error(f"ERROR: Failed to send command '{command_string}' - {fault}!")
 
     def get_data(self) -> pd.DataFrame:
-        """Return a copy of the current rolling DataFrame."""
+        """Returns a copy of the current rolling DataFrame."""
+
         with self.data_lock:
             data_frame = self.data_frame.copy()
             return data_frame
 
     def get_status(self) -> str:
-        """Return a human-readable connection/status string."""
-        if self.offline:
+        """Returns a connection/status string."""
+
+        if self.force_offline:
             return "Simulating operation..."
+        
         if self.serial and getattr(self.serial, "is_open", False):
             return f"Connected via {self.port}..."
+
+        if self.offline:
+            return "Disconnected - retrying connection..."
+
         return "Connecting..."
 
     def get_pin_value(self, i: int, value: int):
@@ -706,57 +747,60 @@ class SerialBackend:
         
         if i <= 5:
             return max(0, min(MAX_MODULATION_VALUE, int(value)))
+        
         return 1 if int(value) else 0
 
-    def set_pin_voltage(self, i: int, value: int):
+    def set_pin_voltage(self, i: int, voltage: int):
         """Set a single pin by index (1..6) using raw PWM duty (pins 1..5) or 0/1 (pin 6)."""
+
         if i < 1 or i > 6:
             raise ValueError("ERROR: index must be 1-6!")
         
         if i <= 5:
-            value = max(0, min(MAX_MODULATION_VALUE, int(value)))
-        else:
-            value = 1 if int(value) else 0
+            pin_voltage = max(0, min(MAX_MODULATION_VALUE, int(self.voltage_to_pulse(voltage))))
 
-        self.send_command(f"PIN {int(i)} {int(value)}")
+        else:
+            pin_voltage = 1 if int(voltage) else 0
+
+        self.send_command(f"PIN {int(i)} {int(pin_voltage)}")
 
     def set_pin_voltages(self, voltages):
-        """Set the first 5 control pins using volt targets (sends a TARGETS command).
-
-        Args:
-            voltages: Iterable of voltages; first 5 values are used.
-        """
+        """Sets the first 5 control pins using given voltage targets"""
 
         if voltages is None:
             raise ValueError("ERROR: Missing voltage targets!")
 
         try:
             values = [float(voltage_output) for voltage_output in voltages]
+
         except Exception as fault:
             raise ValueError(f"ERROR: Invalid voltage target - {fault}!")
 
         if len(values) < CONTROL_PIN_COUNT:
-            raise ValueError(f"ERROR: Invalid number of outputs requested, I need {CONTROL_PIN_COUNT} voltages!")
+            raise ValueError(f"ERROR: Invalid number of outputs requested, I need {CONTROL_PIN_COUNT} voltages but I only received {len(values)}!")
 
         target_voltages = [self.clamp_voltage(voltage_output) for voltage_output in values[:CONTROL_PIN_COUNT]]
         voltage_payload = "TARGETS " + " ".join(f"{voltage_output:.6f}" for voltage_output in target_voltages)
+
         self.send_command(voltage_payload)
 
     def set_pwm(self, channel: int, duty: int):
-        """Alias for setting PWM duty on control pins 1..5."""
+        """Sets PWM duty on control pins 1..5 using the set pin voltage function."""
 
         if channel < 1 or channel > 5:
-            raise ValueError("ERROR: Pulse source must be a channel in range: 1-5!")
+            raise ValueError(f"ERROR: Pulse source must be a channel in range: 1-5. Current channel is: {channel}!")
         
         self.set_pin_voltage(channel, duty)
 
     def set_switch_timing(self, timing_input: float):
-        """Set the switch timing (microseconds) used by the embedded controller."""
+        """Sets the switch timing (in microseconds) given to the control board."""
+
         try:
             switch_timing = float(timing_input)
 
         except Exception as fault:
             log.warning(f"WARNING: Switch timing not set: {fault}!")
+
             return
 
         board_switch_timing = max(1.0, min(20.0, switch_timing))
@@ -769,15 +813,17 @@ class SerialBackend:
             except Exception as fault:
                 log.warning(f"[SIMULATED] WARNING: Failed to log switch timing: {fault}!")
                 pass
+
             return
 
         try:
             self.send_command(f"SWITCH_PERIOD {int(board_switch_timing)}")
+
         except Exception as fault:
             log.error(f"ERROR: Failed to send switch timing '{board_switch_timing}': {fault}!")
 
     def set_pin_by_name(self, name: str, value: int):
-        """Set a pin name."""
+        """Sets a modulation value according to pin name/index."""
 
         i = self._name_to_pin_index(name)
 
@@ -792,7 +838,7 @@ class SerialBackend:
         self.send_command(f"PIN {int(i)} {int(value)}")
 
     def get_pins(self):
-        """Return cached pin names/values and the last-update timestamp."""
+        """Returns cached pin names/values and the last-update timestamp from the rolling dataframe."""
 
         names = [
             "squeeze_plate",
@@ -806,19 +852,22 @@ class SerialBackend:
         return {"names": names, "values": list(self.pins), "timestamp": self.pins_timestamp,}
 
     def stop(self):
-        """Stop background threads and close the serial connection."""
+        """Stops background threads and closes the serial connection."""
 
         log.info("Backend thread disconnecting...")
+
         self.alive.clear()
         self.disconnect()
+
         log.info("Backend thread disconnected...")
 
     # ------------------------------------------------------------------ #
     #                         Training sweep control                     #  
     # ------------------------------------------------------------------ #
 
-    def _RNN_training_sweeps(self, minimum_voltage: float, maximum_voltage: float, step: float, hold_time: float, epochs: int, baseline_levels: int | None = None, factorial_levels: int | None = None, random_samples: int | None = None):
-        """Internal worker for parameter sweeps + optional RNN training."""
+    def _RNN_training_sweeps(self, minimum_voltage: float, maximum_voltage: float, voltage_step_size: float, hold_time: float, epochs: int, reference_voltages: int | None = None, factorial_levels: int | None = None, random_samples: int | None = None):
+        """Internal worker for parameter sweeps + optional RNN training. Checks and generates the voltage sweeps, then iterates 
+        through the combinations; while checking for cancellation and updating progress, sending all instructions then to the RNN."""
 
         try:
 
@@ -836,17 +885,17 @@ class SerialBackend:
                 log.warning("WARNING: Minimum voltage greater than maximum voltage! Swapping values...")
                 minimum_voltage, maximum_voltage = maximum_voltage, minimum_voltage
 
-            span = max(0.0, maximum_voltage - minimum_voltage)
+            voltage_range = max(0.0, maximum_voltage - minimum_voltage)
 
             try:
-                step = float(step)
+                voltage_step_size = float(voltage_step_size)
 
             except Exception as fault:
-                log.warning(f"WARNING: Invalid step value - {fault}! Reverting to defaults...")
-                step = 0.05
+                log.warning(f"WARNING: Invalid voltage_step_size value - {fault}! Reverting to defaults...")
+                voltage_step_size = 0.05
 
-            if step <= 0:
-                step = max(0.01, span / 25.0) if span > 0 else 0.05
+            if voltage_step_size <= 0:
+                voltage_step_size = max(0.01, voltage_range / 25.0) if voltage_range > 0 else 0.05
 
             try:
                 hold_time = max(0.01, float(hold_time))
@@ -855,35 +904,36 @@ class SerialBackend:
                 log.warning(f"WARNING: Invalid hold time - {fault}! Reverting to defaults...")
                 hold_time = 0.05
 
-            grid = np.arange(minimum_voltage, maximum_voltage + 1e-9, step, dtype=float)
+            voltage_training_grid = np.arange(minimum_voltage, maximum_voltage + 1e-9, voltage_step_size, dtype=float)
 
-            if grid.size == 0:
-                log.warning("WARNING: Grid size must be  non-zero! Using all available information...")
-                grid = np.array([minimum_voltage], dtype=float)
+            if voltage_training_grid.size == 0:
+                log.warning("WARNING: voltage_training_grid size must be  non-zero! Using all available information...")
+                voltage_training_grid = np.array([minimum_voltage], dtype=float)
 
-            grid = np.clip(grid, minimum_voltage, maximum_voltage)
+            voltage_training_grid = np.clip(voltage_training_grid, minimum_voltage, maximum_voltage)
 
             try:
-                baseline_count = int(baseline_levels) if baseline_levels is not None else (3 if span > 0 else 1)
+                num_reference_voltages = int(reference_voltages) if reference_voltages is not None else (3 if voltage_range > 0 else 1)
 
             except Exception as fault:
                 log.warning(f"WARNING: Invalid baseline levels - {fault}! Reverting to defaults...")
-                baseline_count = 3 if span > 0 else 1
+                num_reference_voltages = 3 if voltage_range > 0 else 1
                 
-            baseline_count = max(1, baseline_count)
-            baseline_levels = np.linspace(minimum_voltage, maximum_voltage, num=baseline_count, dtype=float)
-            baseline_levels = np.unique(np.round(baseline_levels, 6))
+            num_reference_voltages = max(1, num_reference_voltages)
+            
+            reference_voltages = np.linspace(minimum_voltage, maximum_voltage, num=num_reference_voltages, dtype=float)
+            reference_voltages = np.unique(np.round(reference_voltages, 6))
 
-            if baseline_levels.size == 0:
-                log.warning("WARNING: Baseline levels size must be non-zero! Using minimum voltage...")
-                baseline_levels = np.array([minimum_voltage], dtype=float)
+            if reference_voltages.size == 0:
+                log.warning("WARNING: Reference voltages size must be non-zero! Using minimum voltages...")
+                reference_voltages = np.array([minimum_voltage], dtype=float)
 
             try:
-                factorial_level_count = int(factorial_levels) if factorial_levels is not None else (3 if span > 0 else 1)
+                factorial_level_count = int(factorial_levels) if factorial_levels is not None else (3 if voltage_range > 0 else 1)
 
             except Exception as fault:
                 log.warning(f"WARNING: Invalid factorial levels - {fault}! Reverting to defaults...")
-                factorial_level_count = 3 if span > 0 else 1
+                factorial_level_count = 3 if voltage_range > 0 else 1
 
             factorial_level_count = max(1, factorial_level_count)
             factorial_levels = np.linspace(minimum_voltage, maximum_voltage, num=factorial_level_count, dtype=float)
@@ -891,7 +941,7 @@ class SerialBackend:
 
             if random_samples is None:
                 log.warning("WARNING: Random samples not specified! Using default value...")
-                random_sample_count = max(int(len(grid) * CONTROL_PIN_COUNT), 20)
+                random_sample_count = max(int(len(voltage_training_grid) * CONTROL_PIN_COUNT), 20)
 
             else:
                 try:
@@ -903,9 +953,9 @@ class SerialBackend:
 
                 if random_sample_count <= 0:
                     log.warning("WARNING: Random sample count must be positive! Using default value...")
-                    random_sample_count = max(int(len(grid) * CONTROL_PIN_COUNT), 20)
+                    random_sample_count = max(int(len(voltage_training_grid) * CONTROL_PIN_COUNT), 20)
 
-            stage1_steps = int(len(baseline_levels) * CONTROL_PIN_COUNT * len(grid))
+            stage1_steps = int(len(reference_voltages) * CONTROL_PIN_COUNT * len(voltage_training_grid))
             stage2a_steps = int(len(factorial_levels) ** CONTROL_PIN_COUNT)
 
             total_steps = stage1_steps + stage2a_steps + random_sample_count
@@ -939,17 +989,17 @@ class SerialBackend:
                 self.sweep_status["message"] = stage_label
 
             try:
-                for baseline in baseline_levels:
+                for reference in reference_voltages:
 
-                    base_vector = [baseline] * CONTROL_PIN_COUNT
+                    base_vector = [reference] * CONTROL_PIN_COUNT
 
                     for pin_index in range(CONTROL_PIN_COUNT):
-                        for value in grid:
+                        for voltage_interval in voltage_training_grid:
 
-                            targets = list(base_vector)
-                            targets[pin_index] = float(value)
+                            voltage_targets = list(base_vector)
+                            voltage_targets[pin_index] = float(voltage_interval)
 
-                            run_step(targets,f"Sweep 1: pin {pin_index + 1} sweep @ baseline {baseline:.2f} V",)
+                            run_step(voltage_targets,f"Sweep 1: pin {pin_index + 1} sweeping at {reference:.2f} V",)
 
                 combo_total = max(1, stage2a_steps)
                 combo_index = 0
@@ -998,7 +1048,7 @@ class SerialBackend:
 
                         available_columns = [column for column in ordered_columns if column in data_frame.columns]
 
-                        dataset = data_frame.loc[:, available_columns].rename(
+                        sweep_dataset = data_frame.loc[:, available_columns].rename(
                             columns={
                                 "pin_1": "squeeze_plate",
                                 "pin_2": "ion_source",
@@ -1010,11 +1060,12 @@ class SerialBackend:
 
                         time_stamp = time.strftime("%Y%m%d_%H%M%S")
                         file_path = f"sweep_dataset_{time_stamp}.csv"
-                        dataset.to_csv(file_path, index=False)
-                        log.info(f"Sweep dataset saved to {file_path}")
+                        sweep_dataset.to_csv(file_path, index=False)
+
+                        log.info(f"Sweep dataset successfully saved to {file_path}...")
 
                     except Exception as fault:
-                        log.error(f"ERROR: Failed to save sweep dataset - {fault}!")
+                        log.error(f"ERROR: Failed to save sweep dataset - {fault}! Please initalise the sweep again, or continue without saving...")
 
                 if train_model is not None:
                     try:
@@ -1027,12 +1078,7 @@ class SerialBackend:
                         try:
                             if isinstance(metrics, dict):
 
-                                ML_METRICS.record_training_update(
-                                    current_time,
-                                    loss = metrics.get("loss"),
-                                    r2 = metrics.get("r2"),
-                                    source = "sweep",
-                                )
+                                ML_METRICS.record_training_update(current_time, loss = metrics.get("loss"), r2 = metrics.get("r2"), source = "sweep")
 
                         except Exception as fault:
                             log.warning(f"WARNING: Failed to record sweep training metrics - {fault}!")
@@ -1074,49 +1120,42 @@ class SerialBackend:
         self,
         min_voltage: float = 0.0,
         max_voltage: float = 3.3,
-        step: float = 0.05,
+        voltage_step_size: float = 0.05,
         step_linger_time: float = 0.05,
         epochs: int = 10,
-        baseline_levels: int | None = None,
+        reference_voltages: int | None = None,
         factorial_levels: int | None = None,
         random_samples: int | None = None,
     ):
-        """Start a background training sweep.
-
-        Returns:
-            True if the sweep was started, False if one is already running.
-        """
+        """Initialises a training sweep."""
 
         if self.sweep_thread and self.sweep_thread.is_alive():
-            log.info("Sweep already running...")
+            log.info("Sweep already running! Please wait before attempting to start another training sweep...")
             return False
         
         self.sweep_cancel.clear()
         self.sweep_status = {"state": "queued", "progress": 0.0, "message": ""}
-        self.sweep_thread = threading.Thread(target=self._RNN_training_sweeps,args=(
-            min_voltage, 
-            max_voltage, 
-            step, 
-            step_linger_time, 
-            epochs, 
-            baseline_levels, 
-            factorial_levels, 
-            random_samples
-            ),
-            daemon=True,
-        )
 
+        self.sweep_thread = threading.Thread(target=self._RNN_training_sweeps,args=(min_voltage, 
+                                                                                    max_voltage, 
+                                                                                    voltage_step_size, 
+                                                                                    step_linger_time, 
+                                                                                    epochs, 
+                                                                                    reference_voltages, 
+                                                                                    factorial_levels, 
+                                                                                    random_samples), 
+                                                                                    daemon=True)
         self.sweep_thread.start()
 
         return True
 
     def get_sweep_status(self) -> dict:
-        """Return the latest sweep status (state/progress/message)."""
+        """Returns the latest sweep status message."""
 
         return dict(self.sweep_status)
 
     def stop_training_sweep(self):
-        """Request cancellation of an in-progress sweep."""
+        """Requests cancellation of an in-progress sweep."""
 
         self.sweep_cancel.set()
 
@@ -1125,8 +1164,7 @@ class SerialBackend:
 #                               Board Access                                #    
 # ------------------------------------------------------------------------- #
 
-# change once connection is ensured to prevent error logs during startup
-OFFLINE = False
+# OFFLINE environment variable can be used to force simulated mode.
 status = OFFLINE
 
 Back_End_Controller = SerialBackend(status = status)
@@ -1179,7 +1217,7 @@ def get_model_info() -> dict:
             status_snapshot["last_train_ago_sec"] = max(0.0, float(current_time - float(ts)))
 
     except Exception as fault:
-        log.warning(f"WARNING: Couldnot access the last training time step: {fault}!")
+        log.warning(f"WARNING: Couldnot access the last training time voltage_step_size: {fault}!")
         pass
     
     try:
@@ -1189,7 +1227,7 @@ def get_model_info() -> dict:
             status_snapshot["last_online_update_ago_sec"] = max(0.0, float(current_time - float(online_ts)))
    
     except Exception as fault:
-        log.warning(f"WARNING: Couldnot access the last online update time step: {fault}!")
+        log.warning(f"WARNING: Couldnot access the last online update time voltage_step_size: {fault}!")
         pass
 
     try:
