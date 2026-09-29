@@ -29,6 +29,8 @@ import torch.optim as optim
 from sklearn.metrics import r2_score
 from sklearn.preprocessing import StandardScaler
 
+from python_ML_Toolbox import split_train_test, compute_r2, compute_rmse, compute_mae
+
 __all__ = [
     "RNNController",
     "train_model",
@@ -380,15 +382,79 @@ def prepare_sequences(data_frame: pd.DataFrame, sequence_length: int = SEQUENCE_
 # -------------------------------------------------------
 
 
-def train_model(data_frame: pd.DataFrame, number_of_epochs: int = 10, grad_clip_threshold: float = 1.0, save: bool = False):
+def _split_for_validation(data_frame: pd.DataFrame, validation_ratio: float):
+    """Holds back a chronological tail for scoring.
+
+    Returns (training_frame, validation_frame), with validation_frame set to None when
+    there is not enough data to spare a split worth measuring."""
+
+    try:
+        ratio = float(validation_ratio)
+
+    except Exception:
+        ratio = 0.0
+
+    if not 0.0 < ratio < 1.0:
+        return data_frame, None
+
+    training_frame, validation_frame = split_train_test(data_frame, desired_tt_ratio=1.0 - ratio)
+
+    # Both halves have to outlast the sequence window or neither yields a sequence.
+    if len(training_frame) <= SEQUENCE_LENGTH or len(validation_frame) <= SEQUENCE_LENGTH:
+        log.info("Not enough data to hold back a validation split, training on the full window...")
+        return data_frame, None
+
+    return training_frame, validation_frame
+
+
+def _validation_metrics(validation_frame) -> dict:
+    """Scores the freshly trained model against held back data using the shared toolbox."""
+
+    if validation_frame is None:
+        return {}
+
+    try:
+        sequences, observed = prepare_sequences(validation_frame, fit_scaler=False)
+
+    except Exception as fault:
+        log.warning(f"WARNING: Unable to score the validation split - {fault}!")
+        return {}
+
+    model.eval()
+
+    with torch.no_grad():
+        predictions = model(sequences).cpu().numpy()
+
+    model.train()
+    measured = observed.cpu().numpy()
+
+    scores = {
+        "validation_r2": compute_r2(measured, predictions),
+        "validation_rmse": compute_rmse(measured, predictions),
+        "validation_mae": compute_mae(measured, predictions),
+    }
+
+    log.info(
+        f"Validation | R2={scores['validation_r2']:.3f} "
+        f"| RMSE={scores['validation_rmse']:.6f} | MAE={scores['validation_mae']:.6f}"
+    )
+
+    return scores
+
+
+def train_model(data_frame: pd.DataFrame, number_of_epochs: int = 10, grad_clip_threshold: float = 1.0, save: bool = False, validation_ratio: float = 0.2):
     """Trains the RNN model on the provided DataFrame for a specified number of epochs. 
-    It prepares the data sequences, performs backpropagation, and optionally saves the model weights after training."""
+    It prepares the data sequences, performs backpropagation, and optionally saves the model weights after training.
+    A chronological tail is held back so the returned metrics include held out scores alongside the training ones."""
 
     global model, optimiser
     model.train()
 
+    training_frame, validation_frame = _split_for_validation(data_frame, validation_ratio)
+
     try:
-        input_sequences, target_values = prepare_sequences(data_frame, fit_scaler=True)
+        # The scaler is fitted on the training rows only, so the held back tail stays unseen.
+        input_sequences, target_values = prepare_sequences(training_frame, fit_scaler=True)
     except ValueError:
         log.warning("WARNING: Insufficient data for training...")
         return None
@@ -429,10 +495,13 @@ def train_model(data_frame: pd.DataFrame, number_of_epochs: int = 10, grad_clip_
 
         log.info(f"Epoch {epoch+1}/{number_of_epochs} | Loss={loss.item():.6f} | R2={r2:.3f}")
 
+    metrics = {"loss": last_loss, "r2": last_r2}
+    metrics.update(_validation_metrics(validation_frame))
+
     if save:
         save_nn_weights(model, scaler)
 
-    return {"loss": last_loss, "r2": last_r2}
+    return metrics
 
 
 # -------------------------------------------------------

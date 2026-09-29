@@ -131,7 +131,7 @@ def add_derived_features(data_frame: pd.DataFrame) -> pd.DataFrame:
 
     if "response" in data_frame.columns:
         data_frame["dResponse"] = data_frame["response"].diff().fillna(0)
-        data_frame["Response_MA"] = (data_frame["response"].rolling(5).mean().fillna(method="bfill"))
+        data_frame["Response_MA"] = (data_frame["response"].rolling(5).mean().bfill())
 
     log.debug("Derived features added to the data-frame...")
 
