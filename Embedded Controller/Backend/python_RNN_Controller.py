@@ -34,13 +34,15 @@ __all__ = [
     "train_model",
     "online_update",
     "propose_control_vector",
+    "compute_feature_saliencies",
     "set_learning_rate",
     "get_learning_rate",
     "set_momentum",
     "get_momentum",
     "set_optimiser_type",
     "get_optimiser_type",
-    "manual_save_model",
+    "save_nn_weights",
+    "load_previous_weights",
 ]
 
 # -------------------------------------------------------
@@ -677,7 +679,7 @@ class RNNController:
         
         self.input_size = int(5 + feature_dim)
         self.model = _RNN(self.input_size, hidden_size, output_size, use_elu_head=use_elu_head).to(DEVICE)
-        self.optimiser = _make_optimiser(self.model.parameters(), lr=learning_rate)
+        self.optimiser = _make_optimiser(self.model.parameters(), learning_rate=learning_rate)
         self.Mean_error_loss = nn.MSELoss()
         self.sequence_length = SEQUENCE_LENGTH
 
@@ -687,10 +689,21 @@ class RNNController:
 
     def attach_pipeline(self, pipeline):
         """Attaches a data pipeline to the controller, allowing it to process incoming data chunks and generate predictions based on the pipeline's features."""
+
+        feature_names = getattr(pipeline, "feature_names", None)
+
+        if feature_names is not None:
+            expected_dim = self.input_size - 5
+
+            if len(feature_names) != expected_dim:
+                raise ValueError(
+                    f"ERROR: Pipeline supplies {len(feature_names)} features but this controller "
+                    f"was built for {expected_dim}! (Rebuild it with feature_dim={len(feature_names)}...)"
+                )
+
         self.pipeline = pipeline
 
     @staticmethod
-
     def build_input_vector(pins_state: np.ndarray, pipeline_features: np.ndarray) -> np.ndarray:
         """Constructs the input vector for the model by concatenating the current pin states and pipeline features."""
 
@@ -723,14 +736,17 @@ class RNNController:
         return predicted_outputs
 
     def step_features(self, pins_state: np.ndarray, pipeline_features: np.ndarray):
-        """Processes a single step of features by building the input vector, updating the data history, and generating a prediction if enough history is available."""
+        """Processes a single step of features by building the input vector and updating the data history.
+
+        Returns a prediction once the sequence window has filled, or None while it is
+        still warming up, which is what data_chunk tests for."""
 
         feature_vector = self.build_input_vector(pins_state, pipeline_features)
         self.data_history.append(feature_vector)
 
         if len(self.data_history) < self.sequence_length:
-            raise ValueError(f"ERROR: Not enough data history to make a meaningful prediction! Need at least {self.sequence_length} steps of data...")
-            
+            return None
+
         return self.predict_from_history(np.stack(list(self.data_history), axis=0))
 
     def data_chunk(self, pins_state: np.ndarray, voltages_chunk: np.ndarray):
@@ -744,10 +760,9 @@ class RNNController:
         for features in self.pipeline.process_chunk(voltages_chunk):
             predictions = self.step_features(pins_state, features)
 
+            # None simply means the sequence window has not filled yet.
             if predictions is not None:
                 model_predictions.append(predictions)
-            else:
-                raise RuntimeError("ERROR: Failed to generate predictions from data chunk! Check the data pipeline and/or model configuration...")
 
         return model_predictions
 
