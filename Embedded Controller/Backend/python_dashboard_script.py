@@ -42,6 +42,8 @@ from python_Backend import (
     get_buffer_samples,
     DATA_BUFFER_MIN_SAMPLES,
     DATA_BUFFER_MAX_SAMPLES,
+    SWITCH_PERIOD_MIN_US,
+    SWITCH_PERIOD_MAX_US,
     save_model_parameters,
     compute_feature_importance,
 )
@@ -1449,10 +1451,10 @@ def _validate_switch_time_input(input_value):
         fval = float(input_value)
 
     except Exception  as fault:
-        log.error(f"ERROR: Invalid switch time - {fault}! (Must be in 1-20 us range...)")
+        log.error(f"ERROR: Invalid switch time - {fault}! (Must be in {SWITCH_PERIOD_MIN_US}-{SWITCH_PERIOD_MAX_US} us range...)")
         return {**base_style, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
 
-    if 1.0 <= fval <= 20.0:
+    if float(SWITCH_PERIOD_MIN_US) <= fval <= float(SWITCH_PERIOD_MAX_US):
         return base_style
 
     return {**base_style, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
@@ -1542,15 +1544,18 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
             except Exception as fault:
                 return f"ERROR: Invalid switch time - {fault}!", {"color": "red", "fontWeight": "bold"}
 
-            if not (1.0 <= float_switch_timing <= 20.0):
-                return "ERROR: Switch time out of range (1-20 us)!", {"color": "red", "fontWeight": "bold"}
+            if not (float(SWITCH_PERIOD_MIN_US) <= float_switch_timing <= float(SWITCH_PERIOD_MAX_US)):
+                return (
+                    f"ERROR: Switch time out of range ({SWITCH_PERIOD_MIN_US}-{SWITCH_PERIOD_MAX_US} us)!",
+                    {"color": "red", "fontWeight": "bold"},
+                )
 
             try:
-                getattr(Back_End_Controller, "set_switch_timing_us", lambda *_: None)(float_switch_timing)
+                Back_End_Controller.set_switch_timing(float_switch_timing)
 
             except Exception as fault:
                 log.error(f"ERROR: Unable to set switch timing - {fault}!")
-                pass
+                return f"ERROR: Unable to set switch timing - {fault}!", {"color": "red", "fontWeight": "bold"}
 
             switch_timing_messgae = f"{float_switch_timing:.1f} us"
 

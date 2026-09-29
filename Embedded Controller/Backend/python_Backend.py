@@ -101,6 +101,10 @@ MAX_MODULATION_VALUE = 1023
 MAX_CONTROL_VOLTAGE = 3.3
 CONTROL_PIN_COUNT = 5
 
+# Must mirror SWITCH_PERIOD_MIN_US / SWITCH_PERIOD_MAX_US in the firmware.
+SWITCH_PERIOD_MIN_US = 50
+SWITCH_PERIOD_MAX_US = 2000000
+
 ONLINE_UPDATE_INTERVAL_SEC = 5.0
 DEFAULT_UPDATE_WINDOW = 30.0
 UPDATE_WINDOW_TIME = 5.0
@@ -827,7 +831,7 @@ class SerialBackend:
 
             return
 
-        board_switch_timing = max(1.0, min(20.0, switch_timing))
+        board_switch_timing = max(float(SWITCH_PERIOD_MIN_US), min(float(SWITCH_PERIOD_MAX_US), switch_timing))
         self.switch_timing = board_switch_timing
 
         if self.offline:
@@ -841,7 +845,7 @@ class SerialBackend:
             return
 
         try:
-            self.send_command(f"SWITCH_PERIOD {int(board_switch_timing)}")
+            self.send_command(f"SWITCH_PERIOD_US {int(board_switch_timing)}")
 
         except Exception as fault:
             log.error(f"ERROR: Failed to send switch timing '{board_switch_timing}': {fault}!")

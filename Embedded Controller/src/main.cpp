@@ -45,8 +45,11 @@ constexpr unsigned long MEASUREMENT_INTERVAL_MS = 50;
 constexpr unsigned long HEARTBEAT_INTERVAL_MS = 2000;    
 constexpr int COMMAND_BUFFER_LIMIT = 256;               
 
-constexpr int SWITCH_PERIOD_MIN_US = 1;
-constexpr int SWITCH_PERIOD_MAX_US = 2000000;           
+// Floor is set by what the timer ISR can actually service - entry, the critical
+// section and the GPIO write cost a few microseconds on their own, so anything
+// faster than this starves the main loop rather than switching cleanly.
+constexpr int SWITCH_PERIOD_MIN_US = 50;
+constexpr int SWITCH_PERIOD_MAX_US = 2000000;
 
 // WiFi/OTA configuration (replace when known)
 constexpr const char* WIFI_SSID = "YourSSID";
