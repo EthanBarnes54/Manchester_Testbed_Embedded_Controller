@@ -46,6 +46,7 @@ from python_Backend import (
     DATA_BUFFER_MAX_SAMPLES,
     SWITCH_PERIOD_MIN_US,
     SWITCH_PERIOD_MAX_US,
+    MAX_CONTROL_VOLTAGE,
     save_model_parameters,
     compute_feature_importance,
 )
@@ -266,7 +267,7 @@ def _control_tab():
                                         id="pwm1",
                                         type="text",
                                         min=0.0,
-                                        max=2000.0,
+                                        max=MAX_CONTROL_VOLTAGE,
                                         step=0.01,
                                         value="0.00",
                                         debounce=False,
@@ -282,7 +283,7 @@ def _control_tab():
                                         id="pwm2",
                                         type="text",
                                         min=0.0,
-                                        max=2000.0,
+                                        max=MAX_CONTROL_VOLTAGE,
                                         step=0.01,
                                         value="0.00",
                                         debounce=False,
@@ -298,7 +299,7 @@ def _control_tab():
                                         id="pwm3",
                                         type="text",
                                         min=0.0,
-                                        max=2000.0,
+                                        max=MAX_CONTROL_VOLTAGE,
                                         step=0.01,
                                         value="0.00",
                                         debounce=False,
@@ -314,7 +315,7 @@ def _control_tab():
                                         id="pwm4",
                                         type="text",
                                         min=0.0,
-                                        max=2000.0,
+                                        max=MAX_CONTROL_VOLTAGE,
                                         step=0.01,
                                         value="0.00",
                                         debounce=False,
@@ -330,7 +331,7 @@ def _control_tab():
                                         id="pwm5",
                                         type="text",
                                         min=0.0,
-                                        max=2000.0,
+                                        max=MAX_CONTROL_VOLTAGE,
                                         step=0.01,
                                         value="0.00",
                                         debounce=False,
@@ -1574,15 +1575,25 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
         for i, voltage in enumerate(pin_voltages, start=1):
             float_voltages = _coerce_float(voltage)
             if float_voltages is None:
-                return "Enter all five target voltages (0-2000).", {"color": "red", "fontWeight": "bold"}
+                return (
+                    f"Enter all five target voltages (0-{MAX_CONTROL_VOLTAGE} V).",
+                    {"color": "red", "fontWeight": "bold"},
+                )
             if float_voltages == "INVALID":
                 return f"ERROR: Invalid target for pin {i}", {"color": "red", "fontWeight": "bold"}
-            if not (0.0 <= float_voltages <= 2000.0):
-                return f"ERROR: Pin {i} target out of range (0-2000)!", {"color": "red", "fontWeight": "bold"}
+            if not (0.0 <= float_voltages <= MAX_CONTROL_VOLTAGE):
+                return (
+                    f"ERROR: Pin {i} target out of range (0-{MAX_CONTROL_VOLTAGE} V)!",
+                    {"color": "red", "fontWeight": "bold"},
+                )
             
             targets.append(float_voltages)
 
         Back_End_Controller.set_pin_voltages(targets)
+
+        # Report what the backend will actually drive, not what was typed, so the
+        # operator sees any clamping rather than having to infer it.
+        applied = [Back_End_Controller.clamp_voltage(target) for target in targets]
 
         switch_timing_messgae = "not set"
 
@@ -1609,15 +1620,15 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
             switch_timing_messgae = f"{float_switch_timing:.1f} us"
 
         status_message = (
-            f"Targets updated (V): squeeze_plate={targets[0]:.3f}, "
-            f"ion_source={targets[1]:.3f}, "
-            f"wein_filter={targets[2]:.3f}, "
-            f"cone_1={targets[3]:.3f}, "
-            f"cone_2={targets[4]:.3f}, "
+            f"Targets updated (V): squeeze_plate={applied[0]:.3f}, "
+            f"ion_source={applied[1]:.3f}, "
+            f"wein_filter={applied[2]:.3f}, "
+            f"cone_1={applied[3]:.3f}, "
+            f"cone_2={applied[4]:.3f}, "
             f"switch_time={switch_timing_messgae}"
         )
 
-        return "", {"display": "none"}
+        return status_message, {"color": "#1e8449", "fontWeight": "bold", "display": "block"}
 
     except Exception as fault:
         return f"ERROR: Pin update failed - {fault}!", {"color": "red", "fontWeight": "bold", "display": "block"}
