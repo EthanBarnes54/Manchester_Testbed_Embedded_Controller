@@ -118,38 +118,54 @@ class _RNN(nn.Module):
 # -------------------------------------------------------
 
 
+def _restore_scaler(scaler, scaler_state: dict) -> bool:
+    """Puts a saved scaler state back onto the live scaler. Returns True if it was restored."""
+
+    mean_ = scaler_state.get("mean_")
+    scale_ = scaler_state.get("scale_")
+
+    if mean_ is None or scale_ is None:
+        return False
+
+    scaler.mean_ = np.asarray(mean_, dtype=float)
+    scaler.scale_ = np.asarray(scale_, dtype=float)
+
+    # transform() leans on these too, so a reloaded scaler behaves like a freshly fitted one.
+    variance = scaler_state.get("var_")
+    scaler.var_ = np.asarray(variance, dtype=float) if variance is not None else scaler.scale_ ** 2
+    scaler.n_features_in_ = int(scaler_state.get("n_features_in_", scaler.mean_.shape[0]))
+
+    return True
+
+
 def load_previous_weights(model, scaler):
     """Attempts to load the most recent saved model weights, matching the expected pattern. Returns True if successful, False otherwise."""
     try:
-        
+
         model_candidates = sorted(MODEL_DIR.glob(f"{MODEL_BASENAME}*.pt"), key=lambda p: p.stat().st_mtime, reverse=True)
 
         if not model_candidates:
-            raise FileNotFoundError("ERROR: No model weightings found!")
-        
+            log.info("No previous checkpoint found, starting from fresh weights...")
+            return False
+
         model_path = model_candidates[0]
-        model = torch.load(model_path, map_location=DEVICE)
 
-        if isinstance(model, dict) and "state_dict" in model:
-            model.load_state_dict(model["state_dict"])
-            sc = model.get("scaler", {})
-            mean_ = sc.get("mean_")
-            scale_ = sc.get("scale_")
+        # weights_only keeps a tampered checkpoint from executing anything on load.
+        checkpoint = torch.load(model_path, map_location=DEVICE, weights_only=True)
 
-            if mean_ is not None and scale_ is not None:
-                scaler.mean_ = np.array(mean_, dtype=float)
-                scaler.scale_ = np.array(scale_, dtype=float)
+        state_dict = checkpoint.get("state_dict") if isinstance(checkpoint, dict) and "state_dict" in checkpoint else checkpoint
+        model.load_state_dict(state_dict)
 
+        if isinstance(checkpoint, dict) and _restore_scaler(scaler, checkpoint.get("scaler") or {}):
             log.info(f"Successfully loaded model weights and scalers from {model_path}...")
 
         else:
-            model.load_state_dict(model["state_dict"])
             log.info(f"Successfully loaded model from {model_path} (no scaler in file)...")
 
         return True
-    
+
     except Exception as fault:
-        log.warning(f"ERROR: No valid checkpoint found or incompatible with current architecture - {fault}!")
+        log.warning(f"ERROR: Checkpoint could not be loaded or is incompatible with the current architecture - {fault}!")
         return False
 
 
@@ -159,7 +175,12 @@ def save_nn_weights(model, scaler):
     payload = {"state_dict": model.state_dict()}
 
     if hasattr(scaler, "mean_") and hasattr(scaler, "scale_"):
-        payload["scaler"] = {"mean_": scaler.mean_.tolist(), "scale_": scaler.scale_.tolist()}
+        payload["scaler"] = {
+            "mean_": scaler.mean_.tolist(),
+            "scale_": scaler.scale_.tolist(),
+            "var_": scaler.var_.tolist() if hasattr(scaler, "var_") else (scaler.scale_ ** 2).tolist(),
+            "n_features_in_": int(getattr(scaler, "n_features_in_", np.asarray(scaler.mean_).shape[0])),
+        }
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     path = MODEL_DIR / f"{MODEL_BASENAME}_{timestamp}.pt"
@@ -215,11 +236,10 @@ def model_init(retrain: bool = False):
 
     model = _RNN(INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE, use_elu_head=True).to(DEVICE)
 
-    if not retrain and MODEL_PATH.exists():
-        load_previous_weights(model, scaler)
-
-    else:
-        log.info("Reset model weights. Please perofrm a retrain before operation...")
+    # Let the loader pick the newest checkpoint itself - timestamped saves count even
+    # when the plain RNN_model.pt is missing.
+    if retrain or not load_previous_weights(model, scaler):
+        log.info("Reset model weights. Please perform a retrain before operation...")
 
     return model
 
