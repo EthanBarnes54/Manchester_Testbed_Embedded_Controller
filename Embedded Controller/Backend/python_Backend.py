@@ -105,6 +105,10 @@ CONTROL_PIN_COUNT = 5
 SWITCH_PERIOD_MIN_US = 50
 SWITCH_PERIOD_MAX_US = 2000000
 
+# Keepalive cadence, kept well inside the firmware's COMMAND_TIMEOUT_MS so that a
+# quiet but healthy link is never mistaken for a dead host.
+KEEPALIVE_INTERVAL_SEC = 2.0
+
 ONLINE_UPDATE_INTERVAL_SEC = 5.0
 DEFAULT_UPDATE_WINDOW = 30.0
 UPDATE_WINDOW_TIME = 5.0
@@ -153,6 +157,7 @@ class SerialBackend:
         self.alive = threading.Event()
         self.lines = queue.Queue(maxsize=MAX_QUEUE_SIZE)
         self.data_lock = threading.Lock()
+        self.command_lock = threading.Lock()
 
         self.data_frame = pd.DataFrame(
             columns=[
@@ -198,6 +203,9 @@ class SerialBackend:
 
         self.online_update_thread = threading.Thread(target=self._update_manager, daemon=True)
         self.online_update_thread.start()
+
+        self.keepalive_thread = threading.Thread(target=self._keepalive_manager, daemon=True)
+        self.keepalive_thread.start()
 
     # ------------------------------------------------------------------ # 
     #                     Connect / Disconnect Functions                 # 
@@ -619,6 +627,27 @@ class SerialBackend:
                 log.error(f"ERROR: Unexpected fault - {fault}! Reconnecting...")
                 time.sleep(0.5)
 
+    def _keepalive_manager(self):
+        """Pings the board on a fixed cadence so its output failsafe stays satisfied.
+
+        The firmware drops its outputs when the host goes quiet. Passive monitoring
+        sends nothing on its own, so without this a perfectly healthy but idle
+        session would trip the failsafe.
+        """
+
+        while self.alive.is_set():
+
+            time.sleep(KEEPALIVE_INTERVAL_SEC)
+
+            if self.offline or self.serial is None or not self.serial.is_open:
+                continue
+
+            try:
+                self.send_command("PING")
+
+            except Exception as fault:
+                log.warning(f"WARNING: Keepalive ping failed - {fault}!")
+
     def _update_manager(self):
         """Background loop for periodic online model updates."""
         
@@ -724,7 +753,10 @@ class SerialBackend:
                     log.info(f"[SIMULATED] Received command: {command_string}")
                 return
 
-            self.serial.write((command_string + "\n").encode("utf-8"))
+            # The sweep, the dashboard callbacks and the keepalive all share one port.
+            with self.command_lock:
+                self.serial.write((command_string + "\n").encode("utf-8"))
+
             log.info(f"Command sent to board: {command_string}...")
 
         except Exception as fault:

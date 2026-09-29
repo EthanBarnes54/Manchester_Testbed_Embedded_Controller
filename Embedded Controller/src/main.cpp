@@ -41,9 +41,13 @@ constexpr int MODULATION_RESOLUTION = 10;
 constexpr int MAX_MODULATION_VALUE = (1 << MODULATION_RESOLUTION) - 1;
 constexpr int LED_CONTROL_CHANNELS[CONTROLLED_PULSE_CHANNELS] = {0, 1, 2, 3, 4};
 
-constexpr unsigned long MEASUREMENT_INTERVAL_MS = 50;    
-constexpr unsigned long HEARTBEAT_INTERVAL_MS = 2000;    
-constexpr int COMMAND_BUFFER_LIMIT = 256;               
+constexpr unsigned long MEASUREMENT_INTERVAL_MS = 50;
+constexpr unsigned long HEARTBEAT_INTERVAL_MS = 2000;
+constexpr int COMMAND_BUFFER_LIMIT = 256;
+
+// Host silence tolerated before the outputs are dropped. The backend keepalive runs
+// well inside this, so only a genuinely dead host trips it.
+constexpr unsigned long COMMAND_TIMEOUT_MS = 5000;
 
 // Floor is set by what the timer ISR can actually service - entry, the critical
 // section and the GPIO write cost a few microseconds on their own, so anything
@@ -155,6 +159,17 @@ class ChannelController {
     channel_values_[5] = switch_level ? 1 : 0;
     portEXIT_CRITICAL(&switch_mux_);
     set_switch_hardware(switch_level != 0);
+  }
+
+  // Drops every output back to zero and stops the switch line. Used when the host
+  // stops talking to us, so a latched target cannot outlive the controlling process.
+  void engage_safe_state() {
+    for (int i = 0; i < CONTROLLED_PULSE_CHANNELS; ++i) {
+      ledcWrite(LED_CONTROL_CHANNELS[i], 0);
+      channel_values_[i] = 0;
+    }
+
+    stop_switching(0);
   }
 
   void snapshot_values(int* destination, size_t count) const {
@@ -478,6 +493,14 @@ class CommandProcessor {
   CommandProcessor(ChannelController& channels, MeasurementService& measurement, LedIndicator& leds)
       : channels_(channels), measurement_(measurement), leds_(leds) {}
 
+  bool has_received_command() const {
+    return command_seen_;
+  }
+
+  unsigned long last_command_ms() const {
+    return last_command_ms_;
+  }
+
   void poll_serial() {
     while (Serial.available()) {
       char incoming_char = static_cast<char>(Serial.read());
@@ -504,6 +527,8 @@ class CommandProcessor {
   MeasurementService& measurement_;
   LedIndicator& leds_;
   String command_buffer_;
+  unsigned long last_command_ms_ = 0;
+  bool command_seen_ = false;
 
   static uint8_t to_pin_index(String token) {
     token.trim();
@@ -525,6 +550,9 @@ class CommandProcessor {
     if (command.isEmpty()) {
       return;
     }
+
+    last_command_ms_ = millis();
+    command_seen_ = true;
 
     if (command.startsWith("TARGETS")) {
       const int first_space_index = command.indexOf(' ');
@@ -592,7 +620,6 @@ class CommandProcessor {
       leds_.blink_once(80);
     } else if (command.equalsIgnoreCase("PING")) {
       Serial.println("OK");
-      leds_.blink_once(50);
     } else {
       Serial.println("ERROR: Unknown command received!");
       leds_.blink_error(2, 70);
@@ -605,6 +632,29 @@ MeasurementService measurement_service(ads);
 LedIndicator led_indicator(LED_PIN);
 OtaWifiService ota_wifi_service;
 CommandProcessor command_processor(channels, measurement_service, led_indicator);
+
+bool failsafe_engaged = false;
+
+// Once the host has spoken to us it is expected to keep doing so. If it goes quiet
+// the outputs are dropped, otherwise a set of targets would stay latched on the rig
+// for as long as the board has power.
+void enforce_command_timeout(unsigned long now_ms) {
+  if (!command_processor.has_received_command()) {
+    return;
+  }
+
+  const bool host_overdue = (now_ms - command_processor.last_command_ms()) >= COMMAND_TIMEOUT_MS;
+
+  if (host_overdue && !failsafe_engaged) {
+    channels.engage_safe_state();
+    failsafe_engaged = true;
+    Serial.println("FAILSAFE outputs zeroed, no command received from host");
+
+  } else if (!host_overdue && failsafe_engaged) {
+    failsafe_engaged = false;
+    Serial.println("FAILSAFE cleared, host link restored");
+  }
+}
 
 void setup() {
   led_indicator.begin();
@@ -637,6 +687,7 @@ void loop() {
   measurement_service.maybe_sample(now_ms);
   led_indicator.heartbeat(now_ms);
   ota_wifi_service.loop();
+  enforce_command_timeout(now_ms);
 
   delay(1);
 }
