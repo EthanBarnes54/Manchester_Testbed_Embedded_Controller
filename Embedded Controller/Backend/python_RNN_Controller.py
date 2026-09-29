@@ -261,8 +261,10 @@ def set_learning_rate(learning_rate: float) -> float:
     learning_rate = max(MIN_LEARNING_RATE, min(MAX_LEARNING_RATE, learning_rate))
     _current_learning_rate = learning_rate
 
+    # Torch reads the rate back out of "lr" - writing anything else leaves the
+    # optimiser on its original rate while reporting the new one.
     for group in optimiser.param_groups:
-        group["learning_rate"] = learning_rate
+        group["lr"] = learning_rate
 
     log.info(f"Learning rate set to {learning_rate:.3e}")
     return learning_rate
