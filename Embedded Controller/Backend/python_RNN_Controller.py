@@ -38,8 +38,8 @@ __all__ = [
     "get_learning_rate",
     "set_momentum",
     "get_momentum",
-    "set_optimizer_type",
-    "get_optimizer_type",
+    "set_optimiser_type",
+    "get_optimiser_type",
     "manual_save_model",
 ]
 
@@ -170,12 +170,12 @@ def save_nn_weights(model, scaler):
     log.info(f"Model checkpoint saved to {path} (latest model can be found in -> {MODEL_PATH})...")
 
 
-def _make_optimizer(parameters, learning_rate: float | None = None):
+def _make_optimiser(parameters, learning_rate: float | None = None):
     """Creates a new optimiser instance based on the current learning rate and momentum settings. 
     If 'learning_rate' is provided, it overrides the current learning rate for this optimiser instance only."""
 
     learning_rate_value = _current_learning_rate if learning_rate is None else float(learning_rate)
-    opt = str(OPTIMIZER_TYPE).lower()
+    opt = str(OPTIMISER_TYPE).lower()
 
     if opt == "sgd":
         return optim.SGD(parameters, lr=learning_rate_value, momentum=_current_momentum, nesterov=True)
@@ -225,7 +225,7 @@ def model_init(retrain: bool = False):
 
 
 model = model_init()
-optimiser = _make_optimizer(model.parameters())
+optimiser = _make_optimiser(model.parameters())
 Mean_error_loss = nn.MSELoss()
 
 def set_learning_rate(learning_rate: float) -> float:
@@ -268,7 +268,7 @@ def set_momentum(momentum: float) -> float:
     current_momentum = max(0.0, min(0.999, current_momentum))
     _current_momentum = current_momentum
 
-    optimiser = _make_optimizer(model.parameters())
+    optimiser = _make_optimiser(model.parameters())
     log.info(f"Momentum set to {current_momentum:.3f}...")
 
     return _current_momentum
@@ -282,14 +282,23 @@ def set_optimiser_type(optimiser_type: str) -> str:
     """Sets the optimiser type and rebuilds the optimiser instance."""
 
     global OPTIMISER_TYPE, optimiser
-    optimiser = str(optimiser_type).lower()
+    requested_optimiser = str(optimiser_type).lower()
     optimiser_options = {"adam", "sgd", "adamw", "rmsprop", "adagrad", "adadelta", "adamax", "nadam", "lbfgs", "asgd"}
 
-    if optimiser not in optimiser_options:
+    if requested_optimiser not in optimiser_options:
         raise ValueError(f"ERROR: Unknown optimiser type '{optimiser_type}'.")
-    
-    OPTIMISER_TYPE = optimiser
-    optimiser = _make_optimizer(model.parameters())
+
+    # Rebuild first, so a failed swap leaves the live optimiser untouched.
+    previous_optimiser_type = OPTIMISER_TYPE
+    OPTIMISER_TYPE = requested_optimiser
+
+    try:
+        optimiser = _make_optimiser(model.parameters())
+
+    except Exception as fault:
+        OPTIMISER_TYPE = previous_optimiser_type
+        raise RuntimeError(f"ERROR: Unable to build the '{requested_optimiser}' optimiser - {fault}!") from fault
+
     log.info(f"Optimiser set to {OPTIMISER_TYPE}...")
     return OPTIMISER_TYPE
 
@@ -476,7 +485,7 @@ def propose_control_vector(data_window: pd.DataFrame, output_mode: str = "volts"
 
 def online_update(new_data_frame: pd.DataFrame, grad_clip_threshold: float = 1.0, save: bool = False):
     """Performs an online update of the model using a new batch of data. It prepares the data sequences, 
-    performs a single optimization step, and optionally saves the updated model weights."""
+    performs a single optimisation step, and optionally saves the updated model weights."""
 
     if not _check_scaler_fitted():
         log.warning("WARNING: Scaler not fitted yet! Skipping online update until an initial training run completes...")
@@ -642,7 +651,7 @@ class RNNController:
         
         self.input_size = int(5 + feature_dim)
         self.model = _RNN(self.input_size, hidden_size, output_size, use_elu_head=use_elu_head).to(DEVICE)
-        self.optimiser = _make_optimizer(self.model.parameters(), lr=learning_rate)
+        self.optimiser = _make_optimiser(self.model.parameters(), lr=learning_rate)
         self.Mean_error_loss = nn.MSELoss()
         self.sequence_length = SEQUENCE_LENGTH
 

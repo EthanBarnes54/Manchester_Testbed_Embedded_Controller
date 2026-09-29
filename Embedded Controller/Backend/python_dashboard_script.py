@@ -37,7 +37,7 @@ from python_Backend import (
     get_model_info,
     set_window_update_time,
     set_online_learning_rate,
-    set_optimizer_type,
+    set_optimiser_type,
     set_buffer_samples,
     get_buffer_samples,
     DATA_BUFFER_MIN_SAMPLES,
@@ -708,12 +708,12 @@ def _ml_tab():
     if momentum_default is None:
         momentum_default = 0.9
 
-    optimizer_default = MODEL_INFO_BOOTSTRAP.get("optimizer_type")
+    optimiser_default = MODEL_INFO_BOOTSTRAP.get("optimiser_type")
 
-    if optimizer_default is None:
-        optimizer_default = "adam"
+    if optimiser_default is None:
+        optimiser_default = "adam"
 
-    optimizer_options = [
+    optimiser_options = [
         {"label": "Adam", "value": "adam"},
         {"label": "SGD", "value": "sgd"},
         {"label": "AdamW (decay)", "value": "adamw"},
@@ -800,11 +800,11 @@ def _ml_tab():
 
                     html.Div(
                         [
-                            html.Label("Optimizer", style={"fontWeight": "bold", "display": "block"}),
+                            html.Label("Optimiser", style={"fontWeight": "bold", "display": "block"}),
                             dcc.Dropdown(
-                                id="optimizer-type",
-                                options=optimizer_options,
-                                value=optimizer_default,
+                                id="optimiser-type",
+                                options=optimiser_options,
+                                value=optimiser_default,
                                 clearable=False,
                                 searchable=False,
                                 style={"width": "180px"},
@@ -976,10 +976,10 @@ def _update_plot_window_config(_apply_clicks, range_mode, window_seconds, window
     Input("online-window-seconds", "value"),
     Input("online-learning-rate", "value"),
     Input("online-momentum", "value"),
-    Input("optimizer-type", "value"),
+    Input("optimiser-type", "value"),
 )
 
-def _configure_online_updates(window_seconds, learning_rate, momentum_value, optimizer_type):
+def _configure_online_updates(window_seconds, learning_rate, momentum_value, optimiser_type):
     """Applies online-update settings and return the relevant status message."""
 
     errors = []
@@ -1008,13 +1008,13 @@ def _configure_online_updates(window_seconds, learning_rate, momentum_value, opt
             log.error(f"ERROR: Unbale to set the model's learning momentum  - {fault}!")
             errors.append(f"ERROR: Unbale to set the model's learning momentum  - {fault}!")
 
-    if optimizer_type is not None and callable(set_optimizer_type):
+    if optimiser_type is not None and callable(set_optimiser_type):
         try:
-            set_optimizer_type(optimizer_type)
+            set_optimiser_type(optimiser_type)
 
         except Exception as fault:
-            log.error(f"ERROR: Unable to set the model's optimizer - {fault}!")
-            errors.append(f"ERROR: Unable to set the model's optimizer - {fault}!")
+            log.error(f"ERROR: Unable to set the model's optimiser - {fault}!")
+            errors.append(f"ERROR: Unable to set the model's optimiser - {fault}!")
 
     if not errors:
         return html.Span("")
@@ -1157,7 +1157,7 @@ def update_graph(_, auto_mode_enabled, auto_rate_ms, auto_change_penalty, plot_w
             global LAST_AUTO_TS
             now = time.time()
             if now - LAST_AUTO_TS >= (rate_ms / 1000.0):
-                # TODO: Replace manual change-penalty tuning with Bayesian optimization.
+                # TODO: Replace manual change-penalty tuning with Bayesian optimisation.
                 targets = propose_control_vector(data_frame, change_penalty=change_penalty)
                 Back_End_Controller.set_pin_voltages(targets)
                 LAST_AUTO_TS = now
@@ -2104,7 +2104,7 @@ def update_ml_tab(_):
 
     online_enabled = model_info.get("online_updates_enabled", True)
     learning_rate_value = model_info.get("learning_rate")
-    optimizer_type_value = model_info.get("optimizer_type")
+    optimiser_type_value = model_info.get("optimiser_type")
 
     if sweep_state == "running":
         model_state_label = "training"
@@ -2176,12 +2176,12 @@ def update_ml_tab(_):
             log.error(f"ERROR: Unable to format learning rate - {fault}!")
             pass
 
-    if optimizer_type_value:
+    if optimiser_type_value:
         try:
-            config_bits.append(f"Opt {str(optimizer_type_value).upper()}")
+            config_bits.append(f"Opt {str(optimiser_type_value).upper()}")
 
         except Exception as fault:
-            log.error(f"ERROR: Unable to format optimizer type - {fault}!")
+            log.error(f"ERROR: Unable to format optimiser type - {fault}!")
             pass
 
     model_status_outputs = html.Div(

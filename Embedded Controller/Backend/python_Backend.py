@@ -35,7 +35,7 @@ try:
         get_learning_rate as _get_rnn_learning_rate,
         set_momentum as _set_rnn_momentum,
         get_momentum as _get_model_momentum,
-        set_optimiser_type as _set_rnn_optimizer_type,
+        set_optimiser_type as _set_rnn_optimiser_type,
         get_optimiser_type as _get_rnn_optimiser_type,
         save_nn_weights,
         model,
@@ -61,10 +61,10 @@ except Exception:
     def _get_model_momentum():
         return None
 
-    def _set_rnn_optimizer_type(_value):
+    def _set_rnn_optimiser_type(_value):
         return None
 
-    def _get_rnn_optimizer_type():
+    def _get_rnn_optimiser_type():
         return None
 
     def save_nn_weights(_model, _scaler):
@@ -314,19 +314,19 @@ class SerialBackend:
         
         return _get_model_momentum()
 
-    def set_optimizer_type(self, optimizer_type: str):
+    def set_optimiser_type(self, optimiser_type: str):
         """Sets the optimiser type for the RNN controller."""
 
-        if _set_rnn_optimizer_type is None:
-            raise RuntimeError("ERROR: Optimizer selection unavailable! Please try again...")
+        if _set_rnn_optimiser_type is None:
+            raise RuntimeError("ERROR: Optimiser selection unavailable! Please try again...")
         
-        return _set_rnn_optimizer_type(optimizer_type)
+        return _set_rnn_optimiser_type(optimiser_type)
 
     def get_optimiser_type(self):
         """Returns the current optimiser type."""
 
         if _get_rnn_optimiser_type is None:
-            log.warning("WARNING: Cannot retrieve optimizer type, continuing without explicit knowledge and trusting the RNN...")
+            log.warning("WARNING: Cannot retrieve optimiser type, continuing without explicit knowledge and trusting the RNN...")
             return None
         
         return _get_rnn_optimiser_type()
@@ -1182,7 +1182,7 @@ set_pin_by_name = Back_End_Controller.set_pin_by_name
 get_pins = Back_End_Controller.get_pins
 set_window_update_time = getattr(Back_End_Controller, "set_window_update_time", None)
 set_online_learning_rate = getattr(Back_End_Controller, "set_online_learning_rate", None)
-set_optimizer_type = getattr(Back_End_Controller, "set_optimizer_type", None)
+set_optimiser_type = getattr(Back_End_Controller, "set_optimiser_type", None)
 get_online_update_config = getattr(Back_End_Controller, "get_online_update_config", None)
 set_buffer_samples = getattr(Back_End_Controller, "set_buffer_samples", None)
 get_buffer_samples = getattr(Back_End_Controller, "get_buffer_samples", None)
@@ -1203,7 +1203,7 @@ def get_model_info() -> dict:
         "online_window_seconds": None,
         "online_updates_enabled": None,
         "learning_rate": None,
-        "optimizer_type": None,
+        "optimiser_type": None,
         "sweep_state": None,
         "data_buffer_samples": None,
     }
@@ -1259,11 +1259,11 @@ def get_model_info() -> dict:
         status_snapshot["momentum"] = None
 
     try:
-        status_snapshot["optimizer_type"] = _get_rnn_optimizer_type()
+        status_snapshot["optimiser_type"] = _get_rnn_optimiser_type()
 
     except Exception as fault:
-        log.warning(f"WARNING: Couldnot access the optimizer type: {fault}!")
-        status_snapshot["optimizer_type"] = None
+        log.warning(f"WARNING: Couldnot access the optimiser type: {fault}!")
+        status_snapshot["optimiser_type"] = None
    
     try:
         status_snapshot["sweep_state"] = str(getattr(Back_End_Controller, "sweep_status", {}).get("state", "idle"))
