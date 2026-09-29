@@ -93,7 +93,8 @@ BAUD_RATE = 115200
 RETRY_DELAY = 3.0
 MAX_QUEUE_SIZE = 2000
 
-OFFLINE = os.getenv("OFFLINE", "").strip() not in ("", "0", "false", "False")
+# Case folded so that OFFLINE=FALSE cannot quietly turn simulation on.
+OFFLINE = os.getenv("OFFLINE", "").strip().lower() not in ("", "0", "false", "no", "off")
 
 # Alter once board design has been finalised 
 
