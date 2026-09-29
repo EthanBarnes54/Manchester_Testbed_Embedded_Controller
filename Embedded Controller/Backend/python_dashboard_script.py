@@ -11,10 +11,12 @@
 """
 from dash import Dash, dcc, html, Input, Output, State, ctx
 from dash.exceptions import PreventUpdate
+from flask import request, Response
 import plotly.graph_objs as go
 import pandas as pd
 import pkgutil, importlib.util
 import numpy as np
+import hmac
 import logging
 import time
 import os
@@ -71,6 +73,53 @@ except Exception as fault:
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 app = Dash(__name__, title="Manchester Ion Beam Testbed: Control Dashboard", assets_folder=ASSETS_DIR)
 server = app.server
+
+# -------------------------------------------------------------------------
+#                            Access control
+# -------------------------------------------------------------------------
+
+# The panel commands the rig directly, so it stays on loopback unless credentials
+# are supplied deliberately. Everything is read from the environment, nothing is
+# ever committed alongside the source.
+
+DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1").strip()
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8050"))
+DASHBOARD_USER = os.getenv("DASHBOARD_USER", "operator").strip()
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _is_loopback(host: str) -> bool:
+    """Returns True when the given bind address is only reachable from this machine."""
+
+    return str(host).strip().lower() in LOOPBACK_HOSTS
+
+
+@server.before_request
+def _require_dashboard_credentials():
+    """Gates every request behind basic auth whenever a password has been configured."""
+
+    if not DASHBOARD_PASSWORD:
+        return None
+
+    credentials = request.authorization
+
+    if credentials is not None:
+        user_ok = hmac.compare_digest(credentials.username or "", DASHBOARD_USER)
+        password_ok = hmac.compare_digest(credentials.password or "", DASHBOARD_PASSWORD)
+
+        # Both are compared every time so a wrong username cannot be told from a
+        # wrong password by how long the reply takes.
+        if user_ok and password_ok:
+            return None
+
+    return Response(
+        "ERROR: Authentication required!",
+        401,
+        {"WWW-Authenticate": 'Basic realm="Manchester Testbed Controller"'},
+    )
+
 
 LAST_AUTO_TS = 0.0
 PLOT_HISTORY_LOCK = threading.Lock()
@@ -2221,5 +2270,17 @@ def update_ml_tab(_):
 
 if __name__ == "__main__":
 
+    if not _is_loopback(DASHBOARD_HOST) and not DASHBOARD_PASSWORD:
+        raise SystemExit(
+            f"ERROR: Refusing to serve the dashboard on {DASHBOARD_HOST} without a password! "
+            "This panel drives the rig outputs directly, so set DASHBOARD_PASSWORD "
+            "(and DASHBOARD_USER) before exposing it, or leave DASHBOARD_HOST on 127.0.0.1."
+        )
+
+    if DASHBOARD_PASSWORD:
+        log.info(f"Dashboard authentication enabled for user '{DASHBOARD_USER}'...")
+    else:
+        log.info("Dashboard bound to loopback only, no authentication required...")
+
     log.info("Launching ESP-12F Control Dashboard...")
-    app.run(debug=False, host="0.0.0.0", port=8050)
+    app.run(debug=False, host=DASHBOARD_HOST, port=DASHBOARD_PORT)

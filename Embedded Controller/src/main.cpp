@@ -55,9 +55,25 @@ constexpr unsigned long COMMAND_TIMEOUT_MS = 5000;
 constexpr int SWITCH_PERIOD_MIN_US = 50;
 constexpr int SWITCH_PERIOD_MAX_US = 2000000;
 
-// WiFi/OTA configuration (replace when known)
-constexpr const char* WIFI_SSID = "YourSSID";
-constexpr const char* WIFI_PASSWORD = "YourPassword";
+// WiFi/OTA configuration. Override these from platformio.ini build_flags rather than
+// editing them here, so site credentials never end up committed:
+//   -DTESTBED_WIFI_SSID='"YourNetwork"' -DTESTBED_OTA_PASSWORD='"YourOtaPassword"'
+
+#ifndef TESTBED_WIFI_SSID
+#define TESTBED_WIFI_SSID "YourSSID"
+#endif
+
+#ifndef TESTBED_WIFI_PASSWORD
+#define TESTBED_WIFI_PASSWORD "YourPassword"
+#endif
+
+#ifndef TESTBED_OTA_PASSWORD
+#define TESTBED_OTA_PASSWORD ""
+#endif
+
+constexpr const char* WIFI_SSID = TESTBED_WIFI_SSID;
+constexpr const char* WIFI_PASSWORD = TESTBED_WIFI_PASSWORD;
+constexpr const char* OTA_PASSWORD = TESTBED_OTA_PASSWORD;
 constexpr const char* OTA_HOSTNAME = "esp32dev";
 
 // Placeholder SSID shipped with the repo - WiFi stays down until this is replaced.
@@ -374,6 +390,14 @@ class OtaWifiService {
       return;
     }
 
+    ota_allowed_ = strlen(OTA_PASSWORD) > 0;
+
+    if (ota_allowed_) {
+      ArduinoOTA.setPassword(OTA_PASSWORD);
+    } else {
+      Serial.println("WARNING: OTA password not set, over the air updates disabled...");
+    }
+
     ArduinoOTA.setHostname(hostname);
 
     ArduinoOTA.onStart([]() {
@@ -424,7 +448,10 @@ class OtaWifiService {
           return;
         }
 
-        ArduinoOTA.handle();
+        if (ota_started_) {
+          ArduinoOTA.handle();
+        }
+
         return;
 
       case LinkState::Waiting:
@@ -446,6 +473,7 @@ class OtaWifiService {
   LinkState link_state_ = LinkState::Disabled;
   unsigned long state_entered_ms_ = 0;
   bool ota_started_ = false;
+  bool ota_allowed_ = false;
   const char* ssid_ = nullptr;
   const char* password_ = nullptr;
 
@@ -465,7 +493,7 @@ class OtaWifiService {
     link_state_ = LinkState::Online;
     state_entered_ms_ = millis();
 
-    if (!ota_started_) {
+    if (ota_allowed_ && !ota_started_) {
       ArduinoOTA.begin();
       ota_started_ = true;
       Serial.println("Ready for OTA updates...");
