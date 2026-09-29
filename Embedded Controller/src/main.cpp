@@ -582,7 +582,15 @@ class CommandProcessor {
     last_command_ms_ = millis();
     command_seen_ = true;
 
-    if (command.startsWith("TARGETS")) {
+    if (command.equalsIgnoreCase("PING")) {
+      Serial.println("OK");
+    } else if (command.equalsIgnoreCase("READ")) {
+      const float live_voltage = measurement_.read_voltage();
+      Serial.println(String("MEASURED ") + live_voltage + " V");
+      leds_.blink_once(80);
+    } else if (command.equalsIgnoreCase("GET PINS") || command.equalsIgnoreCase("PINS")) {
+      channels_.report_channels();
+    } else if (command.startsWith("TARGETS")) {
       const int first_space_index = command.indexOf(' ');
 
       if (first_space_index <= 0) {
@@ -640,14 +648,6 @@ class CommandProcessor {
 
       Serial.print("ACK SWITCH_PERIOD_US ");
       Serial.println(switch_period_us);
-    } else if (command.equalsIgnoreCase("GET PINS") || command.equalsIgnoreCase("PINS")) {
-      channels_.report_channels();
-    } else if (command.equalsIgnoreCase("READ")) {
-      const float live_voltage = measurement_.read_voltage();
-      Serial.println(String("MEASURED ") + live_voltage + " V");
-      leds_.blink_once(80);
-    } else if (command.equalsIgnoreCase("PING")) {
-      Serial.println("OK");
     } else {
       Serial.println("ERROR: Unknown command received!");
       leds_.blink_error(2, 70);
