@@ -515,15 +515,19 @@ def online_update(new_data_frame: pd.DataFrame, grad_clip_threshold: float = 1.0
         return False, None, None
     
     model.train()
-    
+
+    # Every exit hands back the same (updated, loss, r2) triple that the callers unpack -
+    # the old four value returns surfaced as an unpacking error rather than a clean skip.
     try:
         scaled_input_sequence, target_voltage = prepare_sequences(new_data_frame, fit_scaler=False)
 
     except ValueError:
-        return log.error("ERROR: Unable to train model! Insufficient data for online update..."), False, None, None
-    
+        log.warning("WARNING: Insufficient data for online update! Skipping this window...")
+        return False, None, None
+
     except Exception as fault:
-        return log.error(f"ERROR: Online update data preparation failed - {fault}"), False, None, None
+        log.error(f"ERROR: Online update data preparation failed - {fault}!")
+        return False, None, None
     
     if isinstance(optimiser, optim.LBFGS):
         def closure():
