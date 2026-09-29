@@ -110,6 +110,11 @@ DEFAULT_DATA_BUFFER_SAMPLES = 1000
 DATA_BUFFER_MIN_SAMPLES = 100
 DATA_BUFFER_MAX_SAMPLES = 100000
 
+# Provenance tags - every buffered sample is stamped with where it came from, so a
+# simulated trace can never be mistaken for a diode reading after the fact.
+HARDWARE_SOURCE = "hardware"
+SIMULATED_SOURCE = "simulated"
+
 
 # ------------------------------------------------------------------------- # 
 #                             Backend Object                                # 
@@ -156,6 +161,7 @@ class SerialBackend:
                 "pin_5",
                 "switch_logic",
                 "raw_message",
+                "source",
             ]
         )
 
@@ -342,7 +348,7 @@ class SerialBackend:
     def compute_feature_importance(self, max_samples: int = 200, num_permutations: int = 20):
         """Computes feature importances/saliencies from recent backend data, using shapley permutations."""
 
-        data_frame = self.get_data()
+        data_frame = self.get_training_data()
         return compute_feature_saliencies(data_frame, max_samples=max_samples, num_permutations=num_permutations)
 
     def get_online_update_config(self) -> dict:
@@ -489,8 +495,8 @@ class SerialBackend:
         """Returns the current rolling buffer size."""
         return int(self.max_buffer_samples)
 
-    def _append_measurement(self, timestamp: float, voltage: float, message: str):
-        """Append a measurement row to the internal DataFrame."""
+    def _append_measurement(self, timestamp: float, voltage: float, message: str, source: str = HARDWARE_SOURCE):
+        """Append a measurement row to the internal DataFrame, stamped with its provenance."""
 
         status_snapshot = list(self.pins)
 
@@ -504,6 +510,7 @@ class SerialBackend:
             "pin_5": status_snapshot[4],
             "switch_logic": status_snapshot[5],
             "raw_message": message,
+            "source": source,
         }
 
         with self.data_lock:
@@ -533,12 +540,14 @@ class SerialBackend:
                 avg_voltage = float(np.mean(analog_snapshot)) if analog_snapshot else 0.0
                 noise = (random.random() - 0.5) * 0.5
                 v = max(0.0, min(MAX_CONTROL_VOLTAGE, avg_voltage + noise))
-                message = f"MEASURED {v:.3f}"
+
+                # Trailing tag keeps the frame parseable while marking it as not a real reading.
+                message = f"MEASURED {v:.3f} SIMULATED"
 
                 if not self.lines.full():
                     self.lines.put((timestamp, message))
 
-                self._append_measurement(timestamp, v, message)
+                self._append_measurement(timestamp, v, message, source=SIMULATED_SOURCE)
 
                 time.sleep(0.05)
                 continue
@@ -624,10 +633,10 @@ class SerialBackend:
                 log.warning(f"WARNING: Sweep Status unretrievable - {fault}!")
                 pass
 
-            data_frame = self.get_data()
+            data_frame = self.get_training_data()
 
             if data_frame.empty:
-                log.warning("WARNING: No data available for updates (data frame is empty)!")
+                log.warning("WARNING: No hardware data available for updates (data frame is empty)!")
                 continue
 
             try:
@@ -723,6 +732,21 @@ class SerialBackend:
         with self.data_lock:
             data_frame = self.data_frame.copy()
             return data_frame
+
+    def get_training_data(self) -> pd.DataFrame:
+        """Returns the buffered samples that the model is allowed to learn from.
+
+        Simulated samples are only admissible when simulation was asked for. If the
+        board drops out mid-run the simulator keeps the dashboard alive, but those
+        samples must never reach the RNN as though they were diode readings.
+        """
+
+        data_frame = self.get_data()
+
+        if self.force_offline or data_frame.empty or "source" not in data_frame.columns:
+            return data_frame
+
+        return data_frame[data_frame["source"] != SIMULATED_SOURCE]
 
     def get_status(self) -> str:
         """Returns a connection/status string."""
@@ -1018,14 +1042,14 @@ class SerialBackend:
                 self.sweep_status.update({"state": "aborted", "message": "Sweep aborted by user..."})
                 return
 
-            data_frame = self.get_data()
+            data_frame = self.get_training_data()
 
             try:
                 if data_frame.empty:
 
                     self.sweep_status.update({
                         "state": "failed",
-                        "message": "ERROR: Sweep Failed! No data collected during sweep attempt...",
+                        "message": "ERROR: Sweep Failed! No hardware data collected during sweep attempt...",
                         "progress": 0.0,
                     })
 
@@ -1044,6 +1068,7 @@ class SerialBackend:
                             "pin_5",
                             "switch_logic",
                             "raw_message",
+                            "source",
                         ]
 
                         available_columns = [column for column in ordered_columns if column in data_frame.columns]
@@ -1171,6 +1196,7 @@ Back_End_Controller = SerialBackend(status = status)
 Data_Reciever = Back_End_Controller
 
 get_data = Back_End_Controller.get_data
+get_training_data = Back_End_Controller.get_training_data
 send_command = Back_End_Controller.send_command
 
 set_pin_voltage = Back_End_Controller.set_pin_voltage
