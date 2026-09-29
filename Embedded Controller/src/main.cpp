@@ -52,7 +52,12 @@ constexpr int SWITCH_PERIOD_MAX_US = 2000000;
 constexpr const char* WIFI_SSID = "YourSSID";
 constexpr const char* WIFI_PASSWORD = "YourPassword";
 constexpr const char* OTA_HOSTNAME = "esp32dev";
-constexpr int WIFI_CONNECT_ATTEMPTS = 50;
+
+// Placeholder SSID shipped with the repo - WiFi stays down until this is replaced.
+constexpr const char* WIFI_SSID_PLACEHOLDER = "YourSSID";
+
+constexpr unsigned long WIFI_ASSOCIATE_TIMEOUT_MS = 15000;
+constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 30000;
 
 }
 
@@ -339,8 +344,17 @@ class LedIndicator {
 
 class OtaWifiService {
  public:
+  // The radio is driven entirely from loop() - nothing here is allowed to block,
+  // because serial commands and ADC sampling share the same thread.
   void begin(const char* ssid, const char* password, const char* hostname) {
-    connect(ssid, password);
+    ssid_ = ssid;
+    password_ = password;
+
+    if (!credentials_configured()) {
+      link_state_ = LinkState::Disabled;
+      Serial.println("WARNING: WiFi credentials not set, running on serial only...");
+      return;
+    }
 
     ArduinoOTA.setHostname(hostname);
 
@@ -368,63 +382,91 @@ class OtaWifiService {
       else if (error == OTA_END_ERROR) Serial.println("ERROR: End Failed!");
     });
 
-    if (WiFi.status() == WL_CONNECTED) {
-      ArduinoOTA.begin();
-      ota_enabled_ = true;
-      Serial.println("Ready for OTA updates...");
-    }
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    start_association();
   }
 
   void loop() {
-    
-    if (WiFi.status() != WL_CONNECTED) {
+    switch (link_state_) {
+      case LinkState::Disabled:
+        return;
 
-      reconnect();
-      return;
+      case LinkState::Associating:
+        if (WiFi.status() == WL_CONNECTED) {
+          enter_online_state();
+        } else if (millis() - state_entered_ms_ >= WIFI_ASSOCIATE_TIMEOUT_MS) {
+          enter_waiting_state("WARNING: WiFi association timed out, retrying later...");
+        }
+        return;
+
+      case LinkState::Online:
+        if (WiFi.status() != WL_CONNECTED) {
+          enter_waiting_state("WARNING: WiFi link lost, OTA suspended...");
+          return;
+        }
+
+        ArduinoOTA.handle();
+        return;
+
+      case LinkState::Waiting:
+        if (millis() - state_entered_ms_ >= WIFI_RETRY_INTERVAL_MS) {
+          WiFi.disconnect();
+          start_association();
+        }
+        return;
     }
+  }
 
-    if (ota_enabled_) {
-
-    ArduinoOTA.handle();
-    }
+  bool is_online() const {
+    return link_state_ == LinkState::Online;
   }
 
  private:
-  bool ota_enabled_ = false;
-  unsigned long last_reconnect_attempt_ms_ = 0;
+  enum class LinkState { Disabled, Associating, Online, Waiting };
 
-  void connect(const char* ssid, const char* password) {
-    WiFi.begin(ssid, password);
+  LinkState link_state_ = LinkState::Disabled;
+  unsigned long state_entered_ms_ = 0;
+  bool ota_started_ = false;
+  const char* ssid_ = nullptr;
+  const char* password_ = nullptr;
 
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < WIFI_CONNECT_ATTEMPTS) {
-      delay(500);
-      Serial.print(".");
-      ++attempts;
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\nWiFi connected, IP address:");
-      Serial.println(WiFi.localIP());
-    } else {
-      Serial.println("\nWARNING: WiFi connection failed, running without OTA...");
-    }
+  bool credentials_configured() const {
+    return ssid_ != nullptr && strlen(ssid_) > 0 && strcmp(ssid_, WIFI_SSID_PLACEHOLDER) != 0;
   }
 
-  void reconnect() {
-    const unsigned long now = millis();
-    if (now - last_reconnect_attempt_ms_ < 2000) {
-      return;
-    }
+  // Kicks off association and returns straight away - WiFi.begin() does not block.
+  void start_association() {
+    WiFi.begin(ssid_, password_);
+    link_state_ = LinkState::Associating;
+    state_entered_ms_ = millis();
+    Serial.println("WiFi associating...");
+  }
 
-    last_reconnect_attempt_ms_ = now;
-    Serial.println("WiFi lost, attempting reconnection...");
-    connect(WIFI_SSID, WIFI_PASSWORD);
+  void enter_online_state() {
+    link_state_ = LinkState::Online;
+    state_entered_ms_ = millis();
 
-    if (WiFi.status() == WL_CONNECTED && !ota_enabled_) {
+    if (!ota_started_) {
       ArduinoOTA.begin();
-      ota_enabled_ = true;
+      ota_started_ = true;
+      Serial.println("Ready for OTA updates...");
     }
+
+    Serial.print("WiFi connected, IP address: ");
+    Serial.println(WiFi.localIP());
+  }
+
+  // Drops OTA on the way down so the next association rebinds against the new address.
+  void enter_waiting_state(const char* reason) {
+    if (ota_started_) {
+      ArduinoOTA.end();
+      ota_started_ = false;
+    }
+
+    link_state_ = LinkState::Waiting;
+    state_entered_ms_ = millis();
+    Serial.println(reason);
   }
 };
 
