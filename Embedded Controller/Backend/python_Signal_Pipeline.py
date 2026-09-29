@@ -9,10 +9,22 @@
 # --------------------------------------------------------------- #
 """
 
-from logging import log
+import logging
 import numpy as np
 from collections import deque
 from typing import Deque
+
+#---------------------------------------------------------------#
+#                        Logging setup
+#---------------------------------------------------------------#
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+
+log = logging.getLogger("Signal_Pipeline")
 
 #---------------------------------------------------------------#
 #                     Normalisation Stage
@@ -22,7 +34,7 @@ class Normaliser:
     """Maintains a rolling window of pulse feature vectors to compute mean and std for normalisation."""
 
     def __init__(self, window_pulses: int = 50, eps: float = 1e-8, min_count: int = 10):
-        """Initializes the normalizer with a specified window size, epsilon for numerical stability, and minimum count for valid statistics."""
+        """Initialises the normaliser with a window size, an epsilon for numerical stability, and the minimum count needed for valid statistics."""
 
         self.window = int(max(1, window_pulses))
         self.eps = float(eps)
@@ -39,7 +51,7 @@ class Normaliser:
         If there are no vectors, returns (None, None)."""
 
         if not self._buf:
-            log.warning("Normalizer stats requested but no data in buffer. Returning Null Vectors.")
+            log.warning("WARNING: Normaliser statistics requested but the buffer is empty! Returning null vectors...")
             return None, None
         
         feature_vectors= np.stack(list(self._buf), axis=0)
@@ -47,7 +59,7 @@ class Normaliser:
         feature_std = feature_vectors.std(axis=0)
         return feature_mean, feature_std
 
-    def normalize(self, input_feature_vector: np.ndarray) -> np.ndarray:
+    def normalise(self, input_feature_vector: np.ndarray) -> np.ndarray:
         """Normalizes the input feature vector using the mean and std from the rolling window. 
         If there are not enough vectors in the buffer, returns a zero vector of the same dimensions."""
 
@@ -68,7 +80,7 @@ def _moving_average(input_array: np.ndarray, window_size: int) -> np.ndarray:
     window_size = max(1, int(window_size))
 
     if input_array.size == 0:
-        log.warning("Moving average requested but input array is empty. Returning empty array...")    
+        log.warning("WARNING: Moving average requested but the input array is empty! Returning empty array...")
         return input_array
     
     window_filter_weightings = np.ones(window_size, dtype=float) / float(window_size)
@@ -84,24 +96,30 @@ class LivePulsePipeline:
     def __init__(
         self,
         sampling_rate_hz: float,
-        pulse_on_us: float = 10.0 * 1e-6,
-        pulse_off_us: float = 10.0 * 1e-6,
+        pulse_on_us: float = 10.0,
+        pulse_off_us: float = 10.0,
         denoise_window_us: float = 0.5,
-        normalization_window_pulses: int = 50,
+        normalisation_window_pulses: int = 50,
         segmentation_mode: str = "periodic",
         threshold_frac_of_peak: float = 0.5,
     ):
         
         self.sampling_frequency = float(sampling_rate_hz)
+
+        if self.sampling_frequency <= 0.0:
+            raise ValueError("ERROR: Sampling rate must be positive!")
+
         self.time_step = 1.0 / self.sampling_frequency
-        self.pulse_on_samples = int(round((pulse_on_us) / self.time_step))
-        self.pulse_off_samples = int(round((pulse_off_us) / self.time_step))
+
+        # At least one sample either side, so period_samples can never divide by zero.
+        self.pulse_on_samples = max(1, int(round((pulse_on_us * 1e-6) / self.time_step)))
+        self.pulse_off_samples = max(1, int(round((pulse_off_us * 1e-6) / self.time_step)))
         self.period_samples = self.pulse_on_samples + self.pulse_off_samples
         self.denoise_samples = max(1, int(round((denoise_window_us * 1e-6) / self.time_step)))
         self.segmentation_mode = segmentation_mode
         self.threshold_frac_of_peak = float(threshold_frac_of_peak)
 
-        self.normaliser = Normaliser(window_pulses=normalization_window_pulses)
+        self.normaliser = Normaliser(window_pulses=normalisation_window_pulses)
         self._residual = np.empty(0, dtype=float)
 
         self._feature_names = [
@@ -123,7 +141,7 @@ class LivePulsePipeline:
         """Resets the internal state of the pipeline, clearing any residual data and resetting the normaliser."""
 
         self._residual = np.empty(0, dtype=float)
-        self.normalizer = Normaliser(window_pulses=self.normalizer.window)
+        self.normaliser = Normaliser(window_pulses=self.normaliser.window)
 
     def _denoise(self, x: np.ndarray) -> np.ndarray: #BAYESIAN!?!?!?!?!???!?!?!?
         """Applies a moving average filter to the input array to reduce noise."""
