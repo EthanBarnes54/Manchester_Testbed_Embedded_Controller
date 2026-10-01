@@ -16,7 +16,10 @@ r"""
 
 
 
+import copy
+import functools
 import logging
+import threading
 from pathlib import Path
 from collections import deque
 
@@ -86,6 +89,29 @@ log = logging.getLogger("RNN_Controller")
 
 
 # -------------------------------------------------------
+#                    Shared State Lock
+# -------------------------------------------------------
+
+# The module-level model, optimiser and scaler are reached from the online update
+# thread, the sweep thread, the auto controller and Dash workers at once. Without
+# this, one thread's optimiser step rewrites weights mid-way through another's
+# backward pass, and a scaler refit can land between a transform's mean and scale.
+# Re-entrant because train_model(save=True) calls save_nn_weights under it.
+MODEL_LOCK = threading.RLock()
+
+
+def _holding_model_lock(function):
+    """Runs the wrapped function with exclusive access to the shared model state."""
+
+    @functools.wraps(function)
+    def locked(*args, **kwargs):
+        with MODEL_LOCK:
+            return function(*args, **kwargs)
+
+    return locked
+
+
+# -------------------------------------------------------
 #                    Model Architecture
 # -------------------------------------------------------
 
@@ -142,6 +168,7 @@ def _restore_scaler(scaler, scaler_state: dict) -> bool:
     return True
 
 
+@_holding_model_lock
 def load_previous_weights(model, scaler):
     """Attempts to load the most recent saved model weights, matching the expected pattern. Returns True if successful, False otherwise."""
     try:
@@ -173,6 +200,7 @@ def load_previous_weights(model, scaler):
         return False
 
 
+@_holding_model_lock
 def save_nn_weights(model, scaler):
     """Saves the current model weights and scaler state (if available) to a timestamped checkpoint file."""
 
@@ -252,6 +280,7 @@ model = model_init()
 optimiser = _make_optimiser(model.parameters())
 Mean_error_loss = nn.MSELoss()
 
+@_holding_model_lock
 def set_learning_rate(learning_rate: float) -> float:
     """Sets the learning rate for the optimiser, ensuring it falls within defined bounds. Returns the new learning rate."""
     
@@ -280,6 +309,7 @@ def get_learning_rate() -> float:
     return float(_current_learning_rate)
 
 
+@_holding_model_lock
 def set_momentum(momentum: float) -> float:
     """Sets the learning momentum, ensuring it falls within valid bounds. Returns the new momentum value."""
     
@@ -304,6 +334,7 @@ def get_momentum() -> float:
     return float(_current_momentum)
 
 
+@_holding_model_lock
 def set_optimiser_type(optimiser_type: str) -> str:
     """Sets the optimiser type and rebuilds the optimiser instance."""
 
@@ -442,6 +473,7 @@ def _validation_metrics(validation_frame) -> dict:
     return scores
 
 
+@_holding_model_lock
 def train_model(data_frame: pd.DataFrame, number_of_epochs: int = 10, grad_clip_threshold: float = 1.0, save: bool = False, validation_ratio: float = 0.2):
     """Trains the RNN model on the provided DataFrame for a specified number of epochs. 
     It prepares the data sequences, performs backpropagation, and optionally saves the model weights after training.
@@ -509,6 +541,7 @@ def train_model(data_frame: pd.DataFrame, number_of_epochs: int = 10, grad_clip_
 # -------------------------------------------------------
 
 
+@_holding_model_lock
 def propose_control_vector(data_window: pd.DataFrame, output_mode: str = "volts", num_candidates: int = 64, change_penalty: float = 0.1):
     """Given a recent window of data, proposes a control vector (DAC settings) that is predicted to increase the diode voltage, 
     while penalizing large changes from the current state."""
@@ -576,6 +609,7 @@ def propose_control_vector(data_window: pd.DataFrame, output_mode: str = "volts"
 # -------------------------------------------------------
 
 
+@_holding_model_lock
 def online_update(new_data_frame: pd.DataFrame, grad_clip_threshold: float = 1.0, save: bool = False):
     """Performs an online update of the model using a new batch of data. It prepares the data sequences, 
     performs a single optimisation step, and optionally saves the updated model weights."""
@@ -658,11 +692,17 @@ def compute_feature_saliencies(data_frame: pd.DataFrame, max_samples: int = 50,n
 
     if len(filtered_data_frame) <= SEQUENCE_LENGTH:
         raise ValueError("Insufficient data to compute saliencies.")
-    
-    if not _check_scaler_fitted():
-        raise RuntimeError("Scaler not fitted. Train the model first...")
 
-    input_sequences, _ = prepare_sequences(filtered_data_frame, fit_scaler=False)
+    # Only the snapshot happens under the lock. The permutation run can take tens of
+    # seconds, and holding the lock that long would stall online updates and the auto
+    # controller, so it scores a private copy of the model instead.
+    with MODEL_LOCK:
+        if not _check_scaler_fitted():
+            raise RuntimeError("Scaler not fitted. Train the model first...")
+
+        input_sequences, _ = prepare_sequences(filtered_data_frame, fit_scaler=False)
+        saliency_model = copy.deepcopy(model)
+
     number_of_samples = input_sequences.shape[0]
     
     if number_of_samples > max_samples:
@@ -678,11 +718,11 @@ def compute_feature_saliencies(data_frame: pd.DataFrame, max_samples: int = 50,n
     contribution_sum = torch.zeros(features, dtype=torch.float32)
     total_counts = 0
 
-    model.eval()
+    saliency_model.eval()
     base_mean = None
 
     with torch.no_grad():
-        base_mean_tensor = model(reference_sequence).squeeze()
+        base_mean_tensor = saliency_model(reference_sequence).squeeze()
 
         try:
             base_mean = float(torch.mean(base_mean_tensor).item())
@@ -698,14 +738,14 @@ def compute_feature_saliencies(data_frame: pd.DataFrame, max_samples: int = 50,n
                 test_permutations = torch.randperm(features)
                 feature_subset = reference_sequence.clone()
 
-                previous_prediciton = model(feature_subset).squeeze()
+                previous_prediciton = saliency_model(feature_subset).squeeze()
 
                 for j in test_permutations:
 
                     feature_index = int(j)
                     feature_subset[:, :, feature_index] = sample_window[:, :, feature_index]
 
-                    new_prediction = model(feature_subset).squeeze()
+                    new_prediction = saliency_model(feature_subset).squeeze()
 
                     contributions = new_prediction - previous_prediciton
                     contribution_sum[feature_index] += contributions.item()
