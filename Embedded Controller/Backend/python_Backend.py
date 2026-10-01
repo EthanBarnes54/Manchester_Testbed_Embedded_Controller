@@ -14,6 +14,7 @@
 
 import itertools
 import logging
+from collections import deque
 import os
 import queue
 import random
@@ -121,6 +122,10 @@ DEFAULT_DATA_BUFFER_SAMPLES = 1000
 DATA_BUFFER_MIN_SAMPLES = 100
 DATA_BUFFER_MAX_SAMPLES = 100000
 
+# A sweep records into its own capture rather than the rolling buffer, which is far
+# smaller than a sweep. This only bounds memory if a sweep is configured absurdly large.
+SWEEP_CAPTURE_MAX_SAMPLES = DATA_BUFFER_MAX_SAMPLES
+
 # Provenance tags - every buffered sample is stamped with where it came from, so a
 # simulated trace can never be mistaken for a diode reading after the fact.
 HARDWARE_SOURCE = "hardware"
@@ -191,6 +196,7 @@ class SerialBackend:
         self.sweep_thread = None
         self.sweep_status = {"state": "idle", "progress": 0.0, "message": ""}
         self.sweep_cancel = threading.Event()
+        self._sweep_capture = None
 
         self.save_dataset_enabled = False
         self.last_training_time_stamp = None
@@ -532,6 +538,27 @@ class SerialBackend:
             self.data_frame.loc[len(self.data_frame)] = row
             self.data_frame = self.data_frame.tail(self.max_buffer_samples).reset_index(drop=True)
 
+            if self._sweep_capture is not None:
+                self._sweep_capture.append(row)
+
+    def _begin_sweep_capture(self):
+        """Starts recording every sample into a sweep capture that the rolling buffer cannot trim."""
+
+        with self.data_lock:
+            self._sweep_capture = deque(maxlen=SWEEP_CAPTURE_MAX_SAMPLES)
+
+    def _end_sweep_capture(self) -> pd.DataFrame:
+        """Stops the sweep capture and returns everything it recorded."""
+
+        with self.data_lock:
+            captured = list(self._sweep_capture or [])
+            self._sweep_capture = None
+
+        if len(captured) >= SWEEP_CAPTURE_MAX_SAMPLES:
+            log.warning(f"WARNING: Sweep exceeded {SWEEP_CAPTURE_MAX_SAMPLES} samples, only the most recent were kept!")
+
+        return pd.DataFrame(captured, columns=self.data_frame.columns)
+
     def operating_system(self):
         """ Reads serial messages, parses measurement / pin snapshots, and updates
         the internal buffers. When offline, generates simulated readings.
@@ -773,14 +800,17 @@ class SerialBackend:
             return data_frame
 
     def get_training_data(self) -> pd.DataFrame:
-        """Returns the buffered samples that the model is allowed to learn from.
+        """Returns the buffered samples that the model is allowed to learn from."""
+
+        return self._admissible_for_training(self.get_data())
+
+    def _admissible_for_training(self, data_frame: pd.DataFrame) -> pd.DataFrame:
+        """Drops the samples the model must not learn from.
 
         Simulated samples are only admissible when simulation was asked for. If the
         board drops out mid-run the simulator keeps the dashboard alive, but those
         samples must never reach the RNN as though they were diode readings.
         """
-
-        data_frame = self.get_data()
 
         if self.force_offline or data_frame.empty or "source" not in data_frame.columns:
             return data_frame
@@ -1031,7 +1061,6 @@ class SerialBackend:
             completion_indicator = 0
 
             class SweepAbort(Exception):
-                log.warning("WARNING: Sweep aborted by user!")
                 pass
 
             def run_step(target_vector, stage_label):
@@ -1050,6 +1079,8 @@ class SerialBackend:
 
                 self.sweep_status["progress"] = min(1.0, completion_indicator / total_steps)
                 self.sweep_status["message"] = stage_label
+
+            self._begin_sweep_capture()
 
             try:
                 for reference in reference_voltages:
@@ -1078,10 +1109,15 @@ class SerialBackend:
                     run_step(random_targets.tolist(), f"Stage 3: random sampling for the RNN ({sample_index}/{random_sample_count})",)
 
             except SweepAbort:
+                log.warning("WARNING: Sweep aborted by user!")
                 self.sweep_status.update({"state": "aborted", "message": "Sweep aborted by user..."})
                 return
 
-            data_frame = self.get_training_data()
+            finally:
+                sweep_capture = self._end_sweep_capture()
+
+            # Trains on the whole sweep, not whatever the rolling buffer still happens to hold.
+            data_frame = self._admissible_for_training(sweep_capture)
 
             try:
                 if data_frame.empty:
