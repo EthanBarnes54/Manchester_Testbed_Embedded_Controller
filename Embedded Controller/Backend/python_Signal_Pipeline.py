@@ -3,8 +3,8 @@
 
 #  Pyhton module to calculate Beam data via the backend's diode voltage 
 #   stream. Control vectors utilise the current pin states read from the 
-#   backend. Control effort uses squared step delta of the 5 analog pins. 
-#   Saturations count when any of the 5 analog pins hit 0 or 1023.
+#   backend. Control effort uses squared step delta of the 5 analog pins.
+#   Saturations count when any of the 5 analog pins sits at full scale (1023).
 
 # --------------------------------------------------------------- #
 """

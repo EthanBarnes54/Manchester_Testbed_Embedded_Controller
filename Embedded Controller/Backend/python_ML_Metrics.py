@@ -17,8 +17,11 @@ from typing import Deque, Dict, List, Optional
 
 import numpy as np
 
+# Full-scale PWM duty. A channel pinned here has no headroom left to push the beam.
+SATURATION_PWM_VALUE = 1023.0
+
 #----------------------------------------------------------#
-#                    Metric Data Window 
+#                    Metric Data Window
 #----------------------------------------------------------#
 
 @dataclass
@@ -79,7 +82,9 @@ class MetricCollector:
             self._window.pin_controls.append(control_vector)
             self._window.pin_control_changes.append(control_effort)
 
-            saturation = int(np.any((control_vector <= 0.0) | (control_vector >= 1023.0)))
+            # Only the top rail counts. 0 is where every channel rests when idle, so
+            # counting it flagged a rig doing nothing as saturated on every sample.
+            saturation = int(np.any(control_vector >= SATURATION_PWM_VALUE))
             self._window.saturation_indicators.append(saturation)
 
     def record_features(self, features: np.ndarray, feature_names: Optional[List[str]] = None):
