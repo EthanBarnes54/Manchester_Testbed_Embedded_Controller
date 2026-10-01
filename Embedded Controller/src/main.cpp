@@ -348,6 +348,8 @@ class MeasurementService {
   unsigned long last_measurement_ms_ = 0;
 };
 
+// Blinks are scheduled rather than slept through - update() plays them out from loop(),
+// so an LED pattern can never hold up serial commands, sampling or the failsafe.
 class LedIndicator {
  public:
   explicit LedIndicator(int pin) : pin_(pin) {}
@@ -359,35 +361,78 @@ class LedIndicator {
 
   void heartbeat(unsigned long now_ms) {
     if (now_ms - last_heartbeat_ms_ > HEARTBEAT_INTERVAL_MS) {
-      digitalWrite(pin_, HIGH);
-      delay(50);
-      digitalWrite(pin_, LOW);
       last_heartbeat_ms_ = now_ms;
+
+      // A command or error pattern already in flight takes precedence over the beat.
+      if (!busy()) {
+        start_pattern(1, HEARTBEAT_FLASH_MS, 0, now_ms);
+      }
     }
   }
 
   void blink_once(int duration_ms = 100) {
-    digitalWrite(pin_, HIGH);
-    delay(duration_ms);
-    digitalWrite(pin_, LOW);
+    start_pattern(1, duration_ms, 0, millis());
   }
 
   void blink_error(int flash_count = 3, int duration_ms = 100) {
-    for (int i = 0; i < flash_count; ++i) {
-      digitalWrite(pin_, HIGH);
-      delay(duration_ms);
-      digitalWrite(pin_, LOW);
-      delay(duration_ms);
+    start_pattern(flash_count, duration_ms, duration_ms, millis());
+  }
+
+  void update(unsigned long now_ms) {
+    // Loops so a zero-length phase is skipped in the same call rather than costing a pass.
+    while (phases_remaining_ > 0) {
+      if (now_ms - phase_started_ms_ < current_phase_ms()) {
+        return;
+      }
+
+      --phases_remaining_;
+      phase_started_ms_ = now_ms;
+      digitalWrite(pin_, phase_is_on() ? HIGH : LOW);
     }
   }
 
+  // Ends the steady boot light, but leaves any pattern already scheduled to finish.
   void set_low() {
-    digitalWrite(pin_, LOW);
+    if (!busy()) {
+      digitalWrite(pin_, LOW);
+    }
+  }
+
+  bool busy() const {
+    return phases_remaining_ > 0;
   }
 
  private:
+  static constexpr unsigned long HEARTBEAT_FLASH_MS = 50;
+
   int pin_;
   unsigned long last_heartbeat_ms_ = 0;
+
+  // A pattern is 2 * flashes phases counted down to zero: even counts are lit, odd are dark.
+  unsigned int phases_remaining_ = 0;
+  unsigned long phase_started_ms_ = 0;
+  unsigned long on_ms_ = 0;
+  unsigned long off_ms_ = 0;
+
+  bool phase_is_on() const {
+    return phases_remaining_ > 0 && (phases_remaining_ % 2) == 0;
+  }
+
+  unsigned long current_phase_ms() const {
+    return phase_is_on() ? on_ms_ : off_ms_;
+  }
+
+  void start_pattern(int flash_count, unsigned long on_ms, unsigned long off_ms, unsigned long now_ms) {
+    if (flash_count <= 0) {
+      return;
+    }
+
+    phases_remaining_ = 2U * static_cast<unsigned int>(flash_count);
+    on_ms_ = on_ms;
+    off_ms_ = off_ms;
+    phase_started_ms_ = now_ms;
+    digitalWrite(pin_, HIGH);
+  }
 };
 
 class OtaWifiService {
@@ -727,6 +772,7 @@ void loop() {
   const unsigned long now_ms = millis();
   measurement_service.maybe_sample(now_ms);
   led_indicator.heartbeat(now_ms);
+  led_indicator.update(now_ms);
   ota_wifi_service.loop();
   enforce_command_timeout(now_ms);
 
