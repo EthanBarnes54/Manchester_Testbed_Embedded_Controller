@@ -20,6 +20,7 @@ import hmac
 import logging
 import os
 import threading
+from collections import deque
 
 log = logging.getLogger("Dashboard")
 
@@ -114,8 +115,11 @@ def _require_dashboard_credentials():
     )
 
 
+# The plot keeps a longer view than the backend buffer, but a bounded one: whichever is
+# larger of ten minutes at the 20 Hz sample rate or the buffer itself.
+PLOT_HISTORY_MIN_SAMPLES = 12000
 PLOT_HISTORY_LOCK = threading.Lock()
-PLOT_HISTORY = pd.DataFrame(columns=["timestamp", "voltage"])
+PLOT_HISTORY = deque(maxlen=PLOT_HISTORY_MIN_SAMPLES)
 # -------------------------------------------------------------------------
 #                                     Layout
 # -------------------------------------------------------------------------
@@ -1143,19 +1147,21 @@ def update_graph(_, plot_window_config):
 
     data_frame = Back_End_Controller.get_data()
 
-    if data_frame.empty and PLOT_HISTORY.empty:
+    if data_frame.empty and not PLOT_HISTORY:
         return go.Figure(), "Voltage: -- V", "Samples: 0"
 
     with PLOT_HISTORY_LOCK:
+        history_limit = max(PLOT_HISTORY_MIN_SAMPLES, int(Back_End_Controller.get_buffer_samples()))
+
+        if PLOT_HISTORY.maxlen != history_limit:
+            PLOT_HISTORY = deque(PLOT_HISTORY, maxlen=history_limit)
+
         if not data_frame.empty:
-            if PLOT_HISTORY.empty:
-                PLOT_HISTORY = data_frame.loc[:, ["timestamp", "voltage"]].copy()
-            else:
-                last_ts = PLOT_HISTORY["timestamp"].iloc[-1]
-                new_rows = data_frame[data_frame["timestamp"] > last_ts][["timestamp", "voltage"]]
-                if not new_rows.empty:
-                    PLOT_HISTORY = pd.concat([PLOT_HISTORY, new_rows], ignore_index=True)
-        plot_history_frame = PLOT_HISTORY.copy()
+            last_ts = PLOT_HISTORY[-1][0] if PLOT_HISTORY else float("-inf")
+            new_rows = data_frame[data_frame["timestamp"] > last_ts]
+            PLOT_HISTORY.extend(zip(new_rows["timestamp"].astype(float), new_rows["voltage"]))
+
+        plot_history_frame = pd.DataFrame(list(PLOT_HISTORY), columns=["timestamp", "voltage"])
 
     plot_source = plot_history_frame if not plot_history_frame.empty else data_frame
     plot_frame = plot_source
