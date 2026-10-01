@@ -150,7 +150,7 @@ class SerialBackend:
 
     def __init__(self, port=SERIAL_PORT, baud=BAUD_RATE, status: bool = False):
 
-        """Creates and starts the backend.
+        """Creates the backend. Nothing touches the port or starts a thread until start().
 
         Arguments:
             port: Serial port name (for example, "COM4").
@@ -163,6 +163,7 @@ class SerialBackend:
         self.serial = None
 
         self.alive = threading.Event()
+        self._stop_event = threading.Event()
         self.lines = queue.Queue(maxsize=MAX_QUEUE_SIZE)
         self.data_lock = threading.Lock()
         self.command_lock = threading.Lock()
@@ -205,16 +206,36 @@ class SerialBackend:
         self.online_update_period = ONLINE_UPDATE_INTERVAL_SEC
         self.online_update_enabled = True
 
-        self.thread = threading.Thread(target=self.operating_system, daemon=True)
+        self.thread = None
+        self.online_update_thread = None
+        self.keepalive_thread = None
 
+    def start(self):
+        """Opens the link and starts the reader, online update and keepalive threads.
+
+        Kept out of the constructor so that importing this module, or building a
+        backend in a test, never opens a serial port. Calling it again is a no-op.
+        """
+
+        if self.alive.is_set():
+            return self
+
+        self._stop_event.clear()
         self.alive.set()
-        self.thread.start()
 
-        self.online_update_thread = threading.Thread(target=self._update_manager, daemon=True)
-        self.online_update_thread.start()
+        self.thread = threading.Thread(target=self.operating_system, name="backend-serial", daemon=True)
+        self.online_update_thread = threading.Thread(target=self._update_manager, name="backend-online-update", daemon=True)
+        self.keepalive_thread = threading.Thread(target=self._keepalive_manager, name="backend-keepalive", daemon=True)
 
-        self.keepalive_thread = threading.Thread(target=self._keepalive_manager, daemon=True)
-        self.keepalive_thread.start()
+        for worker in self._workers():
+            worker.start()
+
+        return self
+
+    def _workers(self):
+        """Returns the background threads that start() owns."""
+
+        return [worker for worker in (self.thread, self.online_update_thread, self.keepalive_thread) if worker is not None]
 
     # ------------------------------------------------------------------ # 
     #                     Connect / Disconnect Functions                 # 
@@ -651,11 +672,11 @@ class SerialBackend:
             except serial.SerialException as serial_fault:
                 log.warning(f"ERROR: Serial exception - {serial_fault}! Reconnecting...")
                 self.disconnect()
-                time.sleep(RETRY_DELAY)
+                self._stop_event.wait(RETRY_DELAY)
 
             except Exception as fault:
                 log.error(f"ERROR: Unexpected fault - {fault}! Reconnecting...")
-                time.sleep(0.5)
+                self._stop_event.wait(0.5)
 
     def _keepalive_manager(self):
         """Pings the board on a fixed cadence so its output failsafe stays satisfied.
@@ -667,7 +688,8 @@ class SerialBackend:
 
         while self.alive.is_set():
 
-            time.sleep(KEEPALIVE_INTERVAL_SEC)
+            if self._stop_event.wait(KEEPALIVE_INTERVAL_SEC):
+                break
 
             if self.offline or self.serial is None or not self.serial.is_open:
                 continue
@@ -683,7 +705,8 @@ class SerialBackend:
         
         while self.alive.is_set():
 
-            time.sleep(self.online_update_period)
+            if self._stop_event.wait(self.online_update_period):
+                break
 
             if not self.online_update_enabled or online_update is None:
                 continue
@@ -950,7 +973,13 @@ class SerialBackend:
         log.info("Backend thread disconnecting...")
 
         self.alive.clear()
+        self._stop_event.set()
         self.disconnect()
+
+        # Waits the workers out so a later start() cannot end up running two of each.
+        for worker in self._workers():
+            if worker is not threading.current_thread():
+                worker.join(timeout=5.0)
 
         log.info("Backend thread disconnected...")
 
@@ -1270,6 +1299,13 @@ status = OFFLINE
 Back_End_Controller = SerialBackend(status = status)
 Data_Reciever = Back_End_Controller
 
+
+def start_backend():
+    """Starts the shared backend. Entry points call this - importing the module never does."""
+
+    return Back_End_Controller.start()
+
+
 get_data = Back_End_Controller.get_data
 get_training_data = Back_End_Controller.get_training_data
 send_command = Back_End_Controller.send_command
@@ -1452,6 +1488,7 @@ stop_training_sweep = getattr(Back_End_Controller, "stop_training_sweep", None)
 if __name__ == "__main__":
 
     log.info("Starting backend in standalone mode...")
+    start_backend()
 
     try:
         while True:

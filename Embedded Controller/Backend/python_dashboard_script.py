@@ -33,6 +33,7 @@ except Exception as fault:
 from python_Backend import (
     get_ml_metrics,
     Back_End_Controller,
+    start_backend,
     start_training_sweep,
     get_sweep_status,
     stop_training_sweep,
@@ -2314,6 +2315,8 @@ if __name__ == "__main__":
         log.info(f"Dashboard authentication enabled for user '{DASHBOARD_USER}'...")
     else:
         log.info("Dashboard bound to loopback only, no authentication required...")
+
+    start_backend()
 
     log.info("Launching ESP-12F Control Dashboard...")
     app.run(debug=False, host=DASHBOARD_HOST, port=DASHBOARD_PORT)

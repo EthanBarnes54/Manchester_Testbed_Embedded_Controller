@@ -12,7 +12,7 @@ import time
 import pandas as pd
 import logging
 import matplotlib.pyplot as plt
-from python_Backend import lines
+from python_Backend import lines, start_backend
 
 # -------------------------------------------------------------------------
 #                           Logging configuration
@@ -56,6 +56,8 @@ if ENABLE_PLOT:
 # -------------------------------------------------------------------------
 #                           Main logging loop
 # -------------------------------------------------------------------------
+
+start_backend()
 
 try:
     log.info("=" * 60)
