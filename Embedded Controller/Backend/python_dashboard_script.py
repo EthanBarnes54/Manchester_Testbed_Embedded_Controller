@@ -343,13 +343,16 @@ def _control_tab():
                             html.Div(
                                 [
                                     html.Label("Switch Time (us)"),
+                                    # Starts empty so editing a voltage never starts the switch
+                                    # line on its own - it only runs once a period is entered.
                                     dcc.Input(
                                         id="switch-time-us",
                                         type="number",
-                                        min=1,
-                                        max=20,
+                                        min=SWITCH_PERIOD_MIN_US,
+                                        max=SWITCH_PERIOD_MAX_US,
                                         step=1,
-                                        value=5,
+                                        value=None,
+                                        placeholder=f"{SWITCH_PERIOD_MIN_US}-{SWITCH_PERIOD_MAX_US}",
                                         debounce=False,
                                         style={"width": "120px"},
                                     ),
@@ -1029,12 +1032,31 @@ def _update_plot_window_config(_apply_clicks, range_mode, window_seconds, window
     Input("online-learning-rate", "value"),
     Input("online-momentum", "value"),
     Input("optimiser-type", "value"),
+    prevent_initial_call=True,
 )
 
 def _configure_online_updates(window_seconds, learning_rate, momentum_value, optimiser_type):
-    """Applies online-update settings and return the relevant status message."""
+    """Applies whichever online-update setting the operator changed and returns a status message.
+
+    Only the field that fired is applied. Momentum and optimiser changes rebuild the
+    optimiser and discard its state, so re-sending all four on every edit or page load
+    would reset training each time, and a newly opened tab would push its stale
+    defaults over settings made from another one."""
 
     errors = []
+    changed = ctx.triggered_id
+
+    if changed != "online-window-seconds":
+        window_seconds = None
+
+    if changed != "online-learning-rate":
+        learning_rate = None
+
+    if changed != "online-momentum":
+        momentum_value = None
+
+    if changed != "optimiser-type":
+        optimiser_type = None
 
     if window_seconds is not None and callable(set_window_update_time):
         try:
@@ -1052,9 +1074,9 @@ def _configure_online_updates(window_seconds, learning_rate, momentum_value, opt
             log.error(f"ERROR: Unable to set the model's learning rate - {fault}!") 
             errors.append(f"ERROR: Unable to set the model's learning rate - {fault}!")
             
-    if momentum_value is not None and hasattr(Back_End_Controller, "set_online_momentum"):
+    if momentum_value is not None:
         try:
-            Back_End_Controller.set_online_momentum(momentum_value)
+            Back_End_Controller.set_model_momentum(momentum_value)
 
         except Exception as fault:
             log.error(f"ERROR: Unbale to set the model's learning momentum  - {fault}!")
