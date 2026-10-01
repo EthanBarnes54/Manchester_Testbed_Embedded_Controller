@@ -1,0 +1,22 @@
+# Runtime dependencies for the backend, dashboard and RNN controller.
+#
+# Python 3.12 is required - torch has no wheels for 3.14, which is why the stack
+# breaks on a newer interpreter. Pins are exact: they are the versions the stack
+# was last verified against, so change them only alongside a rerun of the tests.
+#
+#   py -3.12 -m venv .venv
+#   .venv\Scripts\activate
+#   pip install -r requirements.txt
+#
+# On Linux, PyPI's torch pulls in the full CUDA stack. For a CPU-only install add
+#   --extra-index-url https://download.pytorch.org/whl/cpu
+
+dash==3.3.0
+Flask==3.1.2
+plotly==6.5.0
+pandas==2.3.3
+numpy==2.3.5
+pyserial==3.5
+torch==2.9.1
+scikit-learn==1.7.2
+matplotlib==3.10.7

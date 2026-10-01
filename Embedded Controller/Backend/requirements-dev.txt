@@ -1,0 +1,4 @@
+# Everything needed to run the test suite, on top of the runtime stack.
+-r requirements.txt
+
+pytest==9.1.1
