@@ -1,11 +1,15 @@
-*.json
 *.checksum
 *.dat
+
+# OS and editor cruft
+.DS_Store
 
 # Build output
 .pio/
 __pycache__/
 *.pyc
+.venv/
+.pytest_cache/
 
 # Local run artefacts - model checkpoints, logged datasets and sweep captures
 *.pt
