@@ -42,6 +42,14 @@ constexpr int MAX_MODULATION_VALUE = (1 << MODULATION_RESOLUTION) - 1;
 constexpr int LED_CONTROL_CHANNELS[CONTROLLED_PULSE_CHANNELS] = {0, 1, 2, 3, 4};
 
 constexpr unsigned long MEASUREMENT_INTERVAL_MS = 50;
+
+// +/-4.096 V is the tightest ADS1115 range that still covers the 0-3.3 V diode signal,
+// giving 125 uV per count against 187.5 uV at the library's +/-6.144 V default.
+constexpr adsGain_t ADC_GAIN = GAIN_ONE;
+
+// Printed resolution has to sit below one ADC count or the serial link throws the
+// precision away. String(float) defaults to 2 places, which is 10 mV.
+constexpr unsigned int MEASURED_DECIMAL_PLACES = 5;
 constexpr unsigned long HEARTBEAT_INTERVAL_MS = 2000;
 constexpr int COMMAND_BUFFER_LIMIT = 256;
 
@@ -311,6 +319,7 @@ class MeasurementService {
   explicit MeasurementService(Adafruit_ADS1115& adc) : adc_(adc) {}
 
   bool begin() {
+    adc_.setGain(ADC_GAIN);
     return adc_.begin();
   }
 
@@ -319,13 +328,18 @@ class MeasurementService {
     return adc_.computeVolts(raw_voltage);
   }
 
+  // Single formatter for every MEASURED line, so the streamed and on-demand readings
+  // always carry the same precision.
+  void report_voltage(float volts) {
+    Serial.println(String("MEASURED ") + String(volts, MEASURED_DECIMAL_PLACES) + " V");
+  }
+
   void maybe_sample(unsigned long now_ms) {
     if (now_ms - last_measurement_ms_ < MEASUREMENT_INTERVAL_MS) {
       return;
     }
 
-    const float measured_voltage = read_voltage();
-    Serial.println(String("MEASURED ") + measured_voltage + " V");
+    report_voltage(read_voltage());
     last_measurement_ms_ = now_ms;
   }
 
@@ -585,8 +599,7 @@ class CommandProcessor {
     if (command.equalsIgnoreCase("PING")) {
       Serial.println("OK");
     } else if (command.equalsIgnoreCase("READ")) {
-      const float live_voltage = measurement_.read_voltage();
-      Serial.println(String("MEASURED ") + live_voltage + " V");
+      measurement_.report_voltage(measurement_.read_voltage());
       leds_.blink_once(80);
     } else if (command.equalsIgnoreCase("GET PINS") || command.equalsIgnoreCase("PINS")) {
       channels_.report_channels();
