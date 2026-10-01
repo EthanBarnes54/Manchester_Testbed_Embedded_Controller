@@ -1831,10 +1831,10 @@ def handle_training_sweep(
             started = start_training_sweep(
                 min_voltage=min_sweep_voltage,
                 max_voltage=max_sweep_voltage,
-                step=sweep_step,
+                voltage_step_size=sweep_step,
                 step_linger_time=dwell_seconds,
                 epochs=epochs_value,
-                baseline_levels=baseline_count,
+                reference_voltages=baseline_count,
                 factorial_levels=factorial_count,
                 random_samples=random_sample_override,
             )
