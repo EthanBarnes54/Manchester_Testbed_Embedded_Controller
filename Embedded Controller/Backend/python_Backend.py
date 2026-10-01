@@ -42,6 +42,7 @@ try:
         model,
         scaler,
         compute_feature_saliencies,
+        propose_control_vector,
     )
 
 except Exception:
@@ -76,6 +77,8 @@ except Exception:
 
     def compute_feature_saliencies(_df, max_samples=200):
         raise RuntimeError("ERROR: Feature saliencies unavailable! (RNN controller import failed...)")
+
+    propose_control_vector = None
 
 
 # ------------------------------------------------------------------------- # 
@@ -114,6 +117,18 @@ SWITCH_PERIOD_MAX_US = 2000000
 KEEPALIVE_INTERVAL_SEC = 2.0
 
 ONLINE_UPDATE_INTERVAL_SEC = 5.0
+
+# Auto control runs on its own backend thread rather than in a dashboard callback, so
+# it keeps its own cadence, carries on with no browser open, and has a single writer
+# however many tabs are watching.
+AUTO_CONTROL_MIN_PERIOD_MS = 100
+AUTO_CONTROL_MAX_PERIOD_MS = 60000
+AUTO_CONTROL_DEFAULT_PERIOD_MS = 500
+AUTO_CONTROL_DEFAULT_CHANGE_PENALTY = 0.1
+
+# Proposals are only made from fresh hardware readings. If the board goes quiet the
+# controller stops steering rather than acting on a picture of the beam that is stale.
+AUTO_CONTROL_MAX_SAMPLE_AGE_SEC = 2.0
 DEFAULT_UPDATE_WINDOW = 30.0
 UPDATE_WINDOW_TIME = 5.0
 ONLINE_WINDOW_MAX_SEC = 600.0
@@ -206,9 +221,15 @@ class SerialBackend:
         self.online_update_period = ONLINE_UPDATE_INTERVAL_SEC
         self.online_update_enabled = True
 
+        self.auto_control_enabled = False
+        self.auto_control_period_ms = AUTO_CONTROL_DEFAULT_PERIOD_MS
+        self.auto_control_change_penalty = AUTO_CONTROL_DEFAULT_CHANGE_PENALTY
+        self.auto_control_status = {"state": "off", "message": "", "last_update": None}
+
         self.thread = None
         self.online_update_thread = None
         self.keepalive_thread = None
+        self.auto_control_thread = None
 
     def start(self):
         """Opens the link and starts the reader, online update and keepalive threads.
@@ -226,6 +247,7 @@ class SerialBackend:
         self.thread = threading.Thread(target=self.operating_system, name="backend-serial", daemon=True)
         self.online_update_thread = threading.Thread(target=self._update_manager, name="backend-online-update", daemon=True)
         self.keepalive_thread = threading.Thread(target=self._keepalive_manager, name="backend-keepalive", daemon=True)
+        self.auto_control_thread = threading.Thread(target=self._auto_control_manager, name="backend-auto-control", daemon=True)
 
         for worker in self._workers():
             worker.start()
@@ -235,7 +257,8 @@ class SerialBackend:
     def _workers(self):
         """Returns the background threads that start() owns."""
 
-        return [worker for worker in (self.thread, self.online_update_thread, self.keepalive_thread) if worker is not None]
+        workers = (self.thread, self.online_update_thread, self.keepalive_thread, self.auto_control_thread)
+        return [worker for worker in workers if worker is not None]
 
     # ------------------------------------------------------------------ # 
     #                     Connect / Disconnect Functions                 # 
@@ -699,6 +722,126 @@ class SerialBackend:
 
             except Exception as fault:
                 log.warning(f"WARNING: Keepalive ping failed - {fault}!")
+
+    # ------------------------------------------------------------------ #
+    #                           Auto control                             #
+    # ------------------------------------------------------------------ #
+
+    def set_auto_control(self, enabled: bool | None = None, period_ms: float | None = None, change_penalty: float | None = None) -> dict:
+        """Changes any of the auto control settings and returns the resulting configuration."""
+
+        if period_ms is not None:
+            try:
+                period_value = float(period_ms)
+
+            except Exception as fault:
+                raise ValueError(f"ERROR: Invalid auto control period '{period_ms}' - {fault}!")
+
+            self.auto_control_period_ms = max(AUTO_CONTROL_MIN_PERIOD_MS, min(AUTO_CONTROL_MAX_PERIOD_MS, period_value))
+
+        if change_penalty is not None:
+            try:
+                penalty_value = float(change_penalty)
+
+            except Exception as fault:
+                raise ValueError(f"ERROR: Invalid change penalty '{change_penalty}' - {fault}!")
+
+            self.auto_control_change_penalty = max(0.0, penalty_value)
+
+        if enabled is not None and bool(enabled) != self.auto_control_enabled:
+            self.auto_control_enabled = bool(enabled)
+            self._set_auto_control_status("starting" if self.auto_control_enabled else "off")
+            log.info(f"Auto control {'enabled' if self.auto_control_enabled else 'disabled'}...")
+
+        return self.get_auto_control()
+
+    def get_auto_control(self) -> dict:
+        """Returns the auto control settings alongside what the controller is currently doing."""
+
+        return {
+            "enabled": bool(self.auto_control_enabled),
+            "period_ms": float(self.auto_control_period_ms),
+            "change_penalty": float(self.auto_control_change_penalty),
+            **dict(self.auto_control_status),
+        }
+
+    def _set_auto_control_status(self, state: str, message: str = ""):
+        """Records what the controller is doing, logging only on a change so a 10 Hz loop cannot flood the log."""
+
+        previous = self.auto_control_status
+
+        if message and (previous.get("state") != state or previous.get("message") != message):
+            log.info(f"Auto control {state}: {message}")
+
+        self.auto_control_status = {"state": state, "message": message, "last_update": previous.get("last_update")}
+
+    def _auto_control_step(self) -> bool:
+        """Makes one control decision. Returns True when new targets were sent to the board."""
+
+        if not self.auto_control_enabled:
+            self._set_auto_control_status("off")
+            return False
+
+        if propose_control_vector is None:
+            self._set_auto_control_status("unavailable", "RNN controller import failed")
+            return False
+
+        if str(self.sweep_status.get("state", "")).lower() == "running":
+            self._set_auto_control_status("paused", "Training sweep in progress")
+            return False
+
+        data_frame = self.get_training_data()
+
+        if data_frame.empty:
+            self._set_auto_control_status("waiting", "No readings from the board yet")
+            return False
+
+        sample_age = time.time() - float(data_frame["timestamp"].iloc[-1])
+
+        if sample_age > AUTO_CONTROL_MAX_SAMPLE_AGE_SEC:
+            self._set_auto_control_status("waiting", f"Newest reading is {sample_age:.1f} s old")
+            return False
+
+        try:
+            # TODO: Replace manual change-penalty tuning with Bayesian optimisation.
+            targets = propose_control_vector(data_frame, change_penalty=self.auto_control_change_penalty)
+
+        except Exception as fault:
+            self._set_auto_control_status("waiting", f"No proposal - {fault}")
+            return False
+
+        self.set_pin_voltages(targets)
+
+        self._set_auto_control_status("running")
+        self.auto_control_status["last_update"] = time.time()
+
+        return True
+
+    def _auto_control_manager(self):
+        """Background loop that runs auto control at its configured cadence."""
+
+        # Scheduled against a deadline so the time a proposal takes comes out of the
+        # period rather than being added on top of it.
+        next_due = time.monotonic()
+
+        while self.alive.is_set():
+
+            next_due += self.auto_control_period_ms / 1000.0
+            now = time.monotonic()
+
+            # A step that overran its slot restarts the schedule from now instead of
+            # firing a burst of back-to-back steps to catch up.
+            if next_due < now:
+                next_due = now
+
+            if self._stop_event.wait(next_due - now):
+                break
+
+            try:
+                self._auto_control_step()
+
+            except Exception as fault:
+                self._set_auto_control_status("error", str(fault))
 
     def _update_manager(self):
         """Background loop for periodic online model updates."""
@@ -1322,6 +1465,8 @@ set_online_learning_rate = getattr(Back_End_Controller, "set_online_learning_rat
 set_optimiser_type = getattr(Back_End_Controller, "set_optimiser_type", None)
 get_online_update_config = getattr(Back_End_Controller, "get_online_update_config", None)
 set_buffer_samples = getattr(Back_End_Controller, "set_buffer_samples", None)
+set_auto_control = Back_End_Controller.set_auto_control
+get_auto_control = Back_End_Controller.get_auto_control
 get_buffer_samples = getattr(Back_End_Controller, "get_buffer_samples", None)
 
 lines = Back_End_Controller.lines

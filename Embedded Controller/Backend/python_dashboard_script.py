@@ -18,17 +18,10 @@ import pkgutil, importlib.util
 import numpy as np
 import hmac
 import logging
-import time
 import os
 import threading
 
 log = logging.getLogger("Dashboard")
-
-try:
-    from python_RNN_Controller import propose_control_vector
-except Exception as fault:
-    log.warning(f"WARNING: Unable to contact the RNN - {fault}!")
-    propose_control_vector = None
 
 from python_Backend import (
     get_ml_metrics,
@@ -43,6 +36,10 @@ from python_Backend import (
     set_optimiser_type,
     set_buffer_samples,
     get_buffer_samples,
+    set_auto_control,
+    get_auto_control,
+    AUTO_CONTROL_MIN_PERIOD_MS,
+    AUTO_CONTROL_MAX_PERIOD_MS,
     DATA_BUFFER_MIN_SAMPLES,
     DATA_BUFFER_MAX_SAMPLES,
     SWITCH_PERIOD_MIN_US,
@@ -61,12 +58,6 @@ if not hasattr(pkgutil, "find_loader"):
 # -------------------------------------------------------------------------
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S",)
-
-try:
-    MODEL_INFO_BOOTSTRAP = get_model_info()
-except Exception as fault:
-    log.warning(f"WARNING: Unable to obtain model history - {fault}!")
-    MODEL_INFO_BOOTSTRAP = {}
 
 # -------------------------------------------------------------------------
 #                                 Initialize app
@@ -123,7 +114,6 @@ def _require_dashboard_credentials():
     )
 
 
-LAST_AUTO_TS = 0.0
 PLOT_HISTORY_LOCK = threading.Lock()
 PLOT_HISTORY = pd.DataFrame(columns=["timestamp", "voltage"])
 # -------------------------------------------------------------------------
@@ -140,6 +130,8 @@ def _control_tab():
             
     except Exception as fault:
         log.warning(f"WARNING: Unable to read buffer sample size - {fault}!")
+
+    auto_config = get_auto_control()
 
     return html.Div(
         children=[
@@ -665,6 +657,7 @@ def _control_tab():
                                                     "cursor": "pointer",
                                                 },
                                             ),
+                                            html.Div(id="auto-mode-status", style={"fontSize": "0.85em", "color": "#555", "marginTop": "0.25em"}),
                                         ]
                                     ),
 
@@ -714,8 +707,11 @@ def _control_tab():
                                             dcc.Input(
                                                 id="auto-rate-ms",
                                                 type="number",
-                                                value=500,
+                                                value=auto_config["period_ms"],
+                                                min=AUTO_CONTROL_MIN_PERIOD_MS,
+                                                max=AUTO_CONTROL_MAX_PERIOD_MS,
                                                 step=25,
+                                                debounce=True,
                                                 style={"width": "120px"},
                                             ),
                                         ]
@@ -727,9 +723,10 @@ def _control_tab():
                                             dcc.Input(
                                                 id="auto-change-penalty",
                                                 type="number",
-                                                value=0.1,
+                                                value=auto_config["change_penalty"],
                                                 min=0.0,
                                                 step=0.01,
+                                                debounce=True,
                                                 style={"width": "120px"},
                                             ),
                                         ]
@@ -749,22 +746,29 @@ def _control_tab():
 def _ml_tab():
     """Builds the ML metrics tab layout."""
 
-    window_default = MODEL_INFO_BOOTSTRAP.get("online_window_seconds")
+    try:
+        model_info = get_model_info()
+
+    except Exception as fault:
+        log.warning(f"WARNING: Unable to obtain model history - {fault}!")
+        model_info = {}
+
+    window_default = model_info.get("online_window_seconds")
 
     if window_default is None:
         window_default = 30.0
 
-    lr_default = MODEL_INFO_BOOTSTRAP.get("learning_rate")
+    lr_default = model_info.get("learning_rate")
 
     if lr_default is None:
         lr_default = 1e-3
 
-    momentum_default = MODEL_INFO_BOOTSTRAP.get("momentum")
+    momentum_default = model_info.get("momentum")
 
     if momentum_default is None:
         momentum_default = 0.9
 
-    optimiser_default = MODEL_INFO_BOOTSTRAP.get("optimiser_type")
+    optimiser_default = model_info.get("optimiser_type")
 
     if optimiser_default is None:
         optimiser_default = "adam"
@@ -952,26 +956,32 @@ def _rig_tab():
     )
 
 
-app.layout = html.Div(
-    style={"fontFamily": "Segoe UI, sans-serif", "padding": "2em"},
-    children=[
-        dcc.Store(id="auto-mode", data=False),
-        dcc.Store(
-            id="plot-window-config",
-            data={"mode": "all", "seconds": 30, "samples": 500, "priority": "seconds"},
-        ),
-        dcc.Tabs(
-            id="tabs",
-            value="control",
-            children=[
-                dcc.Tab(label="Board Controls", value="control", children=[_control_tab()]),
-                dcc.Tab(label="NN Auto Controller", value="ml", children=[_ml_tab()]),
-                dcc.Tab(label="Rig Controls", value="rig", children=[_rig_tab()]),
-            ],
-        ),
-        dcc.Interval(id="update-interval", interval=1000, n_intervals=0),
-    ],
-)
+def _serve_layout():
+    """Builds the page afresh for every load, so a newly opened tab shows the backend's
+    current settings rather than the ones in force when the server started."""
+
+    return html.Div(
+        style={"fontFamily": "Segoe UI, sans-serif", "padding": "2em"},
+        children=[
+            dcc.Store(
+                id="plot-window-config",
+                data={"mode": "all", "seconds": 30, "samples": 500, "priority": "seconds"},
+            ),
+            dcc.Tabs(
+                id="tabs",
+                value="control",
+                children=[
+                    dcc.Tab(label="Board Controls", value="control", children=[_control_tab()]),
+                    dcc.Tab(label="NN Auto Controller", value="ml", children=[_ml_tab()]),
+                    dcc.Tab(label="Rig Controls", value="rig", children=[_rig_tab()]),
+                ],
+            ),
+            dcc.Interval(id="update-interval", interval=1000, n_intervals=0),
+        ],
+    )
+
+
+app.layout = _serve_layout
 
 
 @app.callback(
@@ -1122,15 +1132,12 @@ def _manual_save_model(user_input):
     Output("latest-voltage", "children"),
     Output("num-points", "children"),
     Input("update-interval", "n_intervals"),
-    State("auto-mode", "data"),
-    State("auto-rate-ms", "value"),
-    State("auto-change-penalty", "value"),
     State("plot-window-config", "data"),
 )
 
 
-def update_graph(_, auto_mode_enabled, auto_rate_ms, auto_change_penalty, plot_window_config):
-    """Updates the live plot and optionally issue auto-control updates."""
+def update_graph(_, plot_window_config):
+    """Updates the live plot. Auto control runs in the backend, not here."""
 
     global PLOT_HISTORY
 
@@ -1209,49 +1216,22 @@ def update_graph(_, auto_mode_enabled, auto_rate_ms, auto_change_penalty, plot_w
         recent_voltage_measurement = f"Voltage: {plot_source['voltage'].iloc[-1]:.3f} V"
     number_of_points = f"Samples: {len(data_frame)}"
 
-    try:
-        auto_on = bool(auto_mode_enabled)
-        rate_ms = 500 if auto_rate_ms is None else max(100, int(auto_rate_ms))
-        change_penalty = 0.1 if auto_change_penalty is None else max(0.0, float(auto_change_penalty))
-
-    except Exception as fault:
-        log.error(f"ERROR: Recieving invalid auto control parameters - {fault}!")
-        auto_on, rate_ms, change_penalty = False, 500, 0.1
-        
-    try:
-        st = get_sweep_status()
-        if isinstance(st, dict) and str(st.get("state", "")).lower() == "running":
-            auto_on = False
-
-    except Exception as fault:
-        log.error(f"ERROR: Unable to determine sweep status - {fault}!")
-        pass
-
-    if auto_on and propose_control_vector is not None:
-        try:
-            global LAST_AUTO_TS
-            now = time.time()
-            if now - LAST_AUTO_TS >= (rate_ms / 1000.0):
-                # TODO: Replace manual change-penalty tuning with Bayesian optimisation.
-                targets = propose_control_vector(data_frame, change_penalty=change_penalty)
-                Back_End_Controller.set_pin_voltages(targets)
-                LAST_AUTO_TS = now
-
-        except Exception as fault:
-            log.error(f"ERROR: Auto control update failed - {fault}!")
-
     return figure, recent_voltage_measurement, number_of_points
 
 
 @app.callback(
-    Output("auto-mode", "data"),
     Output("auto-mode-button", "children"),
     Output("auto-mode-button", "style"),
+    Output("auto-mode-status", "children"),
     Input("auto-mode-button", "n_clicks"),
+    Input("update-interval", "n_intervals"),
 )
 
-def _toggle_auto_mode(User_Input):
-    """Toggle auto-control mode and updates the toggle (button) state."""
+def _toggle_auto_mode(User_Input, _):
+    """Toggles auto control in the backend on a click, and otherwise mirrors its state.
+
+    The button reflects what the backend is doing rather than counting its own clicks,
+    so every open tab agrees and a reloaded page cannot show OFF while control runs."""
 
     base_style = {
         "minWidth": "130px",
@@ -1263,19 +1243,48 @@ def _toggle_auto_mode(User_Input):
         "cursor": "pointer",
     }
 
-    try:
-        Input = 0 if User_Input is None else int(User_Input)
+    if ctx.triggered_id == "auto-mode-button" and User_Input:
+        try:
+            set_auto_control(enabled=not get_auto_control()["enabled"])
 
-    except Exception as fault:
-        log.error(f"ERROR: Invalid user toggle input - {fault}!")
-        Input = 0
+        except Exception as fault:
+            log.error(f"ERROR: Unable to toggle auto control - {fault}!")
 
-    if Input % 2 == 1:
+    auto_state = get_auto_control()
+    detail = auto_state.get("message") or ""
+
+    if auto_state["enabled"]:
         style = {**base_style, "background": "#2ecc71", "boxShadow": "0 0 4px rgba(46,204,113,0.6)"}
-        return True, "Auto Control: ON", style
+        return "Auto Control: ON", style, f"{auto_state['state'].capitalize()}" + (f" - {detail}" if detail else "")
 
     style = {**base_style, "background": "#e74c3c", "boxShadow": "0 0 4px rgba(231,76,60,0.6)"}
-    return False, "Auto Control: OFF", style
+    return "Auto Control: OFF", style, ""
+
+
+@app.callback(
+    Output("auto-rate-ms", "style"),
+    Input("auto-rate-ms", "value"),
+    Input("auto-change-penalty", "value"),
+    prevent_initial_call=True,
+)
+
+def _configure_auto_control(period_ms, change_penalty):
+    """Pushes an edited auto control period or change penalty to the backend."""
+
+    base_style = {"width": "120px"}
+
+    try:
+        if ctx.triggered_id == "auto-rate-ms" and period_ms is not None:
+            set_auto_control(period_ms=period_ms)
+
+        elif ctx.triggered_id == "auto-change-penalty" and change_penalty is not None:
+            set_auto_control(change_penalty=change_penalty)
+
+    except Exception as fault:
+        log.error(f"ERROR: Unable to update auto control settings - {fault}!")
+        return {**base_style, "border": "2px solid #e74c3c"}
+
+    return base_style
 
 
 @app.callback(
