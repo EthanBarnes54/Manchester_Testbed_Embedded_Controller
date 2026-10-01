@@ -88,7 +88,9 @@ log = logging.getLogger("ESP32_Backend")
 #                             Configuration
 # -------------------------------------------------------------------------
 
-SERIAL_PORT = "COM4"  # Adjust for OTA
+# Same variable platformio.ini reads for upload_port, so one setting covers flashing
+# and running. COM4 is only the fallback for the original lab machine.
+SERIAL_PORT = os.getenv("TESTBED_SERIAL_PORT", "").strip() or "COM4"
 BAUD_RATE = 115200
 RETRY_DELAY = 3.0
 MAX_QUEUE_SIZE = 2000
