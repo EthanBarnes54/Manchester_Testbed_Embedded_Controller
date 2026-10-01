@@ -151,6 +151,17 @@ def test_opening_a_tab_does_not_switch_dataset_saving_off(client, shared_backend
     assert not shared_backend.save_dataset_enabled
 
 
+def test_a_failed_shap_run_tells_the_operator_why(client, monkeypatch):
+    def fail(**kwargs):
+        raise RuntimeError("Scaler not fitted. Train the model first...")
+
+    monkeypatch.setattr(dashboard, "compute_feature_importance", fail)
+    outputs = [("compute-shap-button", "children"), ("compute-shap-button", "style"), ("shap-status", "children"), ("ml-shap-bar", "figure")]
+    reply = fire(client, outputs, [("compute-shap-button", "n_clicks", 1)], "compute-shap-button.n_clicks", state=[("shap-permutations", "value", 5)])
+
+    assert "Scaler not fitted" in reply["shap-status"]["children"]
+
+
 # ----------------------------------------------------------------------------
 #                               Auto control
 # ----------------------------------------------------------------------------

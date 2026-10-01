@@ -1400,7 +1400,10 @@ def _compute_shap_on_demand(User_Input, shap_permutations):
         return "Compute SHAP Values", base_button_style, f"SHAP computed ({len(importance_values)} features)", fig
     
     except Exception as fault:
-        return "Compute SHAP Values", base_button_style, log.error(f"ERROR: Unable to compute SHAP values - {fault}!"), go.Figure()
+        # log.error returns None, so the message has to be built separately to reach the panel.
+        message = f"ERROR: Unable to compute SHAP values - {fault}!"
+        log.error(message)
+        return "Compute SHAP Values", base_button_style, message, go.Figure()
 
 
 app.clientside_callback(
