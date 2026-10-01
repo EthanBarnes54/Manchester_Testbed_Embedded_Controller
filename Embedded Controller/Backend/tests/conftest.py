@@ -74,3 +74,4 @@ def shared_backend(backend_module, monkeypatch):
         change_penalty=backend_module.AUTO_CONTROL_DEFAULT_CHANGE_PENALTY,
     )
     backend.sweep_status = {"state": "idle", "progress": 0.0, "message": ""}
+    backend.set_save_dataset_enabled(False)

@@ -29,7 +29,7 @@ def fire(client, outputs, inputs, changed, state=()):
     payload = {
         "output": output,
         "outputs": output_spec,
-        "changedPropIds": [changed],
+        "changedPropIds": [changed] if changed else [],  # a page load triggers nothing
         "inputs": [{"id": component, "property": prop, "value": value} for component, prop, value in inputs],
         "state": [{"id": component, "property": prop, "value": value} for component, prop, value in state],
     }
@@ -134,6 +134,21 @@ def test_the_sweep_button_reaches_the_sweep_worker(client, shared_backend, monke
     shared_backend.sweep_thread.join(timeout=5)
 
     assert received == [(0.5, 2.5, 0.25, 0.01, 3, 2, 2, 4)]
+
+
+def test_opening_a_tab_does_not_switch_dataset_saving_off(client, shared_backend):
+    outputs = [("save-dataset-button", "children"), ("save-dataset-button", "style")]
+
+    def press(n_clicks, changed):
+        inputs = [("save-dataset-button", "n_clicks", n_clicks), ("update-interval", "n_intervals", 0)]
+        return fire(client, outputs, inputs, changed)["save-dataset-button"]["children"]
+
+    assert press(1, "save-dataset-button.n_clicks") == "Save After Sweep: ON"
+    assert press(0, None) == "Save After Sweep: ON"  # the initial call a newly opened tab makes
+    assert shared_backend.save_dataset_enabled
+
+    assert press(2, "save-dataset-button.n_clicks") == "Save After Sweep: OFF"
+    assert not shared_backend.save_dataset_enabled
 
 
 # ----------------------------------------------------------------------------

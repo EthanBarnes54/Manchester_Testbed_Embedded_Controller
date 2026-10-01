@@ -1297,10 +1297,15 @@ def _configure_auto_control(period_ms, change_penalty):
     Output("save-dataset-button", "children"),
     Output("save-dataset-button", "style"),
     Input("save-dataset-button", "n_clicks"),
+    Input("update-interval", "n_intervals"),
 )
 
-def _toggle_save_dataset(User_Input):
-    """Toggles automatic dataset saving and update the toggle (button) state."""
+def _toggle_save_dataset(User_Input, _):
+    """Toggles dataset saving in the backend on a click, and otherwise mirrors its state.
+
+    Counting this tab's own clicks meant the call every page load makes, with zero
+    clicks, switched saving off for every tab - a sweep could then go unsaved while
+    another tab still showed ON."""
 
     base_style = {
         "minWidth": "150px",
@@ -1312,21 +1317,14 @@ def _toggle_save_dataset(User_Input):
         "cursor": "pointer",
     }
 
-    try:
-        Input = 0 if User_Input is None else int(User_Input)
+    if ctx.triggered_id == "save-dataset-button" and User_Input:
+        try:
+            Back_End_Controller.set_save_dataset_enabled(not Back_End_Controller.save_dataset_enabled)
 
-    except Exception as fault:
-        log.error(f"ERROR: Invalid user toggle input - {fault}!")
-        Input = 0
+        except Exception as fault:
+            log.error(f"ERROR: Unable to set save dataset flag - {fault}!")
 
-    user_enabled = (Input % 2) == 1
-
-    try:
-        getattr(Back_End_Controller, "set_save_dataset_enabled", lambda _: None)(user_enabled)
-
-    except Exception as fault:
-        log.error(f"ERROR: Unable to set save dataset flag - {fault}!")
-        pass
+    user_enabled = bool(Back_End_Controller.save_dataset_enabled)
 
     if user_enabled:
         style = {**base_style, "background": "#2ecc71", "boxShadow": "0 0 4px rgba(46,204,113,0.6)"}
