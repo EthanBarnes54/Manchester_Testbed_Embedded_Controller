@@ -92,15 +92,26 @@ log = logging.getLogger("ESP32_Backend")
 #                             Configuration
 # -------------------------------------------------------------------------
 
-# Same variable platformio.ini reads for upload_port, so one setting covers flashing
-# and running. COM4 is only the fallback for the original lab machine.
-SERIAL_PORT = os.getenv("TESTBED_SERIAL_PORT", "").strip() or "COM4"
+def _configured_serial_port() -> str:
+    """Same variable platformio.ini reads for upload_port, so one setting covers flashing
+    and running. COM4 is only the fallback for the original lab machine."""
+
+    return os.getenv("TESTBED_SERIAL_PORT", "").strip() or "COM4"
+
+
+def _env_flag(name: str) -> bool:
+    """Reads an on/off environment variable. Case folded so that OFFLINE=FALSE cannot
+    quietly turn simulation on."""
+
+    return os.getenv(name, "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
+SERIAL_PORT = _configured_serial_port()
 BAUD_RATE = 115200
 RETRY_DELAY = 3.0
 MAX_QUEUE_SIZE = 2000
 
-# Case folded so that OFFLINE=FALSE cannot quietly turn simulation on.
-OFFLINE = os.getenv("OFFLINE", "").strip().lower() not in ("", "0", "false", "no", "off")
+OFFLINE = _env_flag("OFFLINE")
 
 # Alter once board design has been finalised 
 
