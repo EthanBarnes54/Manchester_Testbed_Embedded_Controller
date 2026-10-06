@@ -49,6 +49,13 @@ constexpr int LED_CONTROL_CHANNELS[CONTROLLED_PULSE_CHANNELS] = {0, 1, 2, 3, 4};
 
 constexpr unsigned long MEASUREMENT_INTERVAL_MS = 50;
 
+// At the library's default 128 SPS a conversion takes 1/128 s, 7.8 ms nominal, and the
+// ADS1115's oscillator is good to about 10%, so nothing is polled for before 7 ms.
+// One not finished after the timeout is treated as lost: the ADC is absent or has
+// dropped off the bus.
+constexpr unsigned long ADC_FIRST_POLL_MS = 7;
+constexpr unsigned long ADC_CONVERSION_TIMEOUT_MS = 40;
+
 // +/-4.096 V is the tightest ADS1115 range that still covers the 0-3.3 V diode signal,
 // giving 125 uV per count against 187.5 uV at the library's +/-6.144 V default.
 constexpr adsGain_t ADC_GAIN = GAIN_ONE;
@@ -523,29 +530,66 @@ class MeasurementService {
     return adc_.begin();
   }
 
-  float read_voltage() {
-    int16_t raw_voltage = adc_.readADC_SingleEnded(0);
-    return adc_.computeVolts(raw_voltage);
-  }
-
   // Single formatter for every MEASURED line, so the streamed and on-demand readings
   // always carry the same precision.
   void report_voltage(float volts) {
     Serial.println(String("MEASURED ") + String(volts, MEASURED_DECIMAL_PLACES) + " V");
   }
 
-  void maybe_sample(unsigned long now_ms) {
-    if (now_ms - last_measurement_ms_ < MEASUREMENT_INTERVAL_MS) {
+  // READ is answered by the next conversion to complete. One already in flight is never
+  // restarted, so a READ cannot corrupt it; with the ADC idle a conversion starts at once.
+  void request_reading() {
+    reading_requested_ = true;
+  }
+
+  // Starts a conversion when one is due and collects it once the ADC reports it done, so
+  // the loop never waits on one. The library's readADC_SingleEnded() polls until the ADC
+  // answers, and with the ADC missing or off the bus it never returns, which used to stop
+  // the loop and the failsafe with it.
+  void update(unsigned long now_ms) {
+    if (!converting_) {
+      if (reading_requested_ || now_ms - conversion_started_ms_ >= MEASUREMENT_INTERVAL_MS) {
+        adc_.startADCReading(MUX_BY_CHANNEL[0], /*continuous=*/false);
+        converting_ = true;
+        conversion_started_ms_ = now_ms;
+      }
+
       return;
     }
 
-    report_voltage(read_voltage());
-    last_measurement_ms_ = now_ms;
+    const unsigned long elapsed_ms = now_ms - conversion_started_ms_;
+
+    if (elapsed_ms < ADC_FIRST_POLL_MS) {
+      return;
+    }
+
+    if (adc_.conversionComplete()) {
+      converting_ = false;
+      reading_requested_ = false;
+      fault_reported_ = false;
+      report_voltage(adc_.computeVolts(adc_.getLastConversionResults()));
+      return;
+    }
+
+    if (elapsed_ms >= ADC_CONVERSION_TIMEOUT_MS) {
+      converting_ = false;
+
+      // Once per outage rather than at 20 Hz, but always in answer to a READ.
+      if (!fault_reported_ || reading_requested_) {
+        Serial.println("ERROR: ADC conversion timed out!");
+      }
+
+      reading_requested_ = false;
+      fault_reported_ = true;
+    }
   }
 
  private:
   Adafruit_ADS1115& adc_;
-  unsigned long last_measurement_ms_ = 0;
+  unsigned long conversion_started_ms_ = 0;
+  bool converting_ = false;
+  bool reading_requested_ = false;
+  bool fault_reported_ = false;
 };
 
 // Blinks are scheduled rather than slept through - update() plays them out from loop(),
@@ -844,7 +888,7 @@ class CommandProcessor {
     if (command.equalsIgnoreCase("PING")) {
       Serial.println("OK");
     } else if (command.equalsIgnoreCase("READ")) {
-      measurement_.report_voltage(measurement_.read_voltage());
+      measurement_.request_reading();
       leds_.blink_once(80);
     } else if (command.equalsIgnoreCase("GET PINS") || command.equalsIgnoreCase("PINS")) {
       channels_.report_channels();
@@ -971,7 +1015,7 @@ void loop() {
   command_processor.poll_serial();
 
   const unsigned long now_ms = millis();
-  measurement_service.maybe_sample(now_ms);
+  measurement_service.update(now_ms);
   led_indicator.heartbeat(now_ms);
   led_indicator.update(now_ms);
   ota_wifi_service.loop();
