@@ -171,6 +171,11 @@ The board is always in one of three modes, reported by `FAULTS` and shown on the
 - A loop that stops for 5 s resets the chip (the loop watchdog), which comes back up in FAULT with the reset recorded. OTA uploads are only accepted while SAFE.
 - On the dashboard, ARM asks for confirmation. Sweeps and auto control refuse to run unless the board is ARMED, and closing the backend cleanly sends DISARM.
 
+## Built-in test
+- Power-on self-test, repeated on demand by `SELFTEST`: checks the clocks the switch timing assumes (APB 80 MHz, REF_TICK = APB / 80), both switch generators, the ADC and memory. It answers `SELFTEST PASS|FAIL clocks=.. switch=.. adc=.. memory=..`. A clock or switch-generator failure is critical and leaves the board in FAULT.
+- Continuous self-test, every loop pass: each pass is timed against a 20 ms budget, the ADC is watched for timeouts, and heap and loop-task stack are checked against floors once a second. Each raises its fault (`LOOP_OVERRUN`, `ADC_LOST`, `LOW_MEMORY`); over-long command lines raise `SERIAL_OVERFLOW`.
+- `HEALTH` reports the worst loop pass since the last report and since boot, the budget, overruns, free and minimum heap, loop-task stack headroom, ADC conversions and timeouts, and serial overflows. The backend polls it every 2 s and the dashboard shows a summary. This is how "the checks do not slow the board down" is measured on the bench.
+
 ### Still to be decided before relying on 1 us
 - **What the gate output drives. NOT YET DECIDED.** It could be an on-board driver a few centimetres away, or a cable to the HV switch. This decides:
   - whether the gate can drive the load directly, or needs a gate driver or line driver after it;

@@ -431,9 +431,11 @@ def _control_tab():
                     ),
                     html.Button("DISARM", id="disarm-button", style={**SAFETY_BUTTON_STYLE, "background": "#c0392b"}),
                     html.Button("Clear faults", id="clear-faults-button", style={**SAFETY_BUTTON_STYLE, "background": "#7f8c8d"}),
+                    html.Button("Self-test", id="selftest-button", style={**SAFETY_BUTTON_STYLE, "background": "#2c3e50"}),
                     html.Div(id="safety-status", children="Board: --", style={"fontWeight": "bold"}),
                 ],
             ),
+            html.Div(id="health-status", children="Health: --", style={"marginTop": "0.35em", "color": "#555"}),
 
             html.Div(id="pin-status", style={"display": "flex", "flexWrap": "wrap", "gap": "0.5em 1em", "marginTop": "0.5em"}),
             html.Div(
@@ -1604,6 +1606,56 @@ def update_status(_):
 
 
 SAFETY_MODE_COLOURS = {"ARMED": "#e67e22", "SAFE": "#1e8449", "FAULT": "#c0392b"}
+
+
+def _number(fields: dict, key: str) -> float | None:
+    try:
+        return float(fields[key])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _health_summary(report: dict) -> str:
+    """One line from the board's HEALTH report and last self-test, for the operator."""
+
+    health, selftest = report.get("health") or {}, report.get("selftest")
+    parts = []
+
+    loop_max, loop_peak, budget = (_number(health, key) for key in ("loop_max_us", "loop_peak_us", "loop_budget_us"))
+    if loop_max is not None and budget is not None:
+        peak = f", peak {loop_peak / 1000:.1f}" if loop_peak is not None else ""
+        parts.append(f"Loop {loop_max / 1000:.1f} ms{peak} (budget {budget / 1000:.0f} ms)")
+
+    heap_free = _number(health, "heap_free")
+    if heap_free is not None:
+        parts.append(f"Heap {heap_free / 1024:.0f} kB")
+
+    if "adc" in health:
+        parts.append(f"ADC {health['adc']} ({health.get('adc_timeouts', '0')} timeouts)")
+
+    if selftest:
+        parts.append(f"Self-test {selftest.get('result', '?')}")
+
+    return "Health: " + (" | ".join(parts) if parts else "--")
+
+
+@app.callback(
+    Output("health-status", "children"),
+    Input("selftest-button", "n_clicks"),
+    Input("update-interval", "n_intervals"),
+)
+
+def _health_readout(selftest_clicks, _):
+    """Runs the board's self-test on a click, and otherwise shows its latest HEALTH report."""
+
+    if ctx.triggered_id == "selftest-button" and selftest_clicks:
+        try:
+            Back_End_Controller.run_selftest()
+
+        except Exception as fault:
+            log.error(f"ERROR: Self-test request failed - {fault}!")
+
+    return _health_summary(Back_End_Controller.get_board_health())
 
 
 @app.callback(

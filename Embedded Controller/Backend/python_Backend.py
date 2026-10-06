@@ -228,6 +228,8 @@ class SerialBackend:
         self.board_faults = {}
         self.last_board_fault = None
         self.last_arm_refusal = ""
+        self.board_health = {}
+        self.last_selftest = None
 
         self.sweep_thread = None
         self.sweep_status = {"state": "idle", "progress": 0.0, "message": ""}
@@ -763,6 +765,18 @@ class SerialBackend:
 
             log.warning(f"WARNING: Board reported {message}")
 
+        elif message.startswith("HEALTH "):
+            self.board_health = {"time": timestamp, **self._key_values(message)}
+            self.board_mode = self.board_health.get("mode", self.board_mode)
+
+        elif message.startswith("SELFTEST "):
+            tokens = message.split()
+            self.last_selftest = {"time": timestamp, "result": tokens[1] if len(tokens) > 1 else "",
+                                  "checks": self._key_values(message)}
+
+            if self.last_selftest["result"] != "PASS":
+                log.warning(f"WARNING: Board self-test failed - {message}")
+
         elif message.startswith("ERROR: Cannot arm"):
             self.last_arm_refusal = message
             log.warning(f"WARNING: {message}")
@@ -809,6 +823,16 @@ class SerialBackend:
     def request_faults(self):
         self.send_command("FAULTS")
 
+    def run_selftest(self):
+        """Asks the board to rerun its power-on self-test and report the result."""
+
+        self.send_command("SELFTEST")
+
+    def get_board_health(self) -> dict:
+        """The board's last HEALTH report and self-test result."""
+
+        return {"health": dict(self.board_health), "selftest": dict(self.last_selftest) if self.last_selftest else None}
+
     def get_board_safety(self) -> dict:
         """The board's mode and fault report as last received."""
 
@@ -838,9 +862,10 @@ class SerialBackend:
             try:
                 self.send_command("PING")
 
-                # Also keeps the board's mode and faults current for the dashboard and
-                # for the auto control and sweep checks.
+                # Also keeps the board's mode, faults and health current for the
+                # dashboard and for the auto control and sweep checks.
                 self.send_command("FAULTS")
+                self.send_command("HEALTH")
 
             except Exception as fault:
                 log.warning(f"WARNING: Keepalive ping failed - {fault}!")

@@ -234,7 +234,9 @@ def test_a_hung_loop_resets_the_chip_and_an_update_never_runs_while_armed():
 
 
 def test_the_heartbeat_is_driven_every_pass():
-    assert cpp_block("\nvoid loop()").strip().startswith("supervisor.heartbeat();")
+    # First thing each pass, after only the pass timer starts.
+    statements = [statement.strip() for statement in cpp_block("\nvoid loop()").split(";")]
+    assert statements[:2] == ["const unsigned long pass_started_us = micros()", "supervisor.heartbeat()"]
 
 
 def test_an_unexpected_reset_comes_up_in_fault():
@@ -365,3 +367,52 @@ def test_led_indicator_on_the_host(tmp_path):
 
     run = subprocess.run([str(binary)], capture_output=True, text=True)
     assert run.returncode == 0, run.stdout + run.stderr
+
+
+# ----------------------------------------------------------------------------
+#                               Built-in test
+# ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("command", ["SELFTEST", "HEALTH", "selftest"])
+def test_self_test_and_health_reach_their_own_handlers(command):
+    assert route(command) == command.upper()
+
+
+def test_the_power_on_self_test_runs_after_everything_it_checks_is_up():
+    setup = cpp_block("\nvoid setup()")
+    assert setup.index("measurement_service.begin()") < setup.index("channels.begin();") < setup.index("supervisor.begin();")
+    assert "self_test();" in cpp_block("  void begin() {\n    pinMode(HEARTBEAT_PIN")
+
+
+def test_the_self_test_checks_what_the_outputs_depend_on():
+    body = cpp_block("  void self_test()")
+    for check, fault in [("clocks_as_designed()", "ClockConfig"), ("switch_generators_ready()", "SwitchGenerator"),
+                         ("measurement_.lost()", "AdcLost"), ("memory_above_floor()", "LowMemory")]:
+        assert check in body and f"safety::Fault::{fault}" in body
+
+    clocks = cpp_block("static bool clocks_as_designed()")
+    assert "getApbFrequency() == APB_CLK_FREQ" in clocks
+    assert "APB_CTRL_PLL_TICK_NUM" in clocks and "SWITCH_LEDC_CLOCK_HZ" in clocks
+
+
+def test_every_loop_pass_is_timed_and_monitored():
+    loop = cpp_block("\nvoid loop()")
+    assert loop.strip().startswith("const unsigned long pass_started_us = micros();")
+    assert "supervisor.monitor(now_ms, static_cast<uint32_t>(micros() - pass_started_us));" in loop
+    assert loop.index("supervisor.monitor(") < loop.index("delay(1);")
+
+
+def test_continuous_checks_feed_their_faults():
+    monitor = cpp_block("void monitor(unsigned long now_ms, uint32_t pass_us)")
+    assert "loop_timing_.record(pass_us);" in monitor
+    assert "set_fault(safety::Fault::AdcLost, measurement_.lost());" in monitor
+    assert "safety::Fault::LowMemory" in monitor and "safety::Fault::LoopOverrun" in monitor
+
+    assert "supervisor_.note_serial_overflow();" in cpp_block("void poll_serial()")
+
+
+def test_the_loop_budget_leaves_room_for_the_longest_legitimate_pass():
+    # The longest pass by design is a period change priming the LEDC: two periods plus slack.
+    longest_priming_us = 4 * int(cpp_constant("SWITCH_HARDWARE_MAX_US")) + int(cpp_constant("SWITCH_LEDC_SETTLE_MARGIN_US"))
+    assert int(cpp_constant("LOOP_BUDGET_US")) >= 4 * longest_priming_us

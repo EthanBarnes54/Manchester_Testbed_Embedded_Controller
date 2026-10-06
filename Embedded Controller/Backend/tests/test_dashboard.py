@@ -173,6 +173,23 @@ def test_the_safety_readout_mirrors_the_board(client, shared_backend):
         shared_backend.last_arm_refusal = ""
 
 
+def test_the_self_test_button_asks_the_board(client, shared_backend):
+    fire(client, [("health-status", "children")], [("selftest-button", "n_clicks", 1), ("update-interval", "n_intervals", 0)],
+         "selftest-button.n_clicks")
+    assert shared_backend.sent == ["SELFTEST"]
+
+
+def test_the_health_readout_summarises_the_board_report():
+    summary = dashboard._health_summary({
+        "health": {"loop_max_us": "1200", "loop_peak_us": "4300", "loop_budget_us": "20000", "heap_free": "204800",
+                   "adc": "lost", "adc_timeouts": "7"},
+        "selftest": {"result": "FAIL"},
+    })
+
+    assert summary == "Health: Loop 1.2 ms, peak 4.3 (budget 20 ms) | Heap 200 kB | ADC lost (7 timeouts) | Self-test FAIL"
+    assert dashboard._health_summary({"health": {}, "selftest": None}) == "Health: --"
+
+
 def test_momentum_edits_reach_the_model(client):
     import python_RNN_Controller as rnn
 

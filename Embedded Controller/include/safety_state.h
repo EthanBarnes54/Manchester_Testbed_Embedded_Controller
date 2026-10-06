@@ -23,6 +23,12 @@ enum class Severity : uint8_t { Warning, Critical };
 enum class Fault : uint8_t {
   UnexpectedReset,  // the last reset was a watchdog, a panic or a brownout
   HostTimeout,      // the host went quiet and the failsafe tripped
+  ClockConfig,      // APB or REF_TICK is not at the frequency the switch timing assumes
+  SwitchGenerator,  // the LEDC channel or the switch timer could not be brought up
+  AdcLost,          // the ADS1115 is absent or its conversions are timing out
+  LoopOverrun,      // a loop pass took longer than its budget
+  LowMemory,        // free heap or the loop task's stack fell below its floor
+  SerialOverflow,   // an over-long command line was thrown away
   Count
 };
 
@@ -31,6 +37,8 @@ constexpr uint8_t FAULT_COUNT = static_cast<uint8_t>(Fault::Count);
 inline Severity severity_of(Fault fault) {
   switch (fault) {
     case Fault::UnexpectedReset:
+    case Fault::ClockConfig:
+    case Fault::SwitchGenerator:
       return Severity::Critical;
     default:
       return Severity::Warning;
@@ -44,6 +52,18 @@ inline const char* name_of(Fault fault) {
       return "UNEXPECTED_RESET";
     case Fault::HostTimeout:
       return "HOST_TIMEOUT";
+    case Fault::ClockConfig:
+      return "CLOCK_CONFIG";
+    case Fault::SwitchGenerator:
+      return "SWITCH_GENERATOR";
+    case Fault::AdcLost:
+      return "ADC_LOST";
+    case Fault::LoopOverrun:
+      return "LOOP_OVERRUN";
+    case Fault::LowMemory:
+      return "LOW_MEMORY";
+    case Fault::SerialOverflow:
+      return "SERIAL_OVERFLOW";
     default:
       return "UNKNOWN";
   }

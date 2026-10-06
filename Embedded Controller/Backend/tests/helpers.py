@@ -11,7 +11,8 @@ import pandas as pd
 class FakePort:
     """Plays the board's side of the serial link. Serves queued lines, falls back to a
     steady MEASURED stream while streaming is on, records everything written, and answers
-    the safety commands (ARM, DISARM, FAULTS, CLEAR FAULTS) the way the firmware does."""
+    the safety and health commands (ARM, DISARM, FAULTS, CLEAR FAULTS, HEALTH, SELFTEST)
+    the way the firmware does."""
 
     def __init__(self):
         self.lines = queue.Queue()
@@ -21,6 +22,7 @@ class FakePort:
         self.streaming.set()
         self.line_interval = 0.01
         self.mode = "SAFE"
+        self.selftest = "PASS"
 
     def commands(self, prefix=""):
         return [command for _, command in self.written if command.startswith(prefix)]
@@ -51,6 +53,14 @@ class FakePort:
             if self.mode == "FAULT":
                 self.mode = "SAFE"
             self.lines.put(f"ACK CLEAR FAULTS mode={self.mode}")
+
+        elif word == "HEALTH":
+            self.lines.put(f"HEALTH mode={self.mode} uptime_ms=1000 loop_max_us=1100 loop_peak_us=2400 "
+                           "loop_budget_us=20000 overruns=0 heap_free=200000 heap_min=190000 stack_free=5000 "
+                           "adc=ok adc_conversions=20 adc_timeouts=0 rx_overflows=0")
+
+        elif word == "SELFTEST":
+            self.lines.put(f"SELFTEST {self.selftest} clocks=ok switch=ok adc=ok memory=ok mode={self.mode}")
 
     def make_serial_class(self):
         port = self

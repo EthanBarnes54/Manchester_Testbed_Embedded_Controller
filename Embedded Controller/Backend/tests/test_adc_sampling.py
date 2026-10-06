@@ -117,6 +117,7 @@ int main() {
     CHECK(!adc.restarted_mid_conversion && adc.last_mux == MUX_BY_CHANNEL[0]);
     CHECK(adc.polls <= 2 * adc.starts);  // nothing is polled before the conversion can be ready
     CHECK(most_calls <= 2);
+    CHECK(!m.lost() && m.conversions() == static_cast<uint32_t>(count("MEASURED ")) && m.timeouts() == 0);
   }
 
   { // READ during a conversion is answered by that conversion and does not restart it.
@@ -150,6 +151,7 @@ int main() {
     CHECK(now_ms == 1000 && most_calls <= 2);
     CHECK(count("MEASURED ") == 0);
     CHECK(count("ERROR: ADC conversion timed out!") == 1);
+    CHECK(m.lost() && m.timeouts() >= 19 && m.conversions() == 0);  // every attempt counted, reported once
     m.request_reading();
     run_to(m, 1100);
     CHECK(count("ERROR: ADC conversion timed out!") == 2);
@@ -157,6 +159,7 @@ int main() {
     adc.present = true;                  // it comes back
     run_to(m, 1300);
     CHECK(count("MEASURED ") >= 3);
+    CHECK(!m.lost());                    // noticed without a reset
     adc.present = false;                 // and goes again: reported afresh
     run_to(m, 1500);
     CHECK(count("ERROR: ADC conversion timed out!") == 3);

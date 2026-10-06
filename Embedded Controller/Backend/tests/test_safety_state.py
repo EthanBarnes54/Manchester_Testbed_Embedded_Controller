@@ -91,6 +91,15 @@ int main() {
     CHECK(t.latched() == 0 && t.mode() == Mode::Safe);  // history alone never latches
   }
 
+  { // Only a fault that means the outputs cannot be trusted, or a reset nobody asked for, is critical.
+    const Fault critical[] = {Fault::UnexpectedReset, Fault::ClockConfig, Fault::SwitchGenerator};
+    for (uint8_t i = 0; i < FAULT_COUNT; ++i) {
+      bool expected = false;
+      for (Fault f : critical) expected = expected || static_cast<uint8_t>(f) == i;
+      CHECK((severity_of(static_cast<Fault>(i)) == Severity::Critical) == expected);
+    }
+  }
+
   { // Every fault has a wire name.
     for (uint8_t i = 0; i < FAULT_COUNT; ++i) CHECK(std::strcmp(name_of(static_cast<Fault>(i)), "UNKNOWN") != 0);
     CHECK(std::strcmp(name_of(Mode::Fault), "FAULT") == 0);

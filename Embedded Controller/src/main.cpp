@@ -23,12 +23,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "driver/ledc.h"
+#include "soc/apb_ctrl_reg.h"
 #include "soc/gpio_reg.h"
 #include "soc/gpio_sig_map.h"
 #include "soc/gpio_struct.h"
 #include "soc/ledc_reg.h"
 #include "soc/ledc_struct.h"
 #include "soc/soc.h"
+#include "health_stats.h"
 #include "safety_state.h"
 #include "switch_timing.h"
 
@@ -88,6 +90,14 @@ constexpr unsigned long COMMAND_TIMEOUT_MS = 5000;
 
 // Flash namespace for the fault log that survives resets (Preferences, at most 15 characters).
 constexpr const char* FAULT_LOG_NAMESPACE = "testbed_faults";
+
+// Continuous self-test budgets. A normal pass is about a millisecond plus the delay(1);
+// the longest legitimate one is a switch period change priming the LEDC (two periods,
+// 2 ms at 1 ms between edges). Twenty times that is a pass that has gone wrong.
+constexpr uint32_t LOOP_BUDGET_US = 20000;
+constexpr unsigned long HEALTH_CHECK_INTERVAL_MS = 1000;
+constexpr uint32_t HEAP_FLOOR_BYTES = 32768;
+constexpr uint32_t STACK_FLOOR_BYTES = 1024;
 
 // SWITCH_PERIOD_US is the time between edges, half a cycle. Up to SWITCH_HARDWARE_MAX_US
 // an LEDC channel generates the line with no CPU work per edge. Above it the timer
@@ -241,6 +251,11 @@ class SwitchLine {
     }
 
     return start_interrupt(period_us);
+  }
+
+  // Both generators came up in begin(). Checked by the power-on self-test.
+  bool generators_ready() const {
+    return ledc_ready_ && timer_ != nullptr;
   }
 
   // switch_logic in PINS: the held level, or 1 while switching automatically. The CPU no
@@ -508,6 +523,10 @@ class ChannelController {
     switch_line_.hold(switch_level != 0);
   }
 
+  bool switch_generators_ready() const {
+    return switch_line_.generators_ready();
+  }
+
   // The external gate on the switch line. Opened only by SystemSupervisor on ARM, closed
   // by engage_safe_state().
   void set_switch_armed(bool armed) {
@@ -603,7 +622,22 @@ class MeasurementService {
 
   bool begin() {
     adc_.setGain(ADC_GAIN);
-    return adc_.begin();
+    lost_ = !adc_.begin();
+    return !lost_;
+  }
+
+  // The ADC is absent, or its last conversion timed out. Cleared by the next conversion
+  // that completes, so an ADC that comes back is noticed without a reset.
+  bool lost() const {
+    return lost_;
+  }
+
+  uint32_t conversions() const {
+    return conversions_;
+  }
+
+  uint32_t timeouts() const {
+    return timeouts_;
   }
 
   // Single formatter for every MEASURED line, so the streamed and on-demand readings
@@ -643,6 +677,8 @@ class MeasurementService {
       converting_ = false;
       reading_requested_ = false;
       fault_reported_ = false;
+      lost_ = false;
+      ++conversions_;
       report_voltage(adc_.computeVolts(adc_.getLastConversionResults()));
       return;
     }
@@ -657,6 +693,8 @@ class MeasurementService {
 
       reading_requested_ = false;
       fault_reported_ = true;
+      lost_ = true;
+      ++timeouts_;
     }
   }
 
@@ -666,6 +704,9 @@ class MeasurementService {
   bool converting_ = false;
   bool reading_requested_ = false;
   bool fault_reported_ = false;
+  bool lost_ = false;
+  uint32_t conversions_ = 0;
+  uint32_t timeouts_ = 0;
 };
 
 // Blinks are scheduled rather than slept through - update() plays them out from loop(),
@@ -909,7 +950,8 @@ class OtaWifiService {
 // goes through here, so the outputs and the reported mode cannot disagree.
 class SystemSupervisor {
  public:
-  explicit SystemSupervisor(ChannelController& channels) : channels_(channels) {}
+  SystemSupervisor(ChannelController& channels, MeasurementService& measurement)
+      : channels_(channels), measurement_(measurement), loop_timing_(LOOP_BUDGET_US) {}
 
   // Loads the fault history kept in flash, counts the boot and records why the chip
   // last reset. A watchdog, panic or brownout reset is a critical fault: the board comes
@@ -942,6 +984,76 @@ class SystemSupervisor {
     }
 
     persist_history();
+
+    // Power-on self-test. Anything critical leaves the board in FAULT, so it cannot arm.
+    self_test();
+  }
+
+  // The power-on self-test, and SELFTEST on demand. Checks what the outputs depend on:
+  // the clocks the switch timing assumes, both switch generators, the ADC and memory.
+  // Raises or resolves the matching faults and reports one SELFTEST line.
+  void self_test() {
+    const bool clocks_ok = clocks_as_designed();
+    const bool switch_ok = channels_.switch_generators_ready();
+    const bool adc_ok = !measurement_.lost();
+    const bool memory_ok = memory_above_floor();
+
+    set_fault(safety::Fault::ClockConfig, !clocks_ok);
+    set_fault(safety::Fault::SwitchGenerator, !switch_ok);
+    set_fault(safety::Fault::AdcLost, !adc_ok);
+    set_fault(safety::Fault::LowMemory, !memory_ok);
+
+    const bool pass = clocks_ok && switch_ok && adc_ok && memory_ok;
+    Serial.println(String("SELFTEST ") + (pass ? "PASS" : "FAIL") + " clocks=" + verdict(clocks_ok) +
+                   " switch=" + verdict(switch_ok) + " adc=" + verdict(adc_ok) + " memory=" + verdict(memory_ok) +
+                   " mode=" + safety::name_of(state_.mode()));
+  }
+
+  // Continuous self-test, once per loop pass with that pass's duration. The ADC is
+  // checked every pass so a lost one is reported promptly; memory and overruns once a
+  // second, so a run of slow passes raises one fault rather than one per pass.
+  void monitor(unsigned long now_ms, uint32_t pass_us) {
+    loop_timing_.record(pass_us);
+    set_fault(safety::Fault::AdcLost, measurement_.lost());
+
+    if (now_ms - last_health_check_ms_ < HEALTH_CHECK_INTERVAL_MS) {
+      return;
+    }
+
+    last_health_check_ms_ = now_ms;
+    set_fault(safety::Fault::LowMemory, !memory_above_floor());
+
+    if (loop_timing_.overruns() != overruns_at_last_check_) {
+      overruns_at_last_check_ = loop_timing_.overruns();
+      raise(safety::Fault::LoopOverrun);
+      resolve(safety::Fault::LoopOverrun);
+    }
+  }
+
+  void note_serial_overflow() {
+    ++serial_overflows_;
+    raise(safety::Fault::SerialOverflow);
+    resolve(safety::Fault::SerialOverflow);
+  }
+
+  // One line with everything needed to tell whether the board is keeping up: the worst
+  // loop pass since the last report and since boot against its budget, memory headroom,
+  // the ADC and the serial link.
+  void report_health() {
+    String line = String("HEALTH mode=") + safety::name_of(state_.mode());
+    line += String(" uptime_ms=") + millis();
+    line += String(" loop_max_us=") + loop_timing_.take_window_max();
+    line += String(" loop_peak_us=") + loop_timing_.peak_us();
+    line += String(" loop_budget_us=") + loop_timing_.budget_us();
+    line += String(" overruns=") + loop_timing_.overruns();
+    line += String(" heap_free=") + ESP.getFreeHeap();
+    line += String(" heap_min=") + ESP.getMinFreeHeap();
+    line += String(" stack_free=") + static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr));
+    line += String(" adc=") + (measurement_.lost() ? "lost" : "ok");
+    line += String(" adc_conversions=") + measurement_.conversions();
+    line += String(" adc_timeouts=") + measurement_.timeouts();
+    line += String(" rx_overflows=") + serial_overflows_;
+    Serial.println(line);
   }
 
   bool armed() const {
@@ -1032,7 +1144,12 @@ class SystemSupervisor {
 
  private:
   ChannelController& channels_;
+  MeasurementService& measurement_;
   safety::SafetyState state_;
+  health::LoopTiming loop_timing_;
+  unsigned long last_health_check_ms_ = 0;
+  uint32_t overruns_at_last_check_ = 0;
+  uint32_t serial_overflows_ = 0;
   Preferences log_;
   bool log_ready_ = false;
   uint32_t persisted_history_ = 0;
@@ -1040,6 +1157,30 @@ class SystemSupervisor {
   uint32_t unexpected_resets_ = 0;
   esp_reset_reason_t reset_reason_ = ESP_RST_UNKNOWN;
   bool heartbeat_high_ = false;
+
+  void set_fault(safety::Fault fault, bool present) {
+    if (present) {
+      raise(fault);
+    } else {
+      resolve(fault);
+    }
+  }
+
+  // The switch timing assumes APB at 80 MHz and REF_TICK at APB / 80 (switch_timing.h).
+  static bool clocks_as_designed() {
+    const uint32_t ref_tick_divider = REG_GET_FIELD(APB_CTRL_PLL_TICK_CONF_REG, APB_CTRL_PLL_TICK_NUM);
+    return getApbFrequency() == APB_CLK_FREQ && ref_tick_divider + 1 == APB_CLK_FREQ / SWITCH_LEDC_CLOCK_HZ;
+  }
+
+  // Free heap now, and the loop task's stack at its deepest so far (that one cannot recover,
+  // so a stack that once came close stays reported).
+  static bool memory_above_floor() {
+    return ESP.getFreeHeap() >= HEAP_FLOOR_BYTES && uxTaskGetStackHighWaterMark(nullptr) >= STACK_FLOOR_BYTES;
+  }
+
+  static const char* verdict(bool ok) {
+    return ok ? "ok" : "FAIL";
+  }
 
   // Flash is only written when the history gains a fault, so at most once per fault type
   // between CLEAR LOGs, never at loop rate.
@@ -1138,6 +1279,7 @@ class CommandProcessor {
           command_buffer_ += incoming_char;
         } else {
           command_buffer_ = "";
+          supervisor_.note_serial_overflow();
         }
       }
     }
@@ -1190,6 +1332,10 @@ class CommandProcessor {
       supervisor_.clear_faults();
     } else if (command.equalsIgnoreCase("CLEAR LOG")) {
       supervisor_.clear_log();
+    } else if (command.equalsIgnoreCase("SELFTEST")) {
+      supervisor_.self_test();
+    } else if (command.equalsIgnoreCase("HEALTH")) {
+      supervisor_.report_health();
     } else if (command.equalsIgnoreCase("READ")) {
       measurement_.request_reading();
       leds_.blink_once(80);
@@ -1280,7 +1426,7 @@ ChannelController channels;
 MeasurementService measurement_service(ads);
 LedIndicator led_indicator(LED_PIN);
 OtaWifiService ota_wifi_service;
-SystemSupervisor supervisor(channels);
+SystemSupervisor supervisor(channels, measurement_service);
 CommandProcessor command_processor(channels, measurement_service, led_indicator, supervisor);
 
 bool failsafe_engaged = false;
@@ -1327,6 +1473,9 @@ void setup() {
   }
 
   channels.begin();
+
+  // Records the reset and runs the power-on self-test, so after the ADC and the switch
+  // generators have been brought up.
   supervisor.begin();
   ota_wifi_service.begin(WIFI_SSID, WIFI_PASSWORD, OTA_HOSTNAME);
 
@@ -1340,6 +1489,7 @@ void setup() {
 }
 
 void loop() {
+  const unsigned long pass_started_us = micros();
   supervisor.heartbeat();
   command_processor.poll_serial();
 
@@ -1349,6 +1499,7 @@ void loop() {
   led_indicator.update(now_ms);
   ota_wifi_service.loop(!supervisor.armed());
   enforce_command_timeout(now_ms);
+  supervisor.monitor(now_ms, static_cast<uint32_t>(micros() - pass_started_us));
 
   delay(1);
 }

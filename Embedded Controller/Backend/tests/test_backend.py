@@ -369,3 +369,24 @@ def test_a_disconnected_board_is_never_reported_armed(backend_module):
     backend.arm()  # no port open, so this goes down the offline path
 
     assert not backend.is_armed()
+
+
+# ----------------------------------------------------------------------------
+#                               Built-in test
+# ----------------------------------------------------------------------------
+
+
+def test_the_keepalive_polls_the_board_health(fast_keepalive, live_backend, fake_port):
+    assert wait_for(lambda: len(fake_port.commands("HEALTH")) >= 2)
+    health = live_backend.get_board_health()["health"]
+    assert health["loop_budget_us"] == "20000" and health["adc"] == "ok"
+
+
+def test_a_self_test_result_is_recorded_and_a_failure_logged(live_backend, fake_port, caplog):
+    live_backend.run_selftest()
+    assert wait_for(lambda: (live_backend.get_board_health()["selftest"] or {}).get("result") == "PASS")
+
+    fake_port.selftest = "FAIL"
+    live_backend.run_selftest()
+    assert wait_for(lambda: live_backend.get_board_health()["selftest"]["result"] == "FAIL")
+    assert "self-test failed" in caplog.text
