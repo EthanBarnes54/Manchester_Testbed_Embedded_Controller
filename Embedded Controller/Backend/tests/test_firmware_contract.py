@@ -131,6 +131,34 @@ def test_switch_bounds_match_the_backend():
     assert int(cpp_constant("SWITCH_PERIOD_MAX_US")) == backend_constant("SWITCH_PERIOD_MAX_US")
 
 
+def arduino_ledc_timer(channel):
+    """The (group, timer) the Arduino core gives a channel: group c / 8, timer (c / 2) % 4."""
+
+    return channel // 8, (channel // 2) % 4
+
+
+def test_switch_has_an_ledc_timer_of_its_own():
+    switch_channel = int(cpp_constant("SWITCH_LEDC_CHANNEL"))
+    setpoint_channels = [int(c) for c in re.findall(r"\d+", cpp_constant(r"LED_CONTROL_CHANNELS\[CONTROLLED_PULSE_CHANNELS\]"))]
+
+    assert len(setpoint_channels) == 5
+    assert switch_channel not in setpoint_channels
+    assert arduino_ledc_timer(switch_channel) not in {arduino_ledc_timer(c) for c in setpoint_channels}
+    # The firmware derives its timer and output signal from the channel the same way.
+    assert cpp_constant("SWITCH_LEDC_TIMER") == "static_cast<ledc_timer_t>((SWITCH_LEDC_CHANNEL / 2) % 4)"
+    assert cpp_constant("SWITCH_LEDC_SIGNAL") == "LEDC_HS_SIG_OUT0_IDX + SWITCH_LEDC_CHANNEL"
+
+
+def test_switch_line_is_driven_low_before_anything_else_at_boot():
+    first_statement = cpp_block("\nvoid setup()").strip().split(";")[0]
+    assert first_statement == "SwitchLine::hold_low_at_boot()"
+
+
+def test_failsafe_holds_the_switch_line_low():
+    assert "stop_switching(0);" in cpp_block("void engage_safe_state()")
+    assert "switch_line_.hold(switch_level != 0);" in cpp_block("void stop_switching(int switch_level)")
+
+
 def test_keepalive_runs_well_inside_the_failsafe_timeout():
     timeout_s = int(cpp_constant("COMMAND_TIMEOUT_MS").rstrip("UL")) / 1000.0
     assert timeout_s >= 2 * backend_constant("KEEPALIVE_INTERVAL_SEC")
@@ -160,6 +188,7 @@ def test_measured_lines_keep_sub_count_precision():
 @pytest.mark.parametrize(
     "header",
     [
+        "class SwitchLine",
         "class ChannelController",
         "class MeasurementService",
         "class LedIndicator",

@@ -5,6 +5,7 @@ period is only ever reported exact when the hardware would really produce it, an
 ever rejected when no whole divider exists.
 """
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -137,6 +138,22 @@ def test_apb_runs_out_of_divider_at_205_us(harness):
     # 80 MHz carries a factor of 5 that has to go into the divider, so odd parts above
     # 204 overflow 1023. This is why the switch is clocked from REF_TICK.
     assert sweep(harness, APB_HZ)["first_rejected"] == "205"
+
+
+def test_every_period_the_firmware_sends_to_the_ledc_is_exact(harness):
+    main_cpp = (FIRMWARE_DIR / "src" / "main.cpp").read_text(encoding="utf-8")
+
+    def constant(name):
+        return re.search(rf"constexpr\s+[\w:\s]+?\s{name}\s*=\s*([^;]+);", main_cpp).group(1).strip()
+
+    # The firmware clocks the switch from REF_TICK, which soc.h defines as 1 MHz.
+    assert constant("SWITCH_LEDC_CLOCK_HZ") == "REF_CLK_FREQ"
+    assert "ledc_waveform_for(period_us, SWITCH_LEDC_CLOCK_HZ)" in main_cpp
+    assert "waveform.counter_bits, LEDC_REF_TICK)" in main_cpp
+
+    floor_us, ceiling_us = int(constant("SWITCH_PERIOD_MIN_US")), int(constant("SWITCH_HARDWARE_MAX_US"))
+    assert 1 <= floor_us <= ceiling_us
+    assert ceiling_us < int(sweep(harness, REF_TICK_HZ)["first_rejected"])
 
 
 @pytest.mark.parametrize(

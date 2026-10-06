@@ -18,7 +18,13 @@
 #include <Adafruit_ADS1X15.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "driver/ledc.h"
+#include "soc/gpio_reg.h"
+#include "soc/gpio_sig_map.h"
 #include "soc/gpio_struct.h"
+#include "soc/ledc_struct.h"
+#include "soc/soc.h"
+#include "switch_timing.h"
 
 namespace{
 
@@ -57,11 +63,51 @@ constexpr int COMMAND_BUFFER_LIMIT = 256;
 // well inside this, so only a genuinely dead host trips it.
 constexpr unsigned long COMMAND_TIMEOUT_MS = 5000;
 
-// Floor is set by what the timer ISR can actually service - entry, the critical
-// section and the GPIO write cost a few microseconds on their own, so anything
-// faster than this starves the main loop rather than switching cleanly.
+// SWITCH_PERIOD_US is the time between edges, half a cycle. Up to SWITCH_HARDWARE_MAX_US
+// an LEDC channel generates the line with no CPU work per edge. Above it the timer
+// interrupt toggles the pin: edges are then at least 1 ms apart, so the cost is
+// negligible, but each edge can move by the interrupt latency (microseconds).
 constexpr int SWITCH_PERIOD_MIN_US = 50;
 constexpr int SWITCH_PERIOD_MAX_US = 2000000;
+constexpr int SWITCH_HARDWARE_MAX_US = 1000;
+
+constexpr uint32_t SWITCH_PIN_MASK = (1UL << SWITCH_LOGIC_PIN);
+
+// The Arduino core maps LEDC channel c to speed group c / 8 and timer (c / 2) % 4, so the
+// setpoints on channels 0-4 hold high-speed timers 0-2 and channel 6 has timer 3 to
+// itself. Changing the switch period therefore cannot move the setpoint PWM frequency.
+// Channel 5 would have shared cone_2's timer.
+constexpr int SWITCH_LEDC_CHANNEL = 6;
+
+constexpr int ledc_timer_of(int channel) {
+  return (channel / 8) * 4 + (channel / 2) % 4;
+}
+
+constexpr bool setpoint_shares_timer_with(int channel, int index = 0) {
+  return index < CONTROLLED_PULSE_CHANNELS &&
+         (ledc_timer_of(LED_CONTROL_CHANNELS[index]) == ledc_timer_of(channel) || setpoint_shares_timer_with(channel, index + 1));
+}
+
+static_assert(SWITCH_LEDC_CHANNEL < 8, "The switch must use a high-speed LEDC channel");
+static_assert(!setpoint_shares_timer_with(SWITCH_LEDC_CHANNEL), "The switch must not share an LEDC timer with a setpoint");
+
+constexpr ledc_mode_t SWITCH_LEDC_MODE = LEDC_HIGH_SPEED_MODE;
+constexpr ledc_timer_t SWITCH_LEDC_TIMER = static_cast<ledc_timer_t>((SWITCH_LEDC_CHANNEL / 2) % 4);
+constexpr ledc_channel_t SWITCH_LEDC_HW_CHANNEL = static_cast<ledc_channel_t>(SWITCH_LEDC_CHANNEL);
+constexpr uint32_t SWITCH_LEDC_SIGNAL = LEDC_HS_SIG_OUT0_IDX + SWITCH_LEDC_CHANNEL;
+
+// REF_TICK is APB / 80 (APB_CTRL_PLL_TICK_NUM, default 79), a 1 MHz clock. On it every
+// whole period up to 1024 us has an exact whole divider, where APB itself runs out at
+// 205 us (switch_timing.h and tests/test_switch_timing.py).
+//
+// The CPU runs at 240 MHz (F_CPU from the esp32dev board definition) with APB at 80 MHz.
+// APB must stay there: CONFIG_PM_ENABLE is unset in this core's sdkconfig and power
+// management or frequency scaling must stay off, because changing APB would disturb
+// REF_TICK and the 1 us tick of the switch timer interrupt.
+constexpr uint32_t SWITCH_LEDC_CLOCK_HZ = REF_CLK_FREQ;
+
+// Slack on top of two cycles before a new LEDC setting is declared stuck.
+constexpr unsigned long SWITCH_LEDC_SETTLE_MARGIN_US = 100;
 
 // WiFi/OTA configuration. Override these from platformio.ini build_flags rather than
 // editing them here, so site credentials never end up committed:
@@ -94,14 +140,235 @@ constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 30000;
 
 Adafruit_ADS1115 ads;
 
+// The switch line on GPIO 16, always in one of three modes:
+//   Held      - a fixed level on the plain GPIO output register. Off is held low.
+//   Hardware  - an LEDC channel generates the square wave, with no CPU work per edge.
+//   Interrupt - the timer interrupt toggles the pin, for periods above SWITCH_HARDWARE_MAX_US.
+// Every change passes through Held low, so the line is low whenever nothing is driving
+// it on purpose, including at boot and when the failsafe trips.
+class SwitchLine {
+ public:
+  // GPIO 16 floats from reset until this runs, so setup() calls it before anything else.
+  // The output register is cleared before the output is enabled, so the pin goes
+  // straight from floating to low.
+  static void hold_low_at_boot() {
+    GPIO.out_w1tc = SWITCH_PIN_MASK;
+    pinMode(SWITCH_LOGIC_PIN, OUTPUT);
+  }
+
+  // Needs the LEDC driver already up for the high-speed group, which the setpoint
+  // ledcSetup() calls do.
+  void begin() {
+    instance_ = this;
+    configure_ledc();
+    configure_timer();
+    hold(false);
+  }
+
+  // Stops any automatic switching and holds the line at a fixed level. This is also the
+  // failsafe path, so it is ordered to be safe whatever was running: the level is set
+  // and the pin taken back onto the output register before either generator is stopped,
+  // so neither can reach the pin afterwards. A timer interrupt already pending when this
+  // runs finds the line Held and leaves it alone.
+  void hold(bool high) {
+    portENTER_CRITICAL(&mux_);
+    mode_ = Mode::Held;
+    held_high_ = high;
+    write_pin(high);
+    route_pin(SIG_GPIO_OUT_IDX);
+    portEXIT_CRITICAL(&mux_);
+
+    if (timer_ != nullptr) {
+      timerAlarmDisable(timer_);
+    }
+
+    if (ledc_ready_) {
+      ledc_timer_pause(SWITCH_LEDC_MODE, SWITCH_LEDC_TIMER);
+    }
+  }
+
+  // Switches with period_us between edges. On false the line is held low, or untouched
+  // if nothing had been changed yet.
+  bool start(unsigned long period_us) {
+    if (period_us <= static_cast<unsigned long>(SWITCH_HARDWARE_MAX_US)) {
+      return start_hardware(period_us);
+    }
+
+    return start_interrupt(period_us);
+  }
+
+  // switch_logic in PINS: the held level, or 1 while switching automatically. The CPU no
+  // longer sees individual edges, so 1 means "not held low".
+  int reported_level() const {
+    portENTER_CRITICAL(const_cast<portMUX_TYPE*>(&mux_));
+    const int level = (mode_ != Mode::Held || held_high_) ? 1 : 0;
+    portEXIT_CRITICAL(const_cast<portMUX_TYPE*>(&mux_));
+    return level;
+  }
+
+ private:
+  enum class Mode { Held, Hardware, Interrupt };
+
+  static SwitchLine* instance_;
+
+  portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
+  Mode mode_ = Mode::Held;
+  bool held_high_ = false;
+  bool interrupt_high_ = false;
+  bool ledc_ready_ = false;
+  hw_timer_t* timer_ = nullptr;
+
+  bool start_hardware(unsigned long period_us) {
+    const switch_timing::LedcWaveform waveform = switch_timing::ledc_waveform_for(period_us, SWITCH_LEDC_CLOCK_HZ);
+
+    // Every period this path accepts is exact (tests/test_switch_timing.py sweeps the
+    // range), so a rejection here means the bounds were moved without the tests.
+    if (!ledc_ready_ || !waveform.exact) {
+      return false;
+    }
+
+    hold(false);
+
+    // Everything is set up with the pin still on the output register. ledc_timer_set()
+    // writes the whole divider straight into the register, and reading it back confirms
+    // the hardware holds exactly what was asked for before any of it reaches the pin.
+    ledc_timer_set(SWITCH_LEDC_MODE, SWITCH_LEDC_TIMER, waveform.divider_register(), waveform.counter_bits, LEDC_REF_TICK);
+    ledc_set_duty_with_hpoint(SWITCH_LEDC_MODE, SWITCH_LEDC_HW_CHANNEL, waveform.high_counts, 0);
+    ledc_update_duty(SWITCH_LEDC_MODE, SWITCH_LEDC_HW_CHANNEL);
+
+    if (!timer_holds(waveform) || !run_one_cycle_off_pin(period_us)) {
+      ledc_timer_pause(SWITCH_LEDC_MODE, SWITCH_LEDC_TIMER);
+      LOG_ERROR("ERROR: Switch LEDC timer did not take its settings!");
+      return false;
+    }
+
+    // Restart at the top of a cycle and hand the pin over before the count moves, so the
+    // line begins with a full high half-cycle.
+    portENTER_CRITICAL(&mux_);
+    ledc_timer_pause(SWITCH_LEDC_MODE, SWITCH_LEDC_TIMER);
+    ledc_timer_rst(SWITCH_LEDC_MODE, SWITCH_LEDC_TIMER);
+    route_pin(SWITCH_LEDC_SIGNAL);
+    ledc_timer_resume(SWITCH_LEDC_MODE, SWITCH_LEDC_TIMER);
+    mode_ = Mode::Hardware;
+    portEXIT_CRITICAL(&mux_);
+    return true;
+  }
+
+  bool start_interrupt(unsigned long period_us) {
+    if (timer_ == nullptr) {
+      return false;
+    }
+
+    hold(false);
+
+    // The count restarts from zero, so the first edge comes one full period after the
+    // line went low however long the timer had been running.
+    portENTER_CRITICAL(&mux_);
+    interrupt_high_ = false;
+    mode_ = Mode::Interrupt;
+    timerWrite(timer_, 0);
+    timerAlarmWrite(timer_, period_us, true);
+    timerAlarmEnable(timer_);
+    portEXIT_CRITICAL(&mux_);
+    return true;
+  }
+
+  static bool timer_holds(const switch_timing::LedcWaveform& waveform) {
+    const auto& conf = LEDC.timer_group[SWITCH_LEDC_MODE].timer[SWITCH_LEDC_TIMER].conf;
+
+    // tick_sel 0 is REF_TICK, 1 is APB (ledc_struct.h).
+    return conf.clock_divider == waveform.divider_register() && conf.duty_resolution == waveform.counter_bits &&
+           conf.tick_sel == 0;
+  }
+
+  // Runs the timer for one whole cycle while the pin is still on the output register.
+  // A channel only takes up a new duty and hpoint at the start of a cycle (ledc.h, on
+  // ledc_update_duty), so this makes the first cycle the pin sees use the new settings,
+  // and keeps the line low for at least that cycle on the way. Takes two periods: 10 us
+  // at the floor, 2 ms at SWITCH_HARDWARE_MAX_US, and only when a period is set.
+  static bool run_one_cycle_off_pin(unsigned long period_us) {
+    const uint32_t overflow = BIT(SWITCH_LEDC_TIMER);
+
+    ledc_timer_rst(SWITCH_LEDC_MODE, SWITCH_LEDC_TIMER);
+    LEDC.int_clr.val = overflow;
+    ledc_timer_resume(SWITCH_LEDC_MODE, SWITCH_LEDC_TIMER);
+
+    const unsigned long started_us = micros();
+
+    while ((LEDC.int_raw.val & overflow) == 0) {
+      if (micros() - started_us > 4UL * period_us + SWITCH_LEDC_SETTLE_MARGIN_US) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  void configure_ledc() {
+    ledc_ready_ = ledc_timer_pause(SWITCH_LEDC_MODE, SWITCH_LEDC_TIMER) == ESP_OK &&
+                  ledc_bind_channel_timer(SWITCH_LEDC_MODE, SWITCH_LEDC_HW_CHANNEL, SWITCH_LEDC_TIMER) == ESP_OK;
+
+    if (ledc_ready_) {
+      LOG_INFO("Switch logic LEDC channel initialised...");
+    } else {
+      LOG_ERROR("ERROR: Hardware switching unavailable! (LEDC not initialised)");
+    }
+  }
+
+  void configure_timer() {
+    timer_ = timerBegin(0, 80, true);
+
+    if (timer_ != nullptr) {
+      timerAttachInterrupt(timer_, &SwitchLine::on_timer, true);
+      timerAlarmDisable(timer_);
+      LOG_INFO("Switch logic timer initialised...");
+    } else {
+      LOG_ERROR("ERROR: Switch unavailable! (Timer allocation failed)");
+    }
+  }
+
+  static void IRAM_ATTR on_timer() {
+    if (instance_ != nullptr) {
+      instance_->toggle();
+    }
+  }
+
+  void IRAM_ATTR toggle() {
+    portENTER_CRITICAL_ISR(&mux_);
+
+    if (mode_ == Mode::Interrupt) {
+      interrupt_high_ = !interrupt_high_;
+      write_pin(interrupt_high_);
+    }
+
+    portEXIT_CRITICAL_ISR(&mux_);
+  }
+
+  static void write_pin(bool high) {
+    if (high) {
+      GPIO.out_w1ts = SWITCH_PIN_MASK;
+    } else {
+      GPIO.out_w1tc = SWITCH_PIN_MASK;
+    }
+  }
+
+  // Gives GPIO 16 to the plain output register or to the LEDC channel in one register
+  // write, so the pin never passes through a half-set routing. Output enable always comes
+  // from GPIO_ENABLE (oen_sel), which pinMode() set at boot.
+  static void route_pin(uint32_t signal) {
+    GPIO.func_out_sel_cfg[SWITCH_LOGIC_PIN].val = signal | GPIO_FUNC0_OEN_SEL;
+  }
+};
+
+SwitchLine* SwitchLine::instance_ = nullptr;
+
 class ChannelController {
  public:
   ChannelController() = default;
 
   void begin() {
-    instance_ = this;
     init_pwm_channels();
-    configure_switch_timer();
+    switch_line_.begin();
   }
 
   void set_channel(uint8_t channel_number, int value) {
@@ -123,7 +390,7 @@ class ChannelController {
     }
 
     stop_switching(value ? 1 : 0);
-    Serial.println(String("ACK PIN ") + channel_number + " " + channel_values_[channel_index]);
+    Serial.println(String("ACK PIN ") + channel_number + " " + switch_line_.reported_level());
   }
 
   bool apply_target_voltages(const String& args) {
@@ -141,6 +408,7 @@ class ChannelController {
     return true;
   }
 
+  // switch_logic is 0 or 1: the held level, or 1 while the line switches automatically.
   void report_channels() const {
     int snapshot[CHANNEL_COUNT];
     snapshot_values(snapshot, CHANNEL_COUNT);
@@ -156,33 +424,11 @@ class ChannelController {
   }
 
   bool automate_switching(unsigned long period_us) {
-    if (switch_timer_ == nullptr) {
-      return false;
-    }
-
-    portENTER_CRITICAL(&switch_mux_);
-    switch_period_us_ = period_us;
-    switch_auto_enabled_ = true;
-
-    timerAlarmWrite(switch_timer_, switch_period_us_, true);
-    timerAlarmEnable(switch_timer_);
-
-    portEXIT_CRITICAL(&switch_mux_);
-    return true;
+    return switch_line_.start(period_us);
   }
 
   void stop_switching(int switch_level) {
-    portENTER_CRITICAL(&switch_mux_);
-    switch_auto_enabled_ = false;
-    switch_period_us_ = 0;
-
-    if (switch_timer_ != nullptr) {
-      timerAlarmDisable(switch_timer_);
-    }
-
-    channel_values_[5] = switch_level ? 1 : 0;
-    portEXIT_CRITICAL(&switch_mux_);
-    set_switch_hardware(switch_level != 0);
+    switch_line_.hold(switch_level != 0);
   }
 
   // Drops every output back to zero and stops the switch line. Used when the host
@@ -201,45 +447,14 @@ class ChannelController {
       return;
     }
 
-    portENTER_CRITICAL(const_cast<portMUX_TYPE*>(&switch_mux_));
     memcpy(destination, channel_values_, sizeof(channel_values_));
-    portEXIT_CRITICAL(const_cast<portMUX_TYPE*>(&switch_mux_));
+    destination[5] = switch_line_.reported_level();
   }
 
  private:
-  static ChannelController* instance_;
-
+  // Setpoints only. The switch line keeps its own state.
   int channel_values_[CHANNEL_COUNT] = {0};
-  hw_timer_t* switch_timer_ = nullptr;
-  portMUX_TYPE switch_mux_ = portMUX_INITIALIZER_UNLOCKED;
-  bool switch_auto_enabled_ = false;
-  unsigned long switch_period_us_ = 0;
-
-  static void IRAM_ATTR on_switch_timer() {
-    if (instance_ != nullptr) {
-      instance_->toggle_switch();
-    }
-  }
-
-  void IRAM_ATTR toggle_switch() {
-    portENTER_CRITICAL_ISR(&switch_mux_);
-    const bool currently_high = (channel_values_[5] != 0);
-    const bool next_state = !currently_high;
-
-    set_switch_hardware(next_state);
-    channel_values_[5] = next_state ? 1 : 0;
-    portEXIT_CRITICAL_ISR(&switch_mux_);
-  }
-
-  void set_switch_hardware(bool high) {
-    const uint32_t mask = (1UL << SWITCH_LOGIC_PIN);
-
-    if (high) {
-      GPIO.out_w1ts = mask;
-    } else {
-      GPIO.out_w1tc = mask;
-    }
-  }
+  SwitchLine switch_line_;
 
   void init_pwm_channels() {
     for (int i = 0; i < CONTROLLED_PULSE_CHANNELS; ++i) {
@@ -248,22 +463,6 @@ class ChannelController {
       ledcAttachPin(CHANNEL_PINS[i], LED_CONTROL_CHANNELS[i]);
       ledcWrite(LED_CONTROL_CHANNELS[i], 0);
       channel_values_[i] = 0;
-    }
-
-    pinMode(CHANNEL_PINS[5], OUTPUT);
-    set_switch_hardware(false);
-    channel_values_[5] = 0;
-  }
-
-  void configure_switch_timer() {
-    switch_timer_ = timerBegin(0, 80, true);
-
-    if (switch_timer_ != nullptr) {
-      timerAttachInterrupt(switch_timer_, &ChannelController::on_switch_timer, true);
-      timerAlarmDisable(switch_timer_);
-      LOG_INFO("Switch logic timer initialised...");
-    } else {
-      LOG_ERROR("ERROR: Switch unavailable! (Timer allocation failed)");
     }
   }
 
@@ -311,8 +510,6 @@ class ChannelController {
     return parsed == expected_values;
   }
 };
-
-ChannelController* ChannelController::instance_ = nullptr;
 
 class MeasurementService {
  public:
@@ -743,6 +940,7 @@ void enforce_command_timeout(unsigned long now_ms) {
 }
 
 void setup() {
+  SwitchLine::hold_low_at_boot();
   led_indicator.begin();
 
   Serial.begin(115200);
