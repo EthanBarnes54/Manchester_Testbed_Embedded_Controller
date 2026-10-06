@@ -75,9 +75,11 @@ constexpr unsigned long COMMAND_TIMEOUT_MS = 5000;
 // interrupt toggles the pin: edges are then at least 1 ms apart, so the cost is
 // negligible, but each edge can move by the interrupt latency (microseconds).
 //
-// The 5 us floor (a 100 kHz square wave) is the requirement, not the generator's limit:
-// the LEDC is exact well below it. What the downstream driver can follow is the real limit.
-constexpr int SWITCH_PERIOD_MIN_US = 5;
+// The 1 us floor (a 500 kHz square wave) is the smallest whole period, and the LEDC is
+// exact there: one counter bit, divider 1 on REF_TICK. It has NOT been scoped on
+// hardware; what the downstream driver can follow is the real limit. 5 us is the
+// requirement the rest of the stack was built to.
+constexpr int SWITCH_PERIOD_MIN_US = 1;
 constexpr int SWITCH_PERIOD_MAX_US = 2000000;
 constexpr int SWITCH_HARDWARE_MAX_US = 1000;
 

@@ -123,19 +123,20 @@ def test_a_switch_period_is_never_rounded_and_never_clamped_quietly(live_backend
     assert fake_port.commands("SWITCH_PERIOD_US") == []
     assert "7.5 us is not a whole number" in caplog.text
 
-    live_backend.set_switch_timing(1)
-    assert fake_port.commands("SWITCH_PERIOD_US") == ["SWITCH_PERIOD_US 5"]
-    assert "clamped to 5 us" in caplog.text
+    live_backend.set_switch_timing(3_000_000)
+    assert fake_port.commands("SWITCH_PERIOD_US") == ["SWITCH_PERIOD_US 2000000"]
+    assert "clamped to 2000000 us" in caplog.text
 
     live_backend.set_switch_timing(7.0)
     assert fake_port.commands("SWITCH_PERIOD_US")[-1] == "SWITCH_PERIOD_US 7"
 
 
-def test_the_5_us_switch_floor_reaches_the_board(live_backend, fake_port):
+def test_the_1_us_switch_floor_reaches_the_board(live_backend, fake_port, caplog):
+    live_backend.set_switch_timing(1)
     live_backend.set_switch_timing(5)
-    live_backend.set_switch_timing(4)
 
-    assert fake_port.commands("SWITCH_PERIOD_US") == ["SWITCH_PERIOD_US 5", "SWITCH_PERIOD_US 5"]
+    assert fake_port.commands("SWITCH_PERIOD_US") == ["SWITCH_PERIOD_US 1", "SWITCH_PERIOD_US 5"]
+    assert "clamped" not in caplog.text
 
 
 # ----------------------------------------------------------------------------

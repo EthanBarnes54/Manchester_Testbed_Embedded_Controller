@@ -208,10 +208,10 @@ int main() {
     CHECK(ledc_paused && !hardware_timer.alarm_enabled && index_of("ledc_bind") >= 0);
   }
 
-  { // Hardware start at the floor and at the hardware ceiling.
-    const unsigned long periods[] = {5, 1000};
-    const char* settings[] = {"timer_set 1280 1 ref", "timer_set 32000 4 ref"};
-    for (int k = 0; k < 2; ++k) {
+  { // Hardware start at the 1 us floor, at 5 us, and at the hardware ceiling.
+    const unsigned long periods[] = {1, 5, 1000};
+    const char* settings[] = {"timer_set 256 1 ref", "timer_set 1280 1 ref", "timer_set 32000 4 ref"};
+    for (int k = 0; k < 3; ++k) {
       reset_world();
       SwitchLine line; line.begin(); ops.clear();
       const unsigned long held_at = now_us;
