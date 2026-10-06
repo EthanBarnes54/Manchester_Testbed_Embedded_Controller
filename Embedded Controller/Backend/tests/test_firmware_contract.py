@@ -461,3 +461,47 @@ def test_a_readback_conversion_always_ends_before_the_next_diode_one():
     assert cpp_constant("READBACK_START_WINDOW_MS") == "MEASUREMENT_INTERVAL_MS - ADC_CONVERSION_TIMEOUT_MS"
     window = int(cpp_constant("MEASUREMENT_INTERVAL_MS").rstrip("UL")) - int(cpp_constant("ADC_CONVERSION_TIMEOUT_MS").rstrip("UL"))
     assert window > int(cpp_constant("ADC_FIRST_POLL_MS").rstrip("UL")), "a diode conversion must be able to finish inside it"
+
+
+# ----------------------------------------------------------------------------
+#                              Link integrity
+# ----------------------------------------------------------------------------
+
+
+def test_firmware_and_backend_speak_the_same_protocol_version():
+    assert int(cpp_constant("PROTOCOL_VERSION")) == backend_constant("PROTOCOL_VERSION")
+
+
+def test_every_line_to_the_host_carries_a_crc():
+    # The only direct writes are send_line() itself and the OTA progress counter.
+    writes = re.findall(r"Serial\.(?:print|println|printf|write)\(", MAIN_CPP)
+    assert len(writes) == 3
+
+    sender = cpp_block("void send_line(const String& line)")
+    assert "line_protocol::crc16(line.c_str(), line.length())" in sender
+    assert "Serial.print(line);" in sender and "Serial.println(suffix);" in sender
+
+
+def test_a_command_with_a_bad_crc_is_refused_and_does_not_feed_the_failsafe():
+    handler = cpp_block("void handle_command(String command)")
+    check = handler.index("line_protocol::Check::Invalid")
+
+    assert check < handler.index("last_command_ms_ = millis();")
+    assert check < handler.index('command.equalsIgnoreCase("PING")')
+    assert '"ERROR: Bad checksum!"' in handler and "supervisor_.note_bad_checksum();" in handler
+
+
+def test_every_reading_is_numbered_and_timestamped():
+    formatter = cpp_block("void report_voltage(float volts)")
+    assert '" V seq=" + sequence_ + " t_ms=" + millis()' in formatter
+    assert "++sequence_;" in formatter
+
+
+def test_the_version_reply_names_the_build_and_its_hardware():
+    assert route("VERSION") == "VERSION"
+    version = cpp_block("static void report_version()")
+    for field in ("firmware=", "protocol=", "build=", "gate_loopback=", "setpoint_readback="):
+        assert field in version
+
+    assert re.search(r"^extra_scripts = post:tools/firmware_version.py$", PLATFORMIO_INI, re.M)
+    assert (FIRMWARE_DIR / "tools" / "firmware_version.py").is_file()

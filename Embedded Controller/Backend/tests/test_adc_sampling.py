@@ -43,6 +43,8 @@ struct String {
 };
 String operator+(const String& a, const String& b) { return String(a.s + b.s); }
 String operator+(const String& a, const char* b) { return String(a.s + b); }
+String operator+(const String& a, unsigned int b) { return String(a.s + std::to_string(b)); }
+String operator+(const String& a, unsigned long b) { return String(a.s + std::to_string(b)); }
 
 static std::vector<std::string> lines;
 struct SerialPort {
@@ -93,6 +95,9 @@ struct Adafruit_ADS1115 {
   float computeVolts(int16_t counts) { return counts * 4.096f / 32768.0f; }
 };
 
+unsigned long millis() { return now_ms; }
+void send_line(const String& line) { lines.push_back(line.s); }
+
 // ---- The firmware under test ----
 
 @@FIRMWARE@@
@@ -124,7 +129,9 @@ int main() {
     run_to(m, 1000);
     CHECK(count("MEASURED ") >= 19 && count("MEASURED ") <= 20);
     CHECK(lines.size() == static_cast<size_t>(count("MEASURED ")));
-    CHECK(lines[0] == "MEASURED 1.25000 V");
+    // Numbered from 1 and stamped with the board's clock, so the host can see gaps and restarts.
+    CHECK(lines[0] == "MEASURED 1.25000 V seq=1 t_ms=" + std::to_string(58));
+    CHECK(lines[1].compare(0, 25, "MEASURED 1.25000 V seq=2 ") == 0);
     // Every diode conversion is reported, bar one that may still be in flight at the end.
     CHECK(!adc.restarted_mid_conversion && adc.starts_by_input[0] - count("MEASURED ") == (adc.converting ? 1 : 0));
     CHECK(adc.polls <= 2 * adc.starts);  // nothing is polled before the conversion can be ready

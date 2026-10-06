@@ -183,6 +183,12 @@ The board is always in one of three modes, reported by `FAULTS` and shown on the
 - A loop that stops for 5 s resets the chip (the loop watchdog), which comes back up in FAULT with the reset recorded. OTA uploads are only accepted while SAFE.
 - On the dashboard, ARM asks for confirmation. Sweeps and auto control refuse to run unless the board is ARMED, and closing the backend cleanly sends DISARM.
 
+## Serial link integrity
+- **Framing.** Every line in both directions ends with `*XXXX`, a CRC-16/CCITT-FALSE of the text (`include/line_protocol.h`; `binascii.crc_hqx` on the backend). The board refuses a command whose CRC does not match (`ERROR: Bad checksum!`, fault `BAD_CHECKSUM`), and such a line does not count as the host being alive. Lines typed by hand at a terminal carry no CRC and are accepted. Once the board has confirmed its protocol, the backend drops corrupted lines and protocol lines without a CRC, and counts both.
+- **Version handshake.** `VERSION` answers `firmware=<git describe> protocol=<n> build=<env> gate_loopback=<0|1> setpoint_readback=<0|1>`. The firmware is stamped at build time by `tools/firmware_version.py`. The backend asks on connect and will not arm a board whose protocol differs from its own `PROTOCOL_VERSION`.
+- **Readings.** `MEASURED <volts> V seq=<n> t_ms=<board ms>`. `seq` counts from 1 at boot, so the backend counts readings that went missing and notices a board restart.
+- **Replies.** The backend tracks every command it sends against the reply it expects, and counts replies, rejections (`ERROR`) and commands left unanswered for more than 1 s. The dashboard's link line shows the firmware, the protocol check and these counts.
+
 ## Built-in test
 - Power-on self-test, repeated on demand by `SELFTEST`: checks the clocks the switch timing assumes (APB 80 MHz, REF_TICK = APB / 80), both switch generators, the ADC and memory. It answers `SELFTEST PASS|FAIL clocks=.. switch=.. adc=.. memory=..`. A clock or switch-generator failure is critical and leaves the board in FAULT.
 - Continuous self-test, every loop pass: each pass is timed against a 20 ms budget, the ADC is watched for timeouts, and heap and loop-task stack are checked against floors once a second. Each raises its fault (`LOOP_OVERRUN`, `ADC_LOST`, `LOW_MEMORY`); over-long command lines raise `SERIAL_OVERFLOW`.

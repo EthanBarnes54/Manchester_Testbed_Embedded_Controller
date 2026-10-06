@@ -12,6 +12,7 @@
 #                               Imports                                  #
 # ---------------------------------------------------------------------- #
 
+import binascii
 import itertools
 import logging
 from collections import deque
@@ -125,6 +126,62 @@ CONTROL_PIN_COUNT = 5
 SWITCH_PERIOD_MIN_US = 1
 SWITCH_PERIOD_MAX_US = 2000000
 
+# Must match PROTOCOL_VERSION in the firmware. The backend will not arm a board whose
+# VERSION reply reports a different one.
+PROTOCOL_VERSION = 2
+
+# How long a command may go unanswered before it counts as a missed reply.
+ACK_TIMEOUT_SEC = 1.0
+
+# What each command is answered with, keyed by its first word. The board answers commands
+# in the order it received them, so the oldest outstanding command owns the next line
+# that matches it, or the next ERROR.
+COMMAND_REPLIES = {
+    "PING": ("OK",),
+    "VERSION": ("VERSION ",),
+    "ARM": ("ACK ARM",),
+    "DISARM": ("ACK DISARM",),
+    "FAULTS": ("FAULTS ",),
+    "CLEAR": ("ACK CLEAR",),
+    "SELFTEST": ("SELFTEST ",),
+    "HEALTH": ("HEALTH ",),
+    "PINS": ("PINS ",),
+    "GET": ("PINS ",),
+    "TARGETS": ("ACK TARGETS",),
+    "PIN": ("ACK PIN",),
+    "SWITCH_PERIOD_US": ("ACK SWITCH_PERIOD_US",),
+}
+
+# ERROR lines the board sends on its own, which never answer a command.
+UNSOLICITED_ERRORS = ("ERROR: ADC conversion timed out", "ERROR: OTA")
+
+# Lines that are part of the protocol, as opposed to free text such as Wi-Fi status. Once
+# the board has confirmed the protocol, these are only trusted with a valid CRC.
+PROTOCOL_PREFIXES = ("MEASURED", "PINS", "ACK", "ERROR", "OK", "FAULT", "FAILSAFE", "HEALTH", "SELFTEST", "VERSION")
+
+
+def frame_line(text: str) -> str:
+    """Appends the link's CRC, "*XXXX" (CRC-16/CCITT-FALSE), exactly as the firmware does."""
+
+    return f"{text}*{binascii.crc_hqx(text.encode('utf-8'), 0xFFFF):04X}"
+
+
+def unframe_line(line: str) -> tuple[str, str]:
+    """Splits off and checks a line's CRC. Returns (text, "valid" | "invalid" | "absent")."""
+
+    if len(line) >= 5 and line[-5] == "*" and all(digit in "0123456789abcdefABCDEF" for digit in line[-4:]):
+        text = line[:-5]
+        expected = binascii.crc_hqx(text.encode("utf-8"), 0xFFFF)
+        return text, ("valid" if int(line[-4:], 16) == expected else "invalid")
+
+    return line, "absent"
+
+
+def _command_word(command: str) -> str:
+    tokens = command.strip().split()
+    return tokens[0].upper() if tokens else ""
+
+
 # Keepalive cadence, kept well inside the firmware's COMMAND_TIMEOUT_MS so that a
 # quiet but healthy link is never mistaken for a dead host.
 KEEPALIVE_INTERVAL_SEC = 2.0
@@ -231,6 +288,17 @@ class SerialBackend:
         self.board_health = {}
         self.last_selftest = None
 
+        # The link: what the board says it is, whether it speaks this protocol (None until it
+        # has answered VERSION), what is waiting for a reply, and running counts.
+        self.board_version = {}
+        self.protocol_ok = True if self.force_offline else None
+        self._pending_replies = deque()
+        self._pending_lock = threading.Lock()
+        self._last_measured_seq = None
+        self.link_stats = dict.fromkeys(
+            ("lines", "bad_checksums", "unverified", "measured", "measured_missing", "board_restarts",
+             "replies", "rejections", "reply_timeouts", "queue_drops"), 0)
+
         self.sweep_thread = None
         self.sweep_status = {"state": "idle", "progress": 0.0, "message": ""}
         self.sweep_cancel = threading.Event()
@@ -308,6 +376,9 @@ class SerialBackend:
             self.serial = serial.Serial(self.port, self.baud, timeout=1)
             self._set_offline_state(False)
             log.info(f"Connected to ESP32 on {self.port} at {self.baud} baud...")
+
+            # Nothing is armed until the board has said which protocol it speaks.
+            self.send_command("VERSION")
             return True
 
         except serial.SerialException as fault:
@@ -339,6 +410,12 @@ class SerialBackend:
 
         if not self.force_offline:
             self.board_mode = "UNKNOWN"
+            self.protocol_ok = None
+            self.board_version = {}
+            self._last_measured_seq = None
+
+            with self._pending_lock:
+                self._pending_replies.clear()
 
     def set_save_dataset_enabled(self, enabled: bool):
         """Toggles dataset saving."""
@@ -670,11 +747,18 @@ class SerialBackend:
                     continue
 
                 timestamp = time.time()
+                message = self._accept_line(message)
+
+                if message is None:
+                    continue
 
                 if not self.lines.full():
                     self.lines.put((timestamp, message))
+                else:
+                    self.link_stats["queue_drops"] += 1
 
                 self._handle_board_line(timestamp, message)
+                self._match_reply(message)
 
             except serial.SerialException as serial_fault:
                 log.warning(f"ERROR: Serial exception - {serial_fault}! Reconnecting...")
@@ -685,10 +769,82 @@ class SerialBackend:
                 log.error(f"ERROR: Unexpected fault - {fault}! Reconnecting...")
                 self._stop_event.wait(0.5)
 
+    def _accept_line(self, raw: str) -> str | None:
+        """Checks a received line's CRC. Returns its text, or None if it must be dropped:
+        a CRC that does not match, or a protocol line without one once the board has
+        confirmed it speaks this protocol. Free text (Wi-Fi status, debug logs) needs none."""
+
+        self.link_stats["lines"] += 1
+        text, crc = unframe_line(raw)
+
+        if crc == "invalid":
+            self.link_stats["bad_checksums"] += 1
+            log.warning(f"WARNING: Dropped a corrupted line from the board: {raw!r}")
+            return None
+
+        if crc == "absent" and self.protocol_ok and text.startswith(PROTOCOL_PREFIXES):
+            self.link_stats["unverified"] += 1
+            log.warning(f"WARNING: Dropped a protocol line with no CRC: {raw!r}")
+            return None
+
+        return text
+
+    def _match_reply(self, message: str):
+        """Settles the oldest outstanding command if this line answers it."""
+
+        with self._pending_lock:
+            if not self._pending_replies:
+                return
+
+            _, _, prefixes = self._pending_replies[0]
+
+            if message.startswith(prefixes):
+                self._pending_replies.popleft()
+                self.link_stats["replies"] += 1
+
+            elif message.startswith("ERROR") and not message.startswith(UNSOLICITED_ERRORS):
+                self._pending_replies.popleft()
+                self.link_stats["rejections"] += 1
+
+    def _expire_pending_replies(self, now: float | None = None):
+        """Counts and drops commands that have waited longer than ACK_TIMEOUT_SEC for a reply."""
+
+        now = time.time() if now is None else now
+
+        with self._pending_lock:
+            while self._pending_replies and now - self._pending_replies[0][0] > ACK_TIMEOUT_SEC:
+                _, word, _ = self._pending_replies.popleft()
+                self.link_stats["reply_timeouts"] += 1
+                log.warning(f"WARNING: The board did not answer {word} within {ACK_TIMEOUT_SEC:.1f} s!")
+
+    def _note_measurement_sequence(self, message: str):
+        """Counts readings that went missing between two MEASURED lines, and board restarts."""
+
+        self.link_stats["measured"] += 1
+
+        try:
+            sequence = int(self._key_values(message)["seq"])
+        except (KeyError, ValueError):
+            return
+
+        previous = self._last_measured_seq
+        self._last_measured_seq = sequence
+
+        if previous is None:
+            return
+
+        if sequence > previous + 1:
+            self.link_stats["measured_missing"] += sequence - previous - 1
+
+        elif sequence <= previous:
+            self.link_stats["board_restarts"] += 1
+            log.warning(f"WARNING: MEASURED sequence went from {previous} back to {sequence}, the board has restarted!")
+
     def _handle_board_line(self, timestamp: float, message: str):
         """Acts on one line from the board: measurements, pin reports and safety state."""
 
         if message.startswith("MEASURED"):
+            self._note_measurement_sequence(message)
 
             try:
                 voltage = float(message.split()[1])
@@ -769,6 +925,20 @@ class SerialBackend:
             self.board_health = {"time": timestamp, **self._key_values(message)}
             self.board_mode = self.board_health.get("mode", self.board_mode)
 
+        elif message.startswith("VERSION "):
+            self.board_version = self._key_values(message)
+
+            try:
+                self.protocol_ok = int(self.board_version.get("protocol", -1)) == PROTOCOL_VERSION
+            except ValueError:
+                self.protocol_ok = False
+
+            if self.protocol_ok:
+                log.info(f"Board firmware {self.board_version.get('firmware')} speaks protocol {PROTOCOL_VERSION}...")
+            else:
+                log.error(f"ERROR: Board speaks protocol {self.board_version.get('protocol')}, this backend speaks "
+                          f"{PROTOCOL_VERSION}! Refusing to arm it.")
+
         elif message.startswith("SELFTEST "):
             tokens = message.split()
             self.last_selftest = {"time": timestamp, "result": tokens[1] if len(tokens) > 1 else "",
@@ -805,7 +975,15 @@ class SerialBackend:
         return self.board_mode == "ARMED"
 
     def arm(self):
-        """Asks the board to arm. It refuses while a critical fault is latched."""
+        """Asks the board to arm. It refuses while a critical fault is latched, and this
+        backend refuses until the board has confirmed it speaks the same protocol."""
+
+        if not self.force_offline and self.protocol_ok is not True:
+            reason = ("the board has not answered VERSION yet" if self.protocol_ok is None
+                      else f"the board speaks protocol {self.board_version.get('protocol')}, not {PROTOCOL_VERSION}")
+            self.last_arm_refusal = f"Backend refused to arm: {reason}"
+            log.error(f"ERROR: {self.last_arm_refusal}!")
+            return
 
         self.send_command("ARM")
 
@@ -827,6 +1005,15 @@ class SerialBackend:
         """Asks the board to rerun its power-on self-test and report the result."""
 
         self.send_command("SELFTEST")
+
+    def get_link_health(self) -> dict:
+        """The link's state: the board's VERSION reply, whether its protocol matches, and counts."""
+
+        with self._pending_lock:
+            outstanding = len(self._pending_replies)
+
+        return {"version": dict(self.board_version), "protocol_ok": self.protocol_ok,
+                "outstanding_replies": outstanding, **self.link_stats}
 
     def get_board_health(self) -> dict:
         """The board's last HEALTH report and self-test result."""
@@ -860,6 +1047,11 @@ class SerialBackend:
                 continue
 
             try:
+                self._expire_pending_replies()
+
+                if self.protocol_ok is None:
+                    self.send_command("VERSION")
+
                 self.send_command("PING")
 
                 # Also keeps the board's mode, faults and health current for the
@@ -1118,9 +1310,16 @@ class SerialBackend:
                     log.info(f"[SIMULATED] Received command: {command_string}")
                 return
 
-            # The sweep, the dashboard callbacks and the keepalive all share one port.
+            # The sweep, the dashboard callbacks and the keepalive all share one port. Each
+            # command goes out with its CRC, and is noted so its reply can be checked off.
+            word = _command_word(command_string)
+
             with self.command_lock:
-                self.serial.write((command_string + "\n").encode("utf-8"))
+                if word in COMMAND_REPLIES:
+                    with self._pending_lock:
+                        self._pending_replies.append((time.time(), word, COMMAND_REPLIES[word]))
+
+                self.serial.write((frame_line(command_string.strip()) + "\n").encode("utf-8"))
 
             log.info(f"Command sent to board: {command_string}...")
 

@@ -436,6 +436,7 @@ def _control_tab():
                 ],
             ),
             html.Div(id="health-status", children="Health: --", style={"marginTop": "0.35em", "color": "#555"}),
+            html.Div(id="link-status", children="Link: --", style={"marginTop": "0.2em", "color": "#555"}),
 
             html.Div(id="pin-status", style={"display": "flex", "flexWrap": "wrap", "gap": "0.5em 1em", "marginTop": "0.5em"}),
             html.Div(
@@ -1642,14 +1643,26 @@ def _health_summary(report: dict) -> str:
     return "Health: " + (" | ".join(parts) if parts else "--")
 
 
+def _link_summary(link: dict) -> str:
+    """One line on the serial link: which firmware, whether its protocol matches, and what went wrong."""
+
+    firmware = (link.get("version") or {}).get("firmware")
+    protocol = {True: "protocol ok", False: "PROTOCOL MISMATCH", None: "waiting for VERSION"}[link.get("protocol_ok")]
+    head = f"firmware {firmware}, {protocol}" if firmware else protocol
+
+    return (f"Link: {head} | {link.get('bad_checksums', 0)} corrupted lines | "
+            f"{link.get('measured_missing', 0)} missing readings | {link.get('reply_timeouts', 0)} unanswered commands")
+
+
 @app.callback(
     Output("health-status", "children"),
+    Output("link-status", "children"),
     Input("selftest-button", "n_clicks"),
     Input("update-interval", "n_intervals"),
 )
 
 def _health_readout(selftest_clicks, _):
-    """Runs the board's self-test on a click, and otherwise shows its latest HEALTH report."""
+    """Runs the board's self-test on a click, and otherwise shows its latest HEALTH report and the link's state."""
 
     if ctx.triggered_id == "selftest-button" and selftest_clicks:
         try:
@@ -1658,7 +1671,7 @@ def _health_readout(selftest_clicks, _):
         except Exception as fault:
             log.error(f"ERROR: Self-test request failed - {fault}!")
 
-    return _health_summary(Back_End_Controller.get_board_health())
+    return _health_summary(Back_End_Controller.get_board_health()), _link_summary(Back_End_Controller.get_link_health())
 
 
 @app.callback(

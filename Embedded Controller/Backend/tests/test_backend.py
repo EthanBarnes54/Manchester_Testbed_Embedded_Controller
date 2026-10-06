@@ -390,3 +390,98 @@ def test_a_self_test_result_is_recorded_and_a_failure_logged(live_backend, fake_
     live_backend.run_selftest()
     assert wait_for(lambda: live_backend.get_board_health()["selftest"]["result"] == "FAIL")
     assert "self-test failed" in caplog.text
+
+
+# ----------------------------------------------------------------------------
+#                              Link integrity
+# ----------------------------------------------------------------------------
+
+
+def test_every_command_goes_out_with_a_crc(armed_backend, fake_port):
+    armed_backend.set_pin_voltages([1.0, 0.5, 0.0, 3.3, 2.0])
+    armed_backend.set_switch_timing(5)
+
+    assert fake_port.raw_written and all(valid for _, valid in fake_port.raw_written)
+    assert fake_port.commands("TARGETS") == ["TARGETS 1.000000 0.500000 0.000000 3.300000 2.000000"]
+
+
+def test_the_backend_learns_the_board_version_on_connect(live_backend):
+    assert wait_for(lambda: live_backend.protocol_ok is True)
+    assert live_backend.get_link_health()["version"]["firmware"] == "fake"
+
+
+def test_a_board_speaking_another_protocol_is_never_armed(backend_module, fake_port):
+    fake_port.protocol = 1
+    backend = backend_module.SerialBackend(port="FAKE0", status=False)
+    backend.online_update_enabled = False
+    backend.start()
+
+    try:
+        assert wait_for(lambda: backend.protocol_ok is False)
+        backend.arm()
+        time.sleep(0.2)
+
+        assert fake_port.commands("ARM") == []
+        assert not backend.is_armed()
+        assert "protocol 1" in backend.get_board_safety()["last_arm_refusal"]
+    finally:
+        backend.stop()
+
+
+def test_corrupted_and_unchecksummed_lines_are_dropped_and_counted(live_backend, fake_port):
+    assert wait_for(lambda: live_backend.protocol_ok is True)
+
+    fake_port.put_raw("MEASURED 9.99999 V seq=1 t_ms=1*0000")       # CRC does not match
+    fake_port.put_raw("MEASURED 8.88888 V seq=2 t_ms=2")            # protocol line, no CRC
+    fake_port.put_raw("WiFi associating...")                        # free text needs none
+
+    assert wait_for(lambda: live_backend.link_stats["bad_checksums"] == 1 and live_backend.link_stats["unverified"] == 1)
+    assert not (live_backend.get_data()["voltage"] > 5).any()
+
+
+def test_missing_readings_and_board_restarts_are_counted(live_backend, fake_port):
+    fake_port.streaming.clear()
+    time.sleep(0.2)
+    last = live_backend._last_measured_seq
+    missing_before = live_backend.link_stats["measured_missing"]
+
+    for sequence in (last + 1, last + 2, last + 6, last + 7, 1):     # three lost, then a restart
+        fake_port.lines.put(f"MEASURED 1.00000 V seq={sequence} t_ms={sequence * 50}")
+
+    assert wait_for(lambda: live_backend.link_stats["board_restarts"] == 1)
+    assert live_backend.link_stats["measured_missing"] - missing_before == 3
+
+
+def test_replies_rejections_and_silence_are_all_accounted_for(live_backend, fake_port):
+    assert wait_for(lambda: live_backend.protocol_ok is True)
+    before = dict(live_backend.link_stats)
+
+    live_backend.request_faults()                         # answered
+    fake_port.mode = "FAULT"
+    live_backend.arm()                                    # answered with an ERROR
+    assert wait_for(lambda: live_backend.link_stats["rejections"] == before["rejections"] + 1)
+    assert live_backend.link_stats["replies"] >= before["replies"] + 1
+
+    live_backend.send_command("PINS")                     # the fake board never answers PINS
+    live_backend._expire_pending_replies(now=time.time() + 5)
+    assert live_backend.link_stats["reply_timeouts"] >= before["reply_timeouts"] + 1
+    assert live_backend.get_link_health()["outstanding_replies"] == 0
+
+
+def test_unsolicited_errors_never_settle_a_command(backend_module):
+    backend = backend_module.SerialBackend(port="FAKE0", status=False)
+    backend._pending_replies.append((time.time(), "ARM", backend_module.COMMAND_REPLIES["ARM"]))
+
+    backend._match_reply("ERROR: ADC conversion timed out!")
+    backend._match_reply("MEASURED 1.0 V seq=3 t_ms=150")
+    assert len(backend._pending_replies) == 1
+
+    backend._match_reply("ACK ARM")
+    assert len(backend._pending_replies) == 0 and backend.link_stats["replies"] == 1
+
+
+def test_frame_and_unframe_round_trip(backend_module):
+    framed = backend_module.frame_line("HEALTH")
+    assert backend_module.unframe_line(framed) == ("HEALTH", "valid")
+    assert backend_module.unframe_line(framed[:-1] + ("0" if framed[-1] != "0" else "1"))[1] == "invalid"
+    assert backend_module.unframe_line("WiFi associating...") == ("WiFi associating...", "absent")

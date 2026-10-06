@@ -174,8 +174,8 @@ def test_the_safety_readout_mirrors_the_board(client, shared_backend):
 
 
 def test_the_self_test_button_asks_the_board(client, shared_backend):
-    fire(client, [("health-status", "children")], [("selftest-button", "n_clicks", 1), ("update-interval", "n_intervals", 0)],
-         "selftest-button.n_clicks")
+    fire(client, [("health-status", "children"), ("link-status", "children")],
+         [("selftest-button", "n_clicks", 1), ("update-interval", "n_intervals", 0)], "selftest-button.n_clicks")
     assert shared_backend.sent == ["SELFTEST"]
 
 
@@ -189,6 +189,15 @@ def test_the_health_readout_summarises_the_board_report():
     assert summary == "Health: Loop 1.2 ms, peak 4.3 (budget 20 ms) | Heap 200 kB | ADC lost (7 timeouts) | Self-test FAIL"
     assert dashboard._health_summary({"health": {}, "selftest": None}) == "Health: --"
     assert dashboard._health_summary({"health": {"gate": "FAIL", "readback": "off"}, "selftest": None}) ==         "Health: Output checks: gate FAIL, readback off"
+
+
+def test_the_link_readout_names_the_firmware_and_what_went_wrong():
+    link = {"version": {"firmware": "1fa3f43"}, "protocol_ok": True, "bad_checksums": 2, "measured_missing": 5, "reply_timeouts": 1}
+    assert dashboard._link_summary(link) == \
+        "Link: firmware 1fa3f43, protocol ok | 2 corrupted lines | 5 missing readings | 1 unanswered commands"
+
+    assert dashboard._link_summary({"protocol_ok": None}).startswith("Link: waiting for VERSION |")
+    assert "PROTOCOL MISMATCH" in dashboard._link_summary({"version": {"firmware": "old"}, "protocol_ok": False})
 
 
 def test_momentum_edits_reach_the_model(client):

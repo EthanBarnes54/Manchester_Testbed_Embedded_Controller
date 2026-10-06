@@ -32,6 +32,7 @@
 #include "soc/ledc_struct.h"
 #include "soc/soc.h"
 #include "health_stats.h"
+#include "line_protocol.h"
 #include "output_checks.h"
 #include "safety_state.h"
 #include "switch_timing.h"
@@ -219,6 +220,29 @@ constexpr const char* WIFI_SSID_PLACEHOLDER = "YourSSID";
 constexpr unsigned long WIFI_ASSOCIATE_TIMEOUT_MS = 15000;
 constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 30000;
 
+// The serial protocol's version. Bump it whenever a line's format or meaning changes: the
+// backend will not arm a board whose VERSION reports a different one.
+constexpr int PROTOCOL_VERSION = 2;
+
+// Stamped by tools/firmware_version.py from git and the PlatformIO environment.
+#ifndef TESTBED_FIRMWARE_VERSION
+#define TESTBED_FIRMWARE_VERSION "unknown"
+#endif
+
+#ifndef TESTBED_BUILD_ENV
+#define TESTBED_BUILD_ENV "unknown"
+#endif
+
+}
+
+// Every line to the host goes through here and leaves with a CRC (line_protocol.h), so the
+// backend can tell a corrupted line from a real one. Only the debug LOG_ macros and the OTA
+// progress counter bypass it.
+void send_line(const String& line) {
+  char suffix[line_protocol::CHECKSUM_LENGTH + 1];
+  line_protocol::format_suffix(line_protocol::crc16(line.c_str(), line.length()), suffix);
+  Serial.print(line);
+  Serial.println(suffix);
 }
 
 Adafruit_ADS1115 ads;
@@ -513,7 +537,7 @@ class ChannelController {
 
   void set_channel(uint8_t channel_number, int value) {
     if (channel_number < 1 || channel_number > CHANNEL_COUNT) {
-      Serial.println("ERROR: PIN index out of range!");
+      send_line("ERROR: PIN index out of range!");
       return;
     }
 
@@ -525,12 +549,12 @@ class ChannelController {
 
       ledcWrite(LED_CONTROL_CHANNELS[channel_index], value);
       note_setpoint(channel_index, value);
-      Serial.println(String("ACK PIN ") + channel_number + " " + value);
+      send_line(String("ACK PIN ") + channel_number + " " + value);
       return;
     }
 
     stop_switching(value ? 1 : 0);
-    Serial.println(String("ACK PIN ") + channel_number + " " + switch_line_.reported_level());
+    send_line(String("ACK PIN ") + channel_number + " " + switch_line_.reported_level());
   }
 
   bool apply_target_voltages(const String& args) {
@@ -571,14 +595,13 @@ class ChannelController {
     int snapshot[CHANNEL_COUNT];
     snapshot_values(snapshot, CHANNEL_COUNT);
 
-    Serial.print("PINS ");
-    Serial.print("squeeze_plate="); Serial.print(snapshot[0]); Serial.print(" ");
-    Serial.print("ion_source=");    Serial.print(snapshot[1]); Serial.print(" ");
-    Serial.print("wein_filter=");   Serial.print(snapshot[2]); Serial.print(" ");
-    Serial.print("cone_1=");        Serial.print(snapshot[3]); Serial.print(" ");
-    Serial.print("cone_2=");        Serial.print(snapshot[4]); Serial.print(" ");
-    Serial.print("switch_logic=");  Serial.print(snapshot[5]);
-    Serial.println("");
+    send_line(String("PINS ") +
+              "squeeze_plate=" + snapshot[0] + " " +
+              "ion_source="    + snapshot[1] + " " +
+              "wein_filter="   + snapshot[2] + " " +
+              "cone_1="        + snapshot[3] + " " +
+              "cone_2="        + snapshot[4] + " " +
+              "switch_logic="  + snapshot[5]);
   }
 
   bool automate_switching(unsigned long period_us) {
@@ -739,9 +762,11 @@ class MeasurementService {
   }
 
   // Single formatter for every MEASURED line, so the streamed and on-demand readings
-  // always carry the same precision.
+  // always carry the same precision. seq counts readings from 1 at boot, so the host can
+  // see one go missing or the board restart; t_ms is the board's clock when it was taken.
   void report_voltage(float volts) {
-    Serial.println(String("MEASURED ") + String(volts, MEASURED_DECIMAL_PLACES) + " V");
+    ++sequence_;
+    send_line(String("MEASURED ") + String(volts, MEASURED_DECIMAL_PLACES) + " V seq=" + sequence_ + " t_ms=" + millis());
   }
 
   // READ is answered by the next conversion to complete. One already in flight is never
@@ -802,7 +827,7 @@ class MeasurementService {
 
       // Once per outage rather than at 20 Hz, but always in answer to a READ.
       if (!fault_reported_ || reading_requested_) {
-        Serial.println("ERROR: ADC conversion timed out!");
+        send_line("ERROR: ADC conversion timed out!");
       }
 
       reading_requested_ = false;
@@ -827,6 +852,7 @@ class MeasurementService {
   bool lost_ = false;
   uint32_t conversions_ = 0;
   uint32_t timeouts_ = 0;
+  uint32_t sequence_ = 0;
 
   void start_conversion(uint8_t input, unsigned long now_ms) {
     adc_.startADCReading(MUX_BY_CHANNEL[input], /*continuous=*/false);
@@ -933,7 +959,7 @@ class OtaWifiService {
 
     if (!credentials_configured()) {
       link_state_ = LinkState::Disabled;
-      Serial.println("WARNING: WiFi credentials not set, running on serial only...");
+      send_line("WARNING: WiFi credentials not set, running on serial only...");
       return;
     }
 
@@ -942,7 +968,7 @@ class OtaWifiService {
     if (ota_allowed_) {
       ArduinoOTA.setPassword(OTA_PASSWORD);
     } else {
-      Serial.println("WARNING: OTA password not set, over the air updates disabled...");
+      send_line("WARNING: OTA password not set, over the air updates disabled...");
     }
 
     ArduinoOTA.setHostname(hostname);
@@ -952,11 +978,11 @@ class OtaWifiService {
     // loop()), so nothing is live while the loop is held.
     ArduinoOTA.onStart([]() {
       disableLoopWDT();
-      Serial.println("OTA connection starting...");
+      send_line("OTA connection starting...");
     });
 
     ArduinoOTA.onEnd([]() {
-      Serial.println("OTA connection established...");
+      send_line("OTA connection established...");
       enableLoopWDT();
     });
 
@@ -968,13 +994,13 @@ class OtaWifiService {
 
     ArduinoOTA.onError([](ota_error_t error) {
       enableLoopWDT();
-      Serial.printf("Error[%u]: ", error);
 
-      if (error == OTA_AUTH_ERROR) Serial.println("ERROR: Authentication Failed!");
-      else if (error == OTA_BEGIN_ERROR) Serial.println("ERROR: Begin Failed!");
-      else if (error == OTA_CONNECT_ERROR) Serial.println("ERROR: Connect Failed!");
-      else if (error == OTA_RECEIVE_ERROR) Serial.println("ERROR: Receive Failed!");
-      else if (error == OTA_END_ERROR) Serial.println("ERROR: End Failed!");
+      if (error == OTA_AUTH_ERROR) send_line("ERROR: OTA authentication failed!");
+      else if (error == OTA_BEGIN_ERROR) send_line("ERROR: OTA begin failed!");
+      else if (error == OTA_CONNECT_ERROR) send_line("ERROR: OTA connect failed!");
+      else if (error == OTA_RECEIVE_ERROR) send_line("ERROR: OTA receive failed!");
+      else if (error == OTA_END_ERROR) send_line("ERROR: OTA end failed!");
+      else send_line(String("ERROR: OTA failed with code ") + static_cast<int>(error) + "!");
     });
 
     WiFi.mode(WIFI_STA);
@@ -1042,7 +1068,7 @@ class OtaWifiService {
     WiFi.begin(ssid_, password_);
     link_state_ = LinkState::Associating;
     state_entered_ms_ = millis();
-    Serial.println("WiFi associating...");
+    send_line("WiFi associating...");
   }
 
   void enter_online_state() {
@@ -1052,11 +1078,10 @@ class OtaWifiService {
     if (ota_allowed_ && !ota_started_) {
       ArduinoOTA.begin();
       ota_started_ = true;
-      Serial.println("Ready for OTA updates...");
+      send_line("Ready for OTA updates...");
     }
 
-    Serial.print("WiFi connected, IP address: ");
-    Serial.println(WiFi.localIP());
+    send_line(String("WiFi connected, IP address: ") + WiFi.localIP().toString());
   }
 
   // Drops OTA on the way down so the next association rebinds against the new address.
@@ -1068,7 +1093,7 @@ class OtaWifiService {
 
     link_state_ = LinkState::Waiting;
     state_entered_ms_ = millis();
-    Serial.println(reason);
+    send_line(reason);
   }
 };
 
@@ -1302,7 +1327,7 @@ class SystemSupervisor {
     // Output verification counts as passing when its hardware is not fitted ("off").
     const bool outputs_ok = strcmp(outputs_.gate_verdict(), "FAIL") != 0 && strcmp(outputs_.readback_verdict(), "FAIL") != 0;
     const bool pass = clocks_ok && switch_ok && adc_ok && memory_ok && outputs_ok;
-    Serial.println(String("SELFTEST ") + (pass ? "PASS" : "FAIL") + " clocks=" + verdict(clocks_ok) +
+    send_line(String("SELFTEST ") + (pass ? "PASS" : "FAIL") + " clocks=" + verdict(clocks_ok) +
                    " switch=" + verdict(switch_ok) + " adc=" + verdict(adc_ok) + " memory=" + verdict(memory_ok) +
                    " gate=" + outputs_.gate_verdict() + " readback=" + outputs_.readback_verdict() +
                    " mode=" + safety::name_of(state_.mode()));
@@ -1338,6 +1363,12 @@ class SystemSupervisor {
     resolve(safety::Fault::SerialOverflow);
   }
 
+  void note_bad_checksum() {
+    ++bad_checksums_;
+    raise(safety::Fault::BadChecksum);
+    resolve(safety::Fault::BadChecksum);
+  }
+
   // One line with everything needed to tell whether the board is keeping up: the worst
   // loop pass since the last report and since boot against its budget, memory headroom,
   // the ADC and the serial link.
@@ -1355,10 +1386,11 @@ class SystemSupervisor {
     line += String(" adc_conversions=") + measurement_.conversions();
     line += String(" adc_timeouts=") + measurement_.timeouts();
     line += String(" rx_overflows=") + serial_overflows_;
+    line += String(" bad_checksums=") + bad_checksums_;
     line += String(" gate=") + outputs_.gate_verdict();
     line += String(" gate_edges=") + outputs_.last_window_edges();
     line += String(" readback=") + outputs_.readback_verdict();
-    Serial.println(line);
+    send_line(line);
   }
 
   bool armed() const {
@@ -1371,18 +1403,18 @@ class SystemSupervisor {
     const char* refusal = state_.arm_refusal();
 
     if (refusal != nullptr) {
-      Serial.println(String("ERROR: Cannot arm - ") + refusal + "!");
+      send_line(String("ERROR: Cannot arm - ") + refusal + "!");
       return;
     }
 
     state_.arm();
     channels_.set_switch_armed(true);
-    Serial.println("ACK ARM");
+    send_line("ACK ARM");
   }
 
   void disarm() {
     make_safe();
-    Serial.println("ACK DISARM");
+    send_line("ACK DISARM");
   }
 
   // Zeroes every output and closes the gate, whatever the mode.
@@ -1401,7 +1433,7 @@ class SystemSupervisor {
 
     if (onset) {
       const bool critical = safety::severity_of(fault) == safety::Severity::Critical;
-      Serial.println(String("FAULT ") + safety::name_of(fault) + (critical ? " CRITICAL" : " WARNING") +
+      send_line(String("FAULT ") + safety::name_of(fault) + (critical ? " CRITICAL" : " WARNING") +
                      " mode=" + safety::name_of(state_.mode()));
     }
 
@@ -1414,7 +1446,7 @@ class SystemSupervisor {
 
   void clear_faults() {
     state_.clear_latched();
-    Serial.println(String("ACK CLEAR FAULTS mode=") + safety::name_of(state_.mode()));
+    send_line(String("ACK CLEAR FAULTS mode=") + safety::name_of(state_.mode()));
   }
 
   void clear_log() {
@@ -1426,7 +1458,7 @@ class SystemSupervisor {
     }
 
     persist_history();
-    Serial.println("ACK CLEAR LOG");
+    send_line("ACK CLEAR LOG");
   }
 
   void report_faults() const {
@@ -1438,7 +1470,7 @@ class SystemSupervisor {
     line += String(" boots=") + boots_;
     line += String(" unexpected_resets=") + unexpected_resets_;
     line += String(" last_reset=") + reset_name(reset_reason_);
-    Serial.println(line);
+    send_line(line);
   }
 
   // Called once per loop pass, so the heartbeat stops if the loop does.
@@ -1456,6 +1488,7 @@ class SystemSupervisor {
   unsigned long last_health_check_ms_ = 0;
   uint32_t overruns_at_last_check_ = 0;
   uint32_t serial_overflows_ = 0;
+  uint32_t bad_checksums_ = 0;
   Preferences log_;
   bool log_ready_ = false;
   uint32_t persisted_history_ = 0;
@@ -1608,6 +1641,14 @@ class CommandProcessor {
   unsigned long last_command_ms_ = 0;
   bool command_seen_ = false;
 
+  // Which firmware this is, which protocol it speaks, and which verification hardware the
+  // build expects. The backend checks protocol= before it will arm the board.
+  static void report_version() {
+    send_line(String("VERSION firmware=") + TESTBED_FIRMWARE_VERSION + " protocol=" + PROTOCOL_VERSION +
+              " build=" + TESTBED_BUILD_ENV + " gate_loopback=" + (GATE_LOOPBACK_FITTED ? 1 : 0) +
+              " setpoint_readback=" + (SETPOINT_READBACK_FITTED ? 1 : 0));
+  }
+
   static uint8_t to_pin_index(String token) {
     token.trim();
     String token_lower = token;
@@ -1625,6 +1666,19 @@ class CommandProcessor {
   void handle_command(String command) {
     command.trim();
 
+    // A line whose CRC does not match is refused whole and does not count as the host
+    // being alive: a link that only delivers garbage must still trip the failsafe.
+    size_t body_length = 0;
+
+    if (line_protocol::verify(command.c_str(), command.length(), &body_length) == line_protocol::Check::Invalid) {
+      send_line("ERROR: Bad checksum!");
+      supervisor_.note_bad_checksum();
+      return;
+    }
+
+    command.remove(body_length);
+    command.trim();
+
     if (command.isEmpty()) {
       return;
     }
@@ -1635,7 +1689,9 @@ class CommandProcessor {
     // Commands that would drive an output are refused unless the board is armed; ones that
     // set an output to zero are always accepted.
     if (command.equalsIgnoreCase("PING")) {
-      Serial.println("OK");
+      send_line("OK");
+    } else if (command.equalsIgnoreCase("VERSION")) {
+      report_version();
     } else if (command.equalsIgnoreCase("ARM")) {
       supervisor_.arm();
     } else if (command.equalsIgnoreCase("DISARM")) {
@@ -1659,21 +1715,21 @@ class CommandProcessor {
       const int first_space_index = command.indexOf(' ');
 
       if (first_space_index <= 0) {
-        Serial.println("ERROR: TARGETS requires five voltages!");
+        send_line("ERROR: TARGETS requires five voltages!");
         return;
       }
 
       const String args = command.substring(first_space_index + 1);
 
       if (!supervisor_.armed() && ChannelController::targets_would_energise(args)) {
-        Serial.println("ERROR: Not armed!");
+        send_line("ERROR: Not armed!");
         return;
       }
 
       if (channels_.apply_target_voltages(args)) {
-        Serial.println("ACK TARGETS");
+        send_line("ACK TARGETS");
       } else {
-        Serial.println("ERROR: TARGETS requires five voltages!");
+        send_line("ERROR: TARGETS requires five voltages!");
       }
     } else if (command.startsWith("PIN")) {
       const int first_space_index = command.indexOf(' ');
@@ -1686,19 +1742,19 @@ class CommandProcessor {
         const int value = command.substring(second_space_index + 1).toInt();
 
         if (!supervisor_.armed() && value > 0) {
-          Serial.println("ERROR: Not armed!");
+          send_line("ERROR: Not armed!");
           return;
         }
 
         channels_.set_channel(pin_index, value);
       } else {
-        Serial.println("ERROR: Invalid PIN syntax!");
+        send_line("ERROR: Invalid PIN syntax!");
       }
     } else if (command.startsWith("SWITCH_PERIOD_US")) {
       const int first_space_index = command.indexOf(' ');
 
       if (first_space_index <= 0) {
-        Serial.println("ERROR: Invalid switch time!");
+        send_line("ERROR: Invalid switch time!");
         return;
       }
 
@@ -1708,29 +1764,28 @@ class CommandProcessor {
 
       if (switch_period_us <= 0) {
         channels_.stop_switching(0);
-        Serial.println("ACK SWITCH_PERIOD_US 0 (disabled)");
+        send_line("ACK SWITCH_PERIOD_US 0 (disabled)");
         return;
       }
 
       if (!supervisor_.armed()) {
-        Serial.println("ERROR: Not armed!");
+        send_line("ERROR: Not armed!");
         return;
       }
 
       if (switch_period_us < SWITCH_PERIOD_MIN_US || switch_period_us > SWITCH_PERIOD_MAX_US) {
-        Serial.println("ERROR: Switch time out of bounds!");
+        send_line("ERROR: Switch time out of bounds!");
         return;
       }
 
       if (!channels_.automate_switching(static_cast<unsigned long>(switch_period_us))) {
-        Serial.println("ERROR: Switch timer unavailable!");
+        send_line("ERROR: Switch timer unavailable!");
         return;
       }
 
-      Serial.print("ACK SWITCH_PERIOD_US ");
-      Serial.println(switch_period_us);
+      send_line(String("ACK SWITCH_PERIOD_US ") + switch_period_us);
     } else {
-      Serial.println("ERROR: Unknown command received!");
+      send_line("ERROR: Unknown command received!");
       leds_.blink_error(2, 70);
     }
   }
@@ -1759,13 +1814,13 @@ void enforce_command_timeout(unsigned long now_ms) {
   if (host_overdue && !failsafe_engaged) {
     supervisor.make_safe();
     failsafe_engaged = true;
-    Serial.println("FAILSAFE outputs zeroed, no command received from host");
+    send_line("FAILSAFE outputs zeroed, no command received from host");
     supervisor.raise(safety::Fault::HostTimeout);
 
   } else if (!host_overdue && failsafe_engaged) {
     failsafe_engaged = false;
     supervisor.resolve(safety::Fault::HostTimeout);
-    Serial.println("FAILSAFE cleared, host link restored");
+    send_line("FAILSAFE cleared, host link restored");
   }
 }
 

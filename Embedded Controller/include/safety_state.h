@@ -32,6 +32,7 @@ enum class Fault : uint8_t {
   GateMismatch,     // the gate output disagrees with ARMED and the switch line (loopback)
   SwitchFrequency,  // the gate output's frequency differs from the period set (loopback)
   SetpointMismatch, // a setpoint reads back differently from its command (readback)
+  BadChecksum,      // a command arrived whose CRC did not match
   Count
 };
 
@@ -76,6 +77,8 @@ inline const char* name_of(Fault fault) {
       return "SWITCH_FREQUENCY";
     case Fault::SetpointMismatch:
       return "SETPOINT_MISMATCH";
+    case Fault::BadChecksum:
+      return "BAD_CHECKSUM";
     default:
       return "UNKNOWN";
   }

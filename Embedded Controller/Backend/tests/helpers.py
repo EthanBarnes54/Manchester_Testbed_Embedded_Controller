@@ -1,5 +1,6 @@
 """Test doubles and data shared across the suite."""
 
+import binascii
 import queue
 import threading
 import time
@@ -8,24 +9,55 @@ import numpy as np
 import pandas as pd
 
 
+def crc_suffix(text):
+    """The link's CRC as the firmware appends it (CRC-16/CCITT-FALSE, "*XXXX")."""
+
+    return f"*{binascii.crc_hqx(text.encode(), 0xFFFF):04X}"
+
+
 class FakePort:
-    """Plays the board's side of the serial link. Serves queued lines, falls back to a
-    steady MEASURED stream while streaming is on, records everything written, and answers
-    the safety and health commands (ARM, DISARM, FAULTS, CLEAR FAULTS, HEALTH, SELFTEST)
-    the way the firmware does."""
+    """Plays the board's side of the serial link, speaking protocol 2 like the firmware.
+
+    Serves queued lines with a CRC appended, falls back to a steady numbered MEASURED
+    stream while streaming is on, and answers VERSION and the safety and health commands
+    the way the firmware does. Everything written is recorded twice: the command text as the
+    firmware would act on it, and the raw line with whether its CRC checked out. Lines put
+    with put_raw() are served exactly as given, to play a corrupted or old-firmware board."""
 
     def __init__(self):
         self.lines = queue.Queue()
         self.written = []
+        self.raw_written = []
         self.opened = []
         self.streaming = threading.Event()
         self.streaming.set()
         self.line_interval = 0.01
         self.mode = "SAFE"
         self.selftest = "PASS"
+        self.protocol = 2
+        self.sequence = 0
 
     def commands(self, prefix=""):
         return [command for _, command in self.written if command.startswith(prefix)]
+
+    def put_raw(self, line):
+        self.lines.put(_Raw(line))
+
+    def serve(self):
+        """The next line the board sends, CRC and all."""
+
+        try:
+            line = self.lines.get_nowait()
+        except queue.Empty:
+            if not self.streaming.is_set():
+                return ""
+            self.sequence += 1
+            line = f"MEASURED 1.23456 V seq={self.sequence} t_ms={50 * self.sequence}"
+
+        if isinstance(line, _Raw):
+            return str(line)
+
+        return line + crc_suffix(line)
 
     def faults_line(self):
         return (f"FAULTS mode={self.mode} active=none latched=none history=none counts=none "
@@ -34,7 +66,10 @@ class FakePort:
     def respond(self, command):
         word = command.strip().upper()
 
-        if word == "ARM":
+        if word == "VERSION":
+            self.lines.put(f"VERSION firmware=fake protocol={self.protocol} build=test gate_loopback=0 setpoint_readback=0")
+
+        elif word == "ARM":
             if self.mode == "FAULT":
                 self.lines.put("ERROR: Cannot arm - a critical fault is latched, send CLEAR FAULTS!")
             else:
@@ -72,16 +107,24 @@ class FakePort:
 
             def readline(self):
                 time.sleep(port.line_interval)
-
-                try:
-                    return (port.lines.get_nowait() + "\n").encode()
-                except queue.Empty:
-                    return b"MEASURED 1.23456 V\n" if port.streaming.is_set() else b""
+                line = port.serve()
+                return (line + "\n").encode() if line else b""
 
             def write(self, data):
-                command = data.decode().strip()
-                port.written.append((time.time(), command))
-                port.respond(command)
+                raw = data.decode().strip()
+                text, valid = raw, None
+
+                if len(raw) >= 5 and raw[-5] == "*":
+                    text, valid = raw[:-5], crc_suffix(raw[:-5]) == raw[-5:]
+
+                port.raw_written.append((raw, valid))
+
+                if valid is False:
+                    port.lines.put("ERROR: Bad checksum!")
+                    return
+
+                port.written.append((time.time(), text))
+                port.respond(text)
 
             def close(self):
                 self.is_open = False
@@ -120,3 +163,7 @@ def sweep_shaped_frame(holds=40, samples_per_hold=8, seed=0):
             timestamp += 0.05
 
     return pd.DataFrame(rows)
+
+
+class _Raw(str):
+    """A line FakePort serves exactly as given, without adding a CRC."""
