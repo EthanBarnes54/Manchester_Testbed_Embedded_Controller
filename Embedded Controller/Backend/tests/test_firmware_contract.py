@@ -154,6 +154,13 @@ def test_switch_line_is_driven_low_before_anything_else_at_boot():
     assert first_statement == "SwitchLine::hold_low_at_boot()"
 
 
+def test_the_ledc_handover_runs_out_of_line_from_iram():
+    # Inlined into flash code, a cache miss between routing the pin and releasing the
+    # count would stretch the first pulse by microseconds.
+    assert "static void NOINLINE_ATTR IRAM_ATTR hand_pin_to_ledc()" in MAIN_CPP
+    assert "hand_pin_to_ledc();" in cpp_block("bool start_hardware(unsigned long period_us)")
+
+
 def test_failsafe_holds_the_switch_line_low():
     assert "stop_switching(0);" in cpp_block("void engage_safe_state()")
     assert "switch_line_.hold(switch_level != 0);" in cpp_block("void stop_switching(int switch_level)")

@@ -54,6 +54,7 @@ static int critical_depth = 0;
 static void op(const std::string& what) { ops.push_back(what + (critical_depth ? " [critical]" : "")); }
 
 #define IRAM_ATTR
+#define NOINLINE_ATTR
 #define OUTPUT 1
 #define BIT(nr) (1UL << (nr))
 #define REF_CLK_FREQ (1000000)
@@ -100,8 +101,30 @@ struct GpioDev {
 
 void pinMode(int, int) { pin_output_enabled = true; op("pinMode"); }
 
-// LEDC: one timer's configuration, its run state, and the overflow flag the class polls.
-struct TimerConf { uint32_t clock_divider = 0, duty_resolution = 0, tick_sel = 1; };
+// LEDC: the switch timer's conf register as one word laid out as in ledc_struct.h
+// (resolution 0-4, divider 5-22, pause 23, rst 24, tick_sel 25), so a write through
+// conf.val that dropped the divider or resolution would show. Only the switch's timer is
+// modelled. Plus the overflow flag the class polls.
+#define LEDC_HSTIMER0_PAUSE (1UL << 23)
+#define LEDC_HSTIMER0_RST (1UL << 24)
+static uint32_t timer_conf = 0;
+static unsigned long ledc_count_started_us = 0;
+static bool ledc_paused() { return (timer_conf & LEDC_HSTIMER0_PAUSE) != 0; }
+
+struct ConfWord {
+  operator uint32_t() const { return timer_conf; }
+  ConfWord& operator=(uint32_t value) {
+    const bool was_paused = ledc_paused();
+    timer_conf = value & ~LEDC_HSTIMER0_RST;
+    if (value & LEDC_HSTIMER0_RST) { ledc_count_started_us = now_us; op("ledc_rst"); }
+    if (was_paused != ledc_paused()) op(ledc_paused() ? "ledc_pause" : "ledc_resume");
+    return *this;
+  }
+};
+struct DividerField { operator uint32_t() const { return (timer_conf >> 5) & 0x3FFFF; } };
+struct ResolutionField { operator uint32_t() const { return timer_conf & 0x1F; } };
+struct TickField { operator uint32_t() const { return (timer_conf >> 25) & 1; } };
+struct TimerConf { DividerField clock_divider; ResolutionField duty_resolution; TickField tick_sel; ConfWord val; };
 struct TimerRegs { TimerConf conf; };
 struct TimerGroup { TimerRegs timer[4]; };
 struct ClearIntReg { ClearIntReg& operator=(uint32_t value); };
@@ -112,23 +135,20 @@ struct LedcDev {
 } LEDC;
 ClearIntReg& ClearIntReg::operator=(uint32_t value) { LEDC.int_raw.val &= ~value; op("clear_overflow"); return *this; }
 
-static bool ledc_paused = true;
-static unsigned long ledc_count_started_us = 0;
 static bool ledc_never_overflows = false;
 static bool ledc_drops_fraction = false;
 static bool ledc_bind_fails = false;
 
-esp_err_t ledc_timer_set(ledc_mode_t mode, ledc_timer_t timer, uint32_t divider, uint32_t bits, ledc_clk_src_t src) {
-  TimerConf& conf = LEDC.timer_group[mode].timer[timer].conf;
-  conf.clock_divider = (ledc_drops_fraction ? divider + 1 : divider) & 0x3FFFF;
-  conf.duty_resolution = bits & 0x1F;
-  conf.tick_sel = (src == LEDC_APB_CLK);
+esp_err_t ledc_timer_set(ledc_mode_t, ledc_timer_t, uint32_t divider, uint32_t bits, ledc_clk_src_t src) {
+  const uint32_t stored = (ledc_drops_fraction ? divider + 1 : divider) & 0x3FFFF;
+  timer_conf = (timer_conf & (LEDC_HSTIMER0_PAUSE | LEDC_HSTIMER0_RST)) | (stored << 5) | (bits & 0x1F) |
+               ((src == LEDC_APB_CLK ? 1UL : 0UL) << 25);
   op("timer_set " + std::to_string(divider) + " " + std::to_string(bits) + (src == LEDC_REF_TICK ? " ref" : " apb"));
   return ESP_OK;
 }
-esp_err_t ledc_timer_pause(ledc_mode_t, ledc_timer_t) { ledc_paused = true; op("ledc_pause"); return ESP_OK; }
-esp_err_t ledc_timer_resume(ledc_mode_t, ledc_timer_t) { ledc_paused = false; op("ledc_resume"); return ESP_OK; }
-esp_err_t ledc_timer_rst(ledc_mode_t, ledc_timer_t) { ledc_count_started_us = now_us; op("ledc_rst"); return ESP_OK; }
+esp_err_t ledc_timer_pause(ledc_mode_t, ledc_timer_t) { timer_conf |= LEDC_HSTIMER0_PAUSE; op("driver_pause"); return ESP_OK; }
+esp_err_t ledc_timer_resume(ledc_mode_t, ledc_timer_t) { timer_conf &= ~LEDC_HSTIMER0_PAUSE; op("driver_resume"); return ESP_OK; }
+esp_err_t ledc_timer_rst(ledc_mode_t, ledc_timer_t) { ledc_count_started_us = now_us; op("driver_rst"); return ESP_OK; }
 esp_err_t ledc_bind_channel_timer(ledc_mode_t, ledc_channel_t, ledc_timer_t) { op("ledc_bind"); return ledc_bind_fails ? -1 : ESP_OK; }
 esp_err_t ledc_set_duty_with_hpoint(ledc_mode_t, ledc_channel_t, uint32_t duty, uint32_t hpoint) {
   op("ledc_duty " + std::to_string(duty) + " hpoint " + std::to_string(hpoint));
@@ -140,9 +160,8 @@ esp_err_t ledc_update_duty(ledc_mode_t, ledc_channel_t) { op("ledc_update"); ret
 // (divider x 2^bits ticks of the 1 MHz REF_TICK) has passed since it was last reset.
 unsigned long micros() {
   ++now_us;
-  const TimerConf& conf = LEDC.timer_group[0].timer[3].conf;
-  const unsigned long cycle_us = (conf.clock_divider >> 8) << conf.duty_resolution;
-  if (!ledc_paused && !ledc_never_overflows && now_us - ledc_count_started_us >= cycle_us) LEDC.int_raw.val |= BIT(3);
+  const unsigned long cycle_us = (static_cast<uint32_t>(DividerField()) >> 8) << static_cast<uint32_t>(ResolutionField());
+  if (!ledc_paused() && !ledc_never_overflows && now_us - ledc_count_started_us >= cycle_us) LEDC.int_raw.val |= BIT(3);
   return now_us;
 }
 
@@ -173,6 +192,7 @@ static bool on_ledc() { return (pin_route[pin] & 0x1FF) == SWITCH_LEDC_SIGNAL &&
 static bool gpio_high() { return (gpio_out >> pin) & 1; }
 
 static int index_of(const std::string& what, int from = 0) {
+  if (from < 0) return -1;
   for (int i = from; i < static_cast<int>(ops.size()); ++i) if (ops[i].compare(0, what.size(), what) == 0) return i;
   return -1;
 }
@@ -186,7 +206,7 @@ static void fire_timer_interrupt() { if (hardware_timer.isr) hardware_timer.isr(
 static void reset_world() {
   ops.clear(); now_us = 1000; critical_depth = 0; gpio_out = BIT(pin); pin_output_enabled = false;
   for (uint32_t& r : pin_route) r = 0;
-  LEDC = LedcDev(); ledc_paused = true; ledc_count_started_us = 0;
+  LEDC = LedcDev(); timer_conf = LEDC_HSTIMER0_PAUSE | (1UL << 25); ledc_count_started_us = 0;
   ledc_never_overflows = ledc_drops_fraction = ledc_bind_fails = false;
   hardware_timer = hw_timer_t(); timer_available = true;
 }
@@ -205,7 +225,7 @@ int main() {
     reset_world();
     SwitchLine line; line.begin();
     CHECK(on_gpio() && !gpio_high() && line.reported_level() == 0);
-    CHECK(ledc_paused && !hardware_timer.alarm_enabled && index_of("ledc_bind") >= 0);
+    CHECK(ledc_paused() && !hardware_timer.alarm_enabled && index_of("ledc_bind") >= 0);
   }
 
   { // Hardware start at the 1 us floor, at 5 us, and at the hardware ceiling.
@@ -216,12 +236,12 @@ int main() {
       SwitchLine line; line.begin(); ops.clear();
       const unsigned long held_at = now_us;
       CHECK(line.start(periods[k]));
-      CHECK(on_ledc() && !ledc_paused && line.reported_level() == 1);
+      CHECK(on_ledc() && !ledc_paused() && line.reported_level() == 1);
 
       const int held = index_of("route_gpio");
       const int programmed = index_of(settings[k]);
       const int duty = index_of("ledc_duty");
-      const int priming = index_of("ledc_resume");
+      const int priming = index_of("driver_resume");
       const int restart = index_of("ledc_rst", priming);
       const int routed = index_of("route_ledc");
       const int released = index_of("ledc_resume", routed);
@@ -232,6 +252,12 @@ int main() {
       if (routed >= 0 && released >= 0) {
         CHECK(ops[routed].find("[critical]") != std::string::npos && ops[released].find("[critical]") != std::string::npos);
       }
+      // Nothing may come between handing the pin over and releasing the count, or it
+      // stretches the first pulse.
+      CHECK(released == routed + 1);
+      // The direct register writes kept the divider, counter width and clock it was given.
+      const uint32_t divider_now = DividerField(), bits_now = ResolutionField(), tick_now = TickField();
+      CHECK(programmed >= 0 && ops[programmed] == "timer_set " + std::to_string(divider_now) + " " + std::to_string(bits_now) + " ref" && tick_now == 0);
       // The line was held low for at least one whole new cycle before the pin was handed over.
       CHECK(now_us - held_at >= 2 * periods[k]);
       if (failures) dump();
@@ -251,7 +277,7 @@ int main() {
     reset_world();
     SwitchLine line; line.begin(); ops.clear();
     CHECK(line.start(SWITCH_HARDWARE_MAX_US + 1));
-    CHECK(on_gpio() && !gpio_high() && line.reported_level() == 1 && ledc_paused);
+    CHECK(on_gpio() && !gpio_high() && line.reported_level() == 1 && ledc_paused());
     const int held = index_of("route_gpio"), zeroed = index_of("timer_write 0");
     const int armed = index_of("alarm_write " + std::to_string(SWITCH_HARDWARE_MAX_US + 1) + " reload");
     const int enabled = index_of("alarm_enable");
@@ -283,8 +309,8 @@ int main() {
     gpio_out |= BIT(pin);  // a stale high left in the output register must not reach the pin
     ops.clear();
     line.hold(false);
-    CHECK(on_gpio() && !gpio_high() && ledc_paused && line.reported_level() == 0);
-    CHECK(index_of("gpio_clear") < index_of("route_gpio") && index_of("route_gpio") < index_of("ledc_pause"));
+    CHECK(on_gpio() && !gpio_high() && ledc_paused() && line.reported_level() == 0);
+    CHECK(index_of("gpio_clear") < index_of("route_gpio") && index_of("route_gpio") < index_of("driver_pause"));
   }
 
   { // A fixed level, and the timer interrupt does nothing while the line is held.
@@ -316,7 +342,7 @@ int main() {
     ledc_never_overflows = true;
     ops.clear();
     CHECK(!line.start(5));
-    CHECK(on_gpio() && !gpio_high() && ledc_paused && line.reported_level() == 0);
+    CHECK(on_gpio() && !gpio_high() && ledc_paused() && line.reported_level() == 0);
     CHECK(count_of("route_ledc") == 0 && index_of("log_error") >= 0);
   }
 
@@ -326,7 +352,7 @@ int main() {
     ledc_drops_fraction = true;
     ops.clear();
     CHECK(!line.start(5));
-    CHECK(on_gpio() && !gpio_high() && count_of("route_ledc") == 0 && count_of("ledc_resume") == 0);
+    CHECK(on_gpio() && !gpio_high() && count_of("route_ledc") == 0 && count_of("driver_resume") == 0 && count_of("ledc_resume") == 0);
   }
 
   { // With a generator missing, the request fails and nothing about the line changes.

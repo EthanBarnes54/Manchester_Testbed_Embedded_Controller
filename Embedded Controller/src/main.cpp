@@ -22,6 +22,7 @@
 #include "soc/gpio_reg.h"
 #include "soc/gpio_sig_map.h"
 #include "soc/gpio_struct.h"
+#include "soc/ledc_reg.h"
 #include "soc/ledc_struct.h"
 #include "soc/soc.h"
 #include "switch_timing.h"
@@ -254,16 +255,29 @@ class SwitchLine {
       return false;
     }
 
-    // Restart at the top of a cycle and hand the pin over before the count moves, so the
-    // line begins with a full high half-cycle.
     portENTER_CRITICAL(&mux_);
-    ledc_timer_pause(SWITCH_LEDC_MODE, SWITCH_LEDC_TIMER);
-    ledc_timer_rst(SWITCH_LEDC_MODE, SWITCH_LEDC_TIMER);
-    route_pin(SWITCH_LEDC_SIGNAL);
-    ledc_timer_resume(SWITCH_LEDC_MODE, SWITCH_LEDC_TIMER);
+    hand_pin_to_ledc();
     mode_ = Mode::Hardware;
     portEXIT_CRITICAL(&mux_);
     return true;
+  }
+
+  // Restarts the timer at the top of a cycle and gives it the pin. The pin is routed while
+  // the count is held at zero and released by the next store, so the first high
+  // half-cycle is stretched by tens of nanoseconds at most. Going through the driver here
+  // put its argument checks and spinlock between the two, which at 1 us between edges is a
+  // large share of the first pulse. Kept out of line in IRAM, so a flash cache miss
+  // cannot land between the two stores either. Pause and reset sit at the same bits in
+  // every high-speed timer's conf register.
+  static void NOINLINE_ATTR IRAM_ATTR hand_pin_to_ledc() {
+    auto& conf = LEDC.timer_group[SWITCH_LEDC_MODE].timer[SWITCH_LEDC_TIMER].conf;
+    const uint32_t held = conf.val | LEDC_HSTIMER0_PAUSE;
+
+    conf.val = held;
+    conf.val = held | LEDC_HSTIMER0_RST;
+    conf.val = held;
+    route_pin(SWITCH_LEDC_SIGNAL);
+    conf.val = held & ~LEDC_HSTIMER0_PAUSE;
   }
 
   bool start_interrupt(unsigned long period_us) {
@@ -367,7 +381,7 @@ class SwitchLine {
   // Gives GPIO 16 to the plain output register or to the LEDC channel in one register
   // write, so the pin never passes through a half-set routing. Output enable always comes
   // from GPIO_ENABLE (oen_sel), which pinMode() set at boot.
-  static void route_pin(uint32_t signal) {
+  static void IRAM_ATTR route_pin(uint32_t signal) {
     GPIO.func_out_sel_cfg[SWITCH_LOGIC_PIN].val = signal | GPIO_FUNC0_OEN_SEL;
   }
 };
