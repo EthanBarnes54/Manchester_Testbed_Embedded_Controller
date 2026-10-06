@@ -120,8 +120,8 @@ MAX_CONTROL_VOLTAGE = 3.3
 CONTROL_PIN_COUNT = 5
 
 # Must mirror SWITCH_PERIOD_MIN_US / SWITCH_PERIOD_MAX_US in the firmware. Both are the
-# time between edges, half a cycle, so the 1 us floor is a 500 kHz square wave. Below
-# 5 us has not been scoped on hardware.
+# time between edges, half a cycle, so the 1 us floor is a 500 kHz square wave. It is
+# the design floor, not yet scoped on hardware.
 SWITCH_PERIOD_MIN_US = 1
 SWITCH_PERIOD_MAX_US = 2000000
 

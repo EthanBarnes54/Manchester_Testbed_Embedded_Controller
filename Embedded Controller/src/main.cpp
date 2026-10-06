@@ -83,10 +83,10 @@ constexpr unsigned long COMMAND_TIMEOUT_MS = 5000;
 // interrupt toggles the pin: edges are then at least 1 ms apart, so the cost is
 // negligible, but each edge can move by the interrupt latency (microseconds).
 //
-// The 1 us floor (a 500 kHz square wave) is the smallest whole period, and the LEDC is
-// exact there: one counter bit, divider 1 on REF_TICK. It has NOT been scoped on
-// hardware; what the downstream driver can follow is the real limit. 5 us is the
-// requirement the rest of the stack was built to.
+// 1 us between edges (a 500 kHz square wave) is the design floor, and the LEDC is exact
+// there: one counter bit, divider 1 on REF_TICK. It has not been scoped on hardware yet.
+// What the gate's load can follow is the real limit, and that load is still to be
+// decided (README, "Switch output stage").
 constexpr int SWITCH_PERIOD_MIN_US = 1;
 constexpr int SWITCH_PERIOD_MAX_US = 2000000;
 constexpr int SWITCH_HARDWARE_MAX_US = 1000;
