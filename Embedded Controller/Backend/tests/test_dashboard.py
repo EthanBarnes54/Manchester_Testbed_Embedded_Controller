@@ -88,6 +88,20 @@ def test_the_switch_field_uses_the_shared_bounds_and_starts_empty(client):
     assert switch.get("value") is None
 
 
+@pytest.mark.parametrize("switch_us, accepted", [(5, True), (4, False), (2_000_000, True), (2_000_001, False)])
+def test_the_switch_field_accepts_5_us_to_2_s(client, shared_backend, monkeypatch, switch_us, accepted):
+    monkeypatch.setattr(shared_backend, "switch_timing", None)
+    reply = fire(client, PIN_OUTPUTS, DEFAULT_PINS + [("switch-time-us", "value", switch_us)], "switch-time-us.value")
+    message = reply["pins-ack"]["children"]
+
+    if accepted:
+        assert message.endswith(f"switch_time={switch_us:.1f} us")
+        assert shared_backend.switch_timing == switch_us
+    else:
+        assert message == "ERROR: Switch time out of range (5-2000000 us)!"
+        assert shared_backend.switch_timing is None
+
+
 def test_editing_a_voltage_sends_targets_and_leaves_the_switch_alone(client, shared_backend):
     reply = fire(client, PIN_OUTPUTS, DEFAULT_PINS + [("switch-time-us", "value", None)], "pwm1.value")
 

@@ -67,7 +67,10 @@ constexpr unsigned long COMMAND_TIMEOUT_MS = 5000;
 // an LEDC channel generates the line with no CPU work per edge. Above it the timer
 // interrupt toggles the pin: edges are then at least 1 ms apart, so the cost is
 // negligible, but each edge can move by the interrupt latency (microseconds).
-constexpr int SWITCH_PERIOD_MIN_US = 50;
+//
+// The 5 us floor (a 100 kHz square wave) is the requirement, not the generator's limit:
+// the LEDC is exact well below it. What the downstream driver can follow is the real limit.
+constexpr int SWITCH_PERIOD_MIN_US = 5;
 constexpr int SWITCH_PERIOD_MAX_US = 2000000;
 constexpr int SWITCH_HARDWARE_MAX_US = 1000;
 

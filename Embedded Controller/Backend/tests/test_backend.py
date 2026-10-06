@@ -118,6 +118,13 @@ def test_switch_timing_is_clamped_to_the_shared_bounds(backend_module, live_back
     ]
 
 
+def test_the_5_us_switch_floor_reaches_the_board(live_backend, fake_port):
+    live_backend.set_switch_timing(5)
+    live_backend.set_switch_timing(4)
+
+    assert fake_port.commands("SWITCH_PERIOD_US") == ["SWITCH_PERIOD_US 5", "SWITCH_PERIOD_US 5"]
+
+
 # ----------------------------------------------------------------------------
 #                                Provenance
 # ----------------------------------------------------------------------------
