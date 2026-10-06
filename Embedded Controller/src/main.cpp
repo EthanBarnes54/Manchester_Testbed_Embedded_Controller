@@ -23,6 +23,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "driver/ledc.h"
+#include "driver/pcnt.h"
 #include "soc/apb_ctrl_reg.h"
 #include "soc/gpio_reg.h"
 #include "soc/gpio_sig_map.h"
@@ -31,6 +32,7 @@
 #include "soc/ledc_struct.h"
 #include "soc/soc.h"
 #include "health_stats.h"
+#include "output_checks.h"
 #include "safety_state.h"
 #include "switch_timing.h"
 
@@ -55,6 +57,10 @@ constexpr int SWITCH_ARMED_PIN = 23;
 // timeout, without relying on this processor. Harmless with nothing fitted.
 constexpr int HEARTBEAT_PIN = 18;
 
+// The gate output looped back for output verification, when fitted (see below). An
+// input-only pin, untouched at boot.
+constexpr int GATE_LOOPBACK_PIN = 34;
+
 constexpr int CHANNEL_COUNT = 6;
 constexpr int CONTROLLED_PULSE_CHANNELS = 5;
 
@@ -73,6 +79,41 @@ constexpr unsigned long MEASUREMENT_INTERVAL_MS = 50;
 // dropped off the bus.
 constexpr unsigned long ADC_FIRST_POLL_MS = 7;
 constexpr unsigned long ADC_CONVERSION_TIMEOUT_MS = 40;
+
+// Output verification (README, "Output verification"). Each check is compiled in but
+// stays off until its build flag says the hardware is fitted, so a bench without it
+// cannot raise false faults. The deploy environment turns both on.
+#ifndef TESTBED_GATE_LOOPBACK
+#define TESTBED_GATE_LOOPBACK 0
+#endif
+
+#ifndef TESTBED_SETPOINT_READBACK
+#define TESTBED_SETPOINT_READBACK 0
+#endif
+
+constexpr bool GATE_LOOPBACK_FITTED = TESTBED_GATE_LOOPBACK != 0;
+constexpr bool SETPOINT_READBACK_FITTED = TESTBED_SETPOINT_READBACK != 0;
+
+// Gate loopback: the pulse counter counts rising edges on GATE_LOOPBACK_PIN. Its filter
+// drops anything shorter than 125 ns; a 1 us pulse is 80 APB cycles.
+constexpr pcnt_unit_t LOOPBACK_PCNT_UNIT = PCNT_UNIT_0;
+constexpr uint16_t LOOPBACK_FILTER_APB_CYCLES = 10;
+constexpr uint8_t GATE_MISMATCH_PASSES = 3;
+
+// Setpoint readback: ADS1115 AIN1-AIN3 read back setpoints 1-3 (squeeze_plate, ion_source,
+// wein_filter) through whatever network the board uses, scaled by READBACK_VOLTS_PER_VOLT.
+// cone_1 and cone_2 need a second ADS1115 (address 0x49) to be covered. A reading only
+// counts once the setpoint has had READBACK_SETTLE_MS to settle after a change.
+constexpr uint8_t READBACK_INPUTS = 3;
+constexpr uint8_t READBACK_SETPOINTS[READBACK_INPUTS] = {1, 2, 3};
+constexpr float READBACK_VOLTS_PER_VOLT = 1.0f;
+constexpr float READBACK_TOLERANCE_V = 0.15f;
+constexpr unsigned long READBACK_SETTLE_MS = 500;
+constexpr uint8_t READBACK_MISMATCH_READINGS = 3;
+
+// A readback conversion only starts this soon after a diode conversion started, so even
+// one that times out has finished before the next diode conversion is due.
+constexpr unsigned long READBACK_START_WINDOW_MS = MEASUREMENT_INTERVAL_MS - ADC_CONVERSION_TIMEOUT_MS;
 
 // +/-4.096 V is the tightest ADS1115 range that still covers the 0-3.3 V diode signal,
 // giving 125 uV per count against 187.5 uV at the library's +/-6.144 V default.
@@ -230,6 +271,8 @@ class SwitchLine {
     portENTER_CRITICAL(&mux_);
     mode_ = Mode::Held;
     held_high_ = high;
+    period_us_ = 0;
+    ++generation_;
     write_pin(high);
     route_pin(SIG_GPIO_OUT_IDX);
     portEXIT_CRITICAL(&mux_);
@@ -251,6 +294,23 @@ class SwitchLine {
     }
 
     return start_interrupt(period_us);
+  }
+
+  // What the line is doing, read consistently: switching or held, the held level, the
+  // period, and a generation that changes on every transition so a measurement spanning
+  // one can be thrown away.
+  struct Snapshot {
+    bool switching;
+    bool held_high;
+    uint32_t period_us;
+    uint32_t generation;
+  };
+
+  Snapshot snapshot() const {
+    portENTER_CRITICAL(const_cast<portMUX_TYPE*>(&mux_));
+    const Snapshot snapshot = {mode_ != Mode::Held, held_high_, period_us_, generation_};
+    portEXIT_CRITICAL(const_cast<portMUX_TYPE*>(&mux_));
+    return snapshot;
   }
 
   // Both generators came up in begin(). Checked by the power-on self-test.
@@ -276,6 +336,8 @@ class SwitchLine {
   Mode mode_ = Mode::Held;
   bool held_high_ = false;
   bool interrupt_high_ = false;
+  uint32_t period_us_ = 0;
+  uint32_t generation_ = 0;
   bool ledc_ready_ = false;
   hw_timer_t* timer_ = nullptr;
 
@@ -306,6 +368,8 @@ class SwitchLine {
     portENTER_CRITICAL(&mux_);
     hand_pin_to_ledc();
     mode_ = Mode::Hardware;
+    period_us_ = period_us;
+    ++generation_;
     portEXIT_CRITICAL(&mux_);
     return true;
   }
@@ -340,6 +404,8 @@ class SwitchLine {
     portENTER_CRITICAL(&mux_);
     interrupt_high_ = false;
     mode_ = Mode::Interrupt;
+    period_us_ = period_us;
+    ++generation_;
     timerWrite(timer_, 0);
     timerAlarmWrite(timer_, period_us, true);
     timerAlarmEnable(timer_);
@@ -458,7 +524,7 @@ class ChannelController {
       if (value > MAX_MODULATION_VALUE) value = MAX_MODULATION_VALUE;
 
       ledcWrite(LED_CONTROL_CHANNELS[channel_index], value);
-      channel_values_[channel_index] = value;
+      note_setpoint(channel_index, value);
       Serial.println(String("ACK PIN ") + channel_number + " " + value);
       return;
     }
@@ -527,6 +593,19 @@ class ChannelController {
     return switch_line_.generators_ready();
   }
 
+  SwitchLine::Snapshot switch_snapshot() const {
+    return switch_line_.snapshot();
+  }
+
+  // Setpoint channel_number (1-5) as last written, and when it last changed.
+  int setpoint_value(uint8_t channel_number) const {
+    return channel_values_[channel_number - 1];
+  }
+
+  unsigned long setpoint_changed_ms(uint8_t channel_number) const {
+    return setpoint_changed_ms_[channel_number - 1];
+  }
+
   // The external gate on the switch line. Opened only by SystemSupervisor on ARM, closed
   // by engage_safe_state().
   void set_switch_armed(bool armed) {
@@ -541,7 +620,7 @@ class ChannelController {
 
     for (int i = 0; i < CONTROLLED_PULSE_CHANNELS; ++i) {
       ledcWrite(LED_CONTROL_CHANNELS[i], 0);
-      channel_values_[i] = 0;
+      note_setpoint(i, 0);
     }
 
     stop_switching(0);
@@ -559,7 +638,16 @@ class ChannelController {
  private:
   // Setpoints only. The switch line keeps its own state.
   int channel_values_[CHANNEL_COUNT] = {0};
+  unsigned long setpoint_changed_ms_[CONTROLLED_PULSE_CHANNELS] = {0};
   SwitchLine switch_line_;
+
+  void note_setpoint(int channel_index, int value) {
+    if (channel_values_[channel_index] != value) {
+      setpoint_changed_ms_[channel_index] = millis();
+    }
+
+    channel_values_[channel_index] = value;
+  }
 
   void init_pwm_channels() {
     for (int i = 0; i < CONTROLLED_PULSE_CHANNELS; ++i) {
@@ -640,6 +728,16 @@ class MeasurementService {
     return timeouts_;
   }
 
+  // Setpoint readback (when fitted): the latest reading on ADS1115 input 1-3 and when it
+  // was taken, or 0 if there has not been one yet.
+  float readback_volts(uint8_t input) const {
+    return readback_volts_[input];
+  }
+
+  unsigned long readback_ms(uint8_t input) const {
+    return readback_ms_[input];
+  }
+
   // Single formatter for every MEASURED line, so the streamed and on-demand readings
   // always carry the same precision.
   void report_voltage(float volts) {
@@ -656,12 +754,19 @@ class MeasurementService {
   // the loop never waits on one. The library's readADC_SingleEnded() polls until the ADC
   // answers, and with the ADC missing or off the bus it never returns, which used to stop
   // the loop and the failsafe with it.
+  //
+  // The diode on AIN0 keeps its 50 ms schedule. With setpoint readback fitted, one readback
+  // conversion (AIN1-AIN3 in turn) fits in the gap after each diode conversion, so each
+  // setpoint is read about every 150 ms and the diode stream is never delayed.
   void update(unsigned long now_ms) {
     if (!converting_) {
-      if (reading_requested_ || now_ms - conversion_started_ms_ >= MEASUREMENT_INTERVAL_MS) {
-        adc_.startADCReading(MUX_BY_CHANNEL[0], /*continuous=*/false);
-        converting_ = true;
-        conversion_started_ms_ = now_ms;
+      if (reading_requested_ || now_ms - diode_started_ms_ >= MEASUREMENT_INTERVAL_MS) {
+        start_conversion(0, now_ms);
+        diode_started_ms_ = now_ms;
+        readback_due_ = SETPOINT_READBACK_FITTED;
+      } else if (readback_due_ && now_ms - diode_started_ms_ <= READBACK_START_WINDOW_MS) {
+        start_conversion(next_readback_input_, now_ms);
+        readback_due_ = false;
       }
 
       return;
@@ -675,11 +780,20 @@ class MeasurementService {
 
     if (adc_.conversionComplete()) {
       converting_ = false;
-      reading_requested_ = false;
       fault_reported_ = false;
       lost_ = false;
       ++conversions_;
-      report_voltage(adc_.computeVolts(adc_.getLastConversionResults()));
+      const float volts = adc_.computeVolts(adc_.getLastConversionResults());
+
+      if (input_ == 0) {
+        reading_requested_ = false;
+        report_voltage(volts);
+      } else {
+        readback_volts_[input_] = volts;
+        readback_ms_[input_] = now_ms;
+        next_readback_input_ = static_cast<uint8_t>(next_readback_input_ % READBACK_INPUTS + 1);
+      }
+
       return;
     }
 
@@ -701,12 +815,25 @@ class MeasurementService {
  private:
   Adafruit_ADS1115& adc_;
   unsigned long conversion_started_ms_ = 0;
+  unsigned long diode_started_ms_ = 0;
+  uint8_t input_ = 0;
+  bool readback_due_ = false;
+  uint8_t next_readback_input_ = 1;
+  float readback_volts_[READBACK_INPUTS + 1] = {0};
+  unsigned long readback_ms_[READBACK_INPUTS + 1] = {0};
   bool converting_ = false;
   bool reading_requested_ = false;
   bool fault_reported_ = false;
   bool lost_ = false;
   uint32_t conversions_ = 0;
   uint32_t timeouts_ = 0;
+
+  void start_conversion(uint8_t input, unsigned long now_ms) {
+    adc_.startADCReading(MUX_BY_CHANNEL[input], /*continuous=*/false);
+    converting_ = true;
+    conversion_started_ms_ = now_ms;
+    input_ = input;
+  }
 };
 
 // Blinks are scheduled rather than slept through - update() plays them out from loop(),
@@ -945,13 +1072,181 @@ class OtaWifiService {
   }
 };
 
+// Checks the outputs against what was commanded, through hardware fitted for it (README,
+// "Output verification"): the gate output looped back to GATE_LOOPBACK_PIN and counted by
+// the pulse counter, and three setpoints read back on the ADS1115's spare inputs. Each
+// part does nothing unless its build flag says the hardware is there.
+class OutputVerifier {
+ public:
+  OutputVerifier(ChannelController& channels, MeasurementService& measurement)
+      : channels_(channels),
+        measurement_(measurement),
+        gate_level_check_(GATE_MISMATCH_PASSES),
+        readback_checks_{output_checks::Debounce(READBACK_MISMATCH_READINGS), output_checks::Debounce(READBACK_MISMATCH_READINGS),
+                         output_checks::Debounce(READBACK_MISMATCH_READINGS)} {}
+
+  void begin() {
+    if (!GATE_LOOPBACK_FITTED) {
+      return;
+    }
+
+    pinMode(GATE_LOOPBACK_PIN, INPUT);
+
+    pcnt_config_t config = {};
+    config.pulse_gpio_num = GATE_LOOPBACK_PIN;
+    config.ctrl_gpio_num = PCNT_PIN_NOT_USED;
+    config.lctrl_mode = PCNT_MODE_KEEP;
+    config.hctrl_mode = PCNT_MODE_KEEP;
+    config.pos_mode = PCNT_COUNT_INC;
+    config.neg_mode = PCNT_COUNT_DIS;
+    config.counter_h_lim = 32767;
+    config.counter_l_lim = 0;
+    config.unit = LOOPBACK_PCNT_UNIT;
+    config.channel = PCNT_CHANNEL_0;
+
+    counter_ready_ = pcnt_unit_config(&config) == ESP_OK && pcnt_set_filter_value(LOOPBACK_PCNT_UNIT, LOOPBACK_FILTER_APB_CYCLES) == ESP_OK &&
+                     pcnt_filter_enable(LOOPBACK_PCNT_UNIT) == ESP_OK && pcnt_counter_clear(LOOPBACK_PCNT_UNIT) == ESP_OK;
+    window_started_us_ = micros();
+  }
+
+  // Once per loop pass.
+  void check(bool armed) {
+    if (GATE_LOOPBACK_FITTED) {
+      check_gate(armed);
+    }
+
+    if (SETPOINT_READBACK_FITTED) {
+      check_readback();
+    }
+  }
+
+  // The gate output disagrees with ARMED and the switch, or the loopback counter would not start.
+  bool gate_fault() const {
+    return GATE_LOOPBACK_FITTED && (!counter_ready_ || gate_level_check_.tripped() || stray_edges_);
+  }
+
+  bool frequency_fault() const {
+    return GATE_LOOPBACK_FITTED && frequency_wrong_;
+  }
+
+  bool readback_fault() const {
+    if (!SETPOINT_READBACK_FITTED) {
+      return false;
+    }
+
+    for (const output_checks::Debounce& check : readback_checks_) {
+      if (check.tripped()) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  const char* gate_verdict() const {
+    return !GATE_LOOPBACK_FITTED ? "off" : (gate_fault() || frequency_fault() ? "FAIL" : "ok");
+  }
+
+  const char* readback_verdict() const {
+    return !SETPOINT_READBACK_FITTED ? "off" : (readback_fault() ? "FAIL" : "ok");
+  }
+
+  uint32_t last_window_edges() const {
+    return last_window_edges_;
+  }
+
+ private:
+  ChannelController& channels_;
+  MeasurementService& measurement_;
+  output_checks::Debounce gate_level_check_;
+  output_checks::Debounce readback_checks_[READBACK_INPUTS];
+  unsigned long readback_checked_ms_[READBACK_INPUTS] = {0};
+  bool counter_ready_ = false;
+  bool frequency_wrong_ = false;
+  bool stray_edges_ = false;
+  unsigned long window_started_us_ = 0;
+  uint32_t window_generation_ = 0;
+  bool window_armed_ = false;
+  uint32_t last_window_edges_ = 0;
+
+  // Level every pass (debounced); edges over a window long enough to see about four
+  // cycles. A window that spans a switch or arming transition is thrown away.
+  void check_gate(bool armed) {
+    const SwitchLine::Snapshot line = channels_.switch_snapshot();
+    const output_checks::GateExpectation expected = output_checks::expected_gate(armed, line.switching, line.held_high);
+    const bool high = digitalRead(GATE_LOOPBACK_PIN) == HIGH;
+
+    if (expected != output_checks::GateExpectation::Switching) {
+      gate_level_check_.update(high != (expected == output_checks::GateExpectation::High));
+    } else {
+      gate_level_check_.update(false);
+    }
+
+    const unsigned long now_us = micros();
+    const unsigned long elapsed_us = now_us - window_started_us_;
+
+    if (!counter_ready_ || elapsed_us < output_checks::frequency_window_us(line.period_us)) {
+      return;
+    }
+
+    int16_t counted = 0;
+    pcnt_get_counter_value(LOOPBACK_PCNT_UNIT, &counted);
+    pcnt_counter_clear(LOOPBACK_PCNT_UNIT);
+    last_window_edges_ = counted < 0 ? 0 : static_cast<uint32_t>(counted);
+
+    const bool window_valid = line.generation == window_generation_ && armed == window_armed_;
+    window_started_us_ = now_us;
+    window_generation_ = line.generation;
+    window_armed_ = armed;
+
+    if (!window_valid) {
+      return;
+    }
+
+    if (expected == output_checks::GateExpectation::Switching) {
+      stray_edges_ = false;
+      frequency_wrong_ = !output_checks::edge_count_plausible(
+          last_window_edges_, output_checks::expected_rising_edges(elapsed_us, line.period_us));
+    } else {
+      // A closed gate or a held level passes no edges at all.
+      stray_edges_ = last_window_edges_ > 0;
+      frequency_wrong_ = false;
+    }
+  }
+
+  // Each fresh reading taken at least READBACK_SETTLE_MS after its setpoint last changed is
+  // compared with what that setpoint was commanded to. The difference is taken signed, so
+  // a reading from before the change is skipped rather than wrapping round.
+  void check_readback() {
+    for (uint8_t index = 0; index < READBACK_INPUTS; ++index) {
+      const uint8_t input = index + 1;
+      const uint8_t setpoint = READBACK_SETPOINTS[index];
+      const unsigned long read_ms = measurement_.readback_ms(input);
+
+      if (read_ms == 0 || read_ms == readback_checked_ms_[index]) {
+        continue;
+      }
+
+      readback_checked_ms_[index] = read_ms;
+
+      if (static_cast<long>(read_ms - channels_.setpoint_changed_ms(setpoint)) < static_cast<long>(READBACK_SETTLE_MS)) {
+        continue;
+      }
+
+      const float commanded_v = static_cast<float>(channels_.setpoint_value(setpoint)) / MAX_MODULATION_VALUE * 3.3f;
+      readback_checks_[index].update(!output_checks::readback_matches(
+          commanded_v * READBACK_VOLTS_PER_VOLT, measurement_.readback_volts(input), READBACK_TOLERANCE_V));
+    }
+  }
+};
+
 // Owns the safety state and everything it drives: the gate (ARMED), the external
 // watchdog heartbeat, the fault log in flash and the FAULTS report. Every change of mode
 // goes through here, so the outputs and the reported mode cannot disagree.
 class SystemSupervisor {
  public:
-  SystemSupervisor(ChannelController& channels, MeasurementService& measurement)
-      : channels_(channels), measurement_(measurement), loop_timing_(LOOP_BUDGET_US) {}
+  SystemSupervisor(ChannelController& channels, MeasurementService& measurement, OutputVerifier& outputs)
+      : channels_(channels), measurement_(measurement), outputs_(outputs), loop_timing_(LOOP_BUDGET_US) {}
 
   // Loads the fault history kept in flash, counts the boot and records why the chip
   // last reset. A watchdog, panic or brownout reset is a critical fault: the board comes
@@ -1002,10 +1297,14 @@ class SystemSupervisor {
     set_fault(safety::Fault::SwitchGenerator, !switch_ok);
     set_fault(safety::Fault::AdcLost, !adc_ok);
     set_fault(safety::Fault::LowMemory, !memory_ok);
+    report_output_faults();
 
-    const bool pass = clocks_ok && switch_ok && adc_ok && memory_ok;
+    // Output verification counts as passing when its hardware is not fitted ("off").
+    const bool outputs_ok = strcmp(outputs_.gate_verdict(), "FAIL") != 0 && strcmp(outputs_.readback_verdict(), "FAIL") != 0;
+    const bool pass = clocks_ok && switch_ok && adc_ok && memory_ok && outputs_ok;
     Serial.println(String("SELFTEST ") + (pass ? "PASS" : "FAIL") + " clocks=" + verdict(clocks_ok) +
                    " switch=" + verdict(switch_ok) + " adc=" + verdict(adc_ok) + " memory=" + verdict(memory_ok) +
+                   " gate=" + outputs_.gate_verdict() + " readback=" + outputs_.readback_verdict() +
                    " mode=" + safety::name_of(state_.mode()));
   }
 
@@ -1015,6 +1314,9 @@ class SystemSupervisor {
   void monitor(unsigned long now_ms, uint32_t pass_us) {
     loop_timing_.record(pass_us);
     set_fault(safety::Fault::AdcLost, measurement_.lost());
+
+    outputs_.check(state_.armed());
+    report_output_faults();
 
     if (now_ms - last_health_check_ms_ < HEALTH_CHECK_INTERVAL_MS) {
       return;
@@ -1053,6 +1355,9 @@ class SystemSupervisor {
     line += String(" adc_conversions=") + measurement_.conversions();
     line += String(" adc_timeouts=") + measurement_.timeouts();
     line += String(" rx_overflows=") + serial_overflows_;
+    line += String(" gate=") + outputs_.gate_verdict();
+    line += String(" gate_edges=") + outputs_.last_window_edges();
+    line += String(" readback=") + outputs_.readback_verdict();
     Serial.println(line);
   }
 
@@ -1145,6 +1450,7 @@ class SystemSupervisor {
  private:
   ChannelController& channels_;
   MeasurementService& measurement_;
+  OutputVerifier& outputs_;
   safety::SafetyState state_;
   health::LoopTiming loop_timing_;
   unsigned long last_health_check_ms_ = 0;
@@ -1157,6 +1463,14 @@ class SystemSupervisor {
   uint32_t unexpected_resets_ = 0;
   esp_reset_reason_t reset_reason_ = ESP_RST_UNKNOWN;
   bool heartbeat_high_ = false;
+
+  // The output checks' verdicts as faults. All three are critical: an output that is not
+  // doing what it was told disarms the board.
+  void report_output_faults() {
+    set_fault(safety::Fault::GateMismatch, outputs_.gate_fault());
+    set_fault(safety::Fault::SwitchFrequency, outputs_.frequency_fault());
+    set_fault(safety::Fault::SetpointMismatch, outputs_.readback_fault());
+  }
 
   void set_fault(safety::Fault fault, bool present) {
     if (present) {
@@ -1426,7 +1740,8 @@ ChannelController channels;
 MeasurementService measurement_service(ads);
 LedIndicator led_indicator(LED_PIN);
 OtaWifiService ota_wifi_service;
-SystemSupervisor supervisor(channels, measurement_service);
+OutputVerifier output_verifier(channels, measurement_service);
+SystemSupervisor supervisor(channels, measurement_service, output_verifier);
 CommandProcessor command_processor(channels, measurement_service, led_indicator, supervisor);
 
 bool failsafe_engaged = false;
@@ -1473,9 +1788,10 @@ void setup() {
   }
 
   channels.begin();
+  output_verifier.begin();
 
-  // Records the reset and runs the power-on self-test, so after the ADC and the switch
-  // generators have been brought up.
+  // Records the reset and runs the power-on self-test, so after the ADC, the switch
+  // generators and the output checks have been brought up.
   supervisor.begin();
   ota_wifi_service.begin(WIFI_SSID, WIFI_PASSWORD, OTA_HOSTNAME);
 

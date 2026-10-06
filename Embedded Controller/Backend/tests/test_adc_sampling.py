@@ -20,6 +20,9 @@ def firmware_source():
     names = ("MEASUREMENT_INTERVAL_MS", "ADC_FIRST_POLL_MS", "ADC_CONVERSION_TIMEOUT_MS", "MEASURED_DECIMAL_PLACES")
     lines = [re.search(rf"^constexpr [\w ]+ {name} = [^;]+;", MAIN_CPP, re.M).group(0) for name in names]
     lines.append(re.search(r"^constexpr adsGain_t ADC_GAIN = [^;]+;", MAIN_CPP, re.M).group(0))
+    lines.append(re.search(r"^#ifndef TESTBED_SETPOINT_READBACK\n.*?^#endif", MAIN_CPP, re.S | re.M).group(0))
+    for name in ("SETPOINT_READBACK_FITTED", "READBACK_INPUTS", "READBACK_START_WINDOW_MS"):
+        lines.append(re.search(rf"^constexpr [\w ]+ {name} = [^;]+;", MAIN_CPP, re.M).group(0))
     lines.append(re.search(r"^class MeasurementService \{.*?^\};", MAIN_CPP, re.S | re.M).group(0))
     return "\n".join(lines)
 
@@ -60,9 +63,12 @@ struct Adafruit_ADS1115 {
   bool present = true;
   bool converting = false;
   bool restarted_mid_conversion = false;
+  unsigned long conversion_ms = 8;
   unsigned long started_ms = 0;
   int starts = 0, polls = 0;
   uint16_t last_mux = 0;
+  int starts_by_input[4] = {0};
+  unsigned long last_diode_start = 0, worst_readback_lag = 0;
 
   void setGain(adsGain_t) {}
   bool begin() { return present; }
@@ -71,14 +77,19 @@ struct Adafruit_ADS1115 {
     if (!present) return;
     if (converting) restarted_mid_conversion = true;
     converting = !continuous; started_ms = now_ms; ++starts; last_mux = mux;
+    const int input = (mux - 0x4000) >> 12;
+    ++starts_by_input[input];
+    if (input == 0) last_diode_start = now_ms;
+    else if (now_ms - last_diode_start > worst_readback_lag) worst_readback_lag = now_ms - last_diode_start;
   }
   bool conversionComplete() {
     ++calls_this_update; ++polls;
     if (!present || !converting) return false;
-    if (now_ms - started_ms >= 8) { converting = false; return true; }
+    if (now_ms - started_ms >= conversion_ms) { converting = false; return true; }
     return false;
   }
-  int16_t getLastConversionResults() { ++calls_this_update; return 10000; }
+  // The diode reads 10000 counts (1.25 V); readback input n reads 1000 x n.
+  int16_t getLastConversionResults() { ++calls_this_update; const int input = (last_mux - 0x4000) >> 12; return input == 0 ? 10000 : 1000 * input; }
   float computeVolts(int16_t counts) { return counts * 4.096f / 32768.0f; }
 };
 
@@ -114,24 +125,25 @@ int main() {
     CHECK(count("MEASURED ") >= 19 && count("MEASURED ") <= 20);
     CHECK(lines.size() == static_cast<size_t>(count("MEASURED ")));
     CHECK(lines[0] == "MEASURED 1.25000 V");
-    CHECK(!adc.restarted_mid_conversion && adc.last_mux == MUX_BY_CHANNEL[0]);
+    // Every diode conversion is reported, bar one that may still be in flight at the end.
+    CHECK(!adc.restarted_mid_conversion && adc.starts_by_input[0] - count("MEASURED ") == (adc.converting ? 1 : 0));
     CHECK(adc.polls <= 2 * adc.starts);  // nothing is polled before the conversion can be ready
     CHECK(most_calls <= 2);
-    CHECK(!m.lost() && m.conversions() == static_cast<uint32_t>(count("MEASURED ")) && m.timeouts() == 0);
+    CHECK(!m.lost() && m.conversions() + (adc.converting ? 1 : 0) == static_cast<uint32_t>(adc.starts) && m.timeouts() == 0);
   }
 
   { // READ during a conversion is answered by that conversion and does not restart it.
     Adafruit_ADS1115 adc; MeasurementService m(adc); lines.clear(); now_ms = 0;
     run_to(m, 52);                       // a conversion started at 50 ms is in flight
-    CHECK(adc.converting && adc.starts == 1);
+    CHECK(adc.converting && adc.starts_by_input[0] == 1);
     m.request_reading();
     run_to(m, 60);
-    CHECK(adc.starts == 1 && !adc.restarted_mid_conversion);
+    CHECK(adc.starts_by_input[0] == 1 && !adc.restarted_mid_conversion);
     CHECK(count("MEASURED ") == 1);
     run_to(m, 99);                       // and the stream carries on from its own schedule
-    CHECK(adc.starts == 1);
+    CHECK(adc.starts_by_input[0] == 1);
     run_to(m, 100);
-    CHECK(adc.starts == 2);
+    CHECK(adc.starts_by_input[0] == 2);
   }
 
   { // READ with the ADC idle starts a conversion at once instead of waiting for the stream.
@@ -140,7 +152,7 @@ int main() {
     CHECK(!adc.converting && count("MEASURED ") == 1);
     m.request_reading();
     run_to(m, 71);
-    CHECK(adc.converting && adc.starts == 2);
+    CHECK(adc.converting && adc.starts_by_input[0] == 2);
     run_to(m, 80);
     CHECK(count("MEASURED ") == 2 && !adc.restarted_mid_conversion);
   }
@@ -165,18 +177,61 @@ int main() {
     CHECK(count("ERROR: ADC conversion timed out!") == 3);
   }
 
+#if TESTBED_SETPOINT_READBACK
+  { // Readback shares the ADC without touching the diode stream: each input is read in turn,
+    // only ever straight after a diode conversion, and lands in its own slot.
+    Adafruit_ADS1115 adc; MeasurementService m(adc); lines.clear(); now_ms = 0;
+    run_to(m, 1000);
+    CHECK(count("MEASURED ") >= 19 && count("MEASURED ") <= 20);
+    CHECK(!adc.restarted_mid_conversion);
+    for (int input = 1; input <= 3; ++input) {
+      CHECK(adc.starts_by_input[input] >= 5);
+      CHECK(m.readback_ms(input) > 0);
+      CHECK(m.readback_volts(input) == adc.computeVolts(static_cast<int16_t>(1000 * input)));
+    }
+    CHECK(adc.worst_readback_lag <= READBACK_START_WINDOW_MS);
+    CHECK(lines.size() == static_cast<size_t>(count("MEASURED ")));   // readbacks are never printed
+  }
+
+  { // An ADC slow enough that a readback could not finish before the next diode conversion
+    // gets none: the diode stream comes first.
+    Adafruit_ADS1115 adc; adc.conversion_ms = READBACK_START_WINDOW_MS + 2; MeasurementService m(adc);
+    lines.clear(); now_ms = 0;
+    run_to(m, 500);
+    CHECK(adc.worst_readback_lag <= READBACK_START_WINDOW_MS);
+    CHECK(adc.starts == adc.starts_by_input[0] && count("MEASURED ") >= 9);
+  }
+
+  { // A READ that arrives during a readback conversion is answered by the next diode conversion.
+    Adafruit_ADS1115 adc; MeasurementService m(adc); lines.clear(); now_ms = 0;
+    run_to(m, 60);                       // diode at 50 done by 58, readback started straight after
+    CHECK(adc.converting && (adc.last_mux - 0x4000) >> 12 != 0);
+    m.request_reading();
+    run_to(m, 80);
+    CHECK(count("MEASURED ") == 2 && !adc.restarted_mid_conversion);
+  }
+#else
+  { // Not fitted: only the diode is ever converted.
+    Adafruit_ADS1115 adc; MeasurementService m(adc); lines.clear(); now_ms = 0;
+    run_to(m, 500);
+    CHECK(adc.starts == adc.starts_by_input[0] && m.readback_ms(1) == 0);
+  }
+#endif
+
   return failures ? 1 : 0;
 }
 """
 
 
 @pytest.mark.skipif(shutil.which("g++") is None, reason="needs a host C++ compiler")
-def test_adc_sampling_on_the_host(tmp_path):
+@pytest.mark.parametrize("readback", [0, 1], ids=["readback not fitted", "readback fitted"])
+def test_adc_sampling_on_the_host(tmp_path, readback):
     source = tmp_path / "adc_sampling.cpp"
     binary = tmp_path / "adc_sampling"
     source.write_text(HARNESS.replace("@@FIRMWARE@@", firmware_source()))
 
-    build = subprocess.run(["g++", "-std=gnu++11", "-Wall", "-o", str(binary), str(source)], capture_output=True, text=True)
+    build = subprocess.run(["g++", "-std=gnu++11", "-Wall", f"-DTESTBED_SETPOINT_READBACK={readback}", "-o", str(binary), str(source)],
+                           capture_output=True, text=True)
     assert build.returncode == 0, build.stderr
 
     run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=60)

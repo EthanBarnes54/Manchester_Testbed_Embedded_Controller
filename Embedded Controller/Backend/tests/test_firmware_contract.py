@@ -416,3 +416,48 @@ def test_the_loop_budget_leaves_room_for_the_longest_legitimate_pass():
     # The longest pass by design is a period change priming the LEDC: two periods plus slack.
     longest_priming_us = 4 * int(cpp_constant("SWITCH_HARDWARE_MAX_US")) + int(cpp_constant("SWITCH_LEDC_SETTLE_MARGIN_US"))
     assert int(cpp_constant("LOOP_BUDGET_US")) >= 4 * longest_priming_us
+
+
+# ----------------------------------------------------------------------------
+#                            Output verification
+# ----------------------------------------------------------------------------
+
+
+def test_verification_hardware_is_off_unless_a_build_declares_it():
+    for flag in ("TESTBED_GATE_LOOPBACK", "TESTBED_SETPOINT_READBACK"):
+        assert f"#ifndef {flag}\n#define {flag} 0\n#endif" in MAIN_CPP
+
+    # Both checks are written as ordinary branches on constants, so the compiler checks
+    # them in every build, not only the one that turns them on.
+    assert "#if TESTBED_GATE_LOOPBACK" not in MAIN_CPP and "#if TESTBED_SETPOINT_READBACK" not in MAIN_CPP
+
+
+def test_the_loopback_pin_is_input_only_and_free():
+    pins = firmware_pins()
+    loopback = pins.pop("GATE_LOOPBACK_PIN")
+
+    assert 34 <= loopback <= 39, "an input-only pin, which nothing at boot can drive"
+    assert loopback not in pins.values()
+
+
+def test_outputs_are_verified_every_pass_and_at_power_on():
+    monitor = cpp_block("void monitor(unsigned long now_ms, uint32_t pass_us)")
+    assert monitor.index("outputs_.check(state_.armed());") < monitor.index("report_output_faults();")
+
+    report = cpp_block("void report_output_faults()")
+    for fault, verdict in [("GateMismatch", "gate_fault()"), ("SwitchFrequency", "frequency_fault()"),
+                           ("SetpointMismatch", "readback_fault()")]:
+        assert f"set_fault(safety::Fault::{fault}, outputs_.{verdict});" in report
+
+    self_test = cpp_block("  void self_test()")
+    assert "report_output_faults();" in self_test
+    assert "outputs_.gate_verdict()" in self_test and "outputs_.readback_verdict()" in self_test
+
+    setup = cpp_block("\nvoid setup()")
+    assert setup.index("output_verifier.begin();") < setup.index("supervisor.begin();")
+
+
+def test_a_readback_conversion_always_ends_before_the_next_diode_one():
+    assert cpp_constant("READBACK_START_WINDOW_MS") == "MEASUREMENT_INTERVAL_MS - ADC_CONVERSION_TIMEOUT_MS"
+    window = int(cpp_constant("MEASUREMENT_INTERVAL_MS").rstrip("UL")) - int(cpp_constant("ADC_CONVERSION_TIMEOUT_MS").rstrip("UL"))
+    assert window > int(cpp_constant("ADC_FIRST_POLL_MS").rstrip("UL")), "a diode conversion must be able to finish inside it"

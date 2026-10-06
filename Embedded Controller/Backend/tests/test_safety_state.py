@@ -92,7 +92,8 @@ int main() {
   }
 
   { // Only a fault that means the outputs cannot be trusted, or a reset nobody asked for, is critical.
-    const Fault critical[] = {Fault::UnexpectedReset, Fault::ClockConfig, Fault::SwitchGenerator};
+    const Fault critical[] = {Fault::UnexpectedReset, Fault::ClockConfig, Fault::SwitchGenerator,
+                             Fault::GateMismatch, Fault::SwitchFrequency, Fault::SetpointMismatch};
     for (uint8_t i = 0; i < FAULT_COUNT; ++i) {
       bool expected = false;
       for (Fault f : critical) expected = expected || static_cast<uint8_t>(f) == i;

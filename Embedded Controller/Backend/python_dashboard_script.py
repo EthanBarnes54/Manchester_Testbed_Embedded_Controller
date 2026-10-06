@@ -1633,6 +1633,9 @@ def _health_summary(report: dict) -> str:
     if "adc" in health:
         parts.append(f"ADC {health['adc']} ({health.get('adc_timeouts', '0')} timeouts)")
 
+    if "gate" in health:
+        parts.append(f"Output checks: gate {health['gate']}, readback {health.get('readback', '?')}")
+
     if selftest:
         parts.append(f"Self-test {selftest.get('result', '?')}")
 

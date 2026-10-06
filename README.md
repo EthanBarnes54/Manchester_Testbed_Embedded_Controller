@@ -156,6 +156,18 @@ The switch line reaches its load through an AND gate that the firmware has to en
 - Firmware behaviour: ARMED is driven low first thing in `setup()` and goes high only on an explicit `ARM` (see "Operating modes"). DISARM, the failsafe (host silent for 5 s) and any critical fault drop it before anything else. The switch's own state machine never touches ARMED.
 - External watchdog (recommended): GPIO 18 (HEARTBEAT) toggles on every loop pass. Feed it to a watchdog supervisor such as a TPS3823 and AND its output into the gate (a 3-input 74LVC1G11 in place of the 74LVC1G08), so the gate closes within the watchdog's timeout if the firmware stops, independently of the ESP32. With nothing fitted the pin is harmless.
 
+## Output verification (hardware)
+Two checks compare the outputs with what was commanded. Both are compiled into every build but stay off until a build flag says their hardware is fitted, so a bench without it cannot raise false faults:
+
+| Check | Hardware | Build flag | Faults (critical) |
+|---|---|---|---|
+| Gate loopback | The gate output Y wired back to GPIO 34 (input-only), through a 1 kOhm series resistor | `-DTESTBED_GATE_LOOPBACK=1` | `GATE_MISMATCH`: the gate output is high while disarmed, does not follow a held level, or passes edges while closed. `SWITCH_FREQUENCY`: the edges the pulse counter sees over a window of about four cycles (at least 20 ms) differ from the commanded period by more than 2 edges or 0.5% |
+| Setpoint readback | Setpoints 1-3 (squeeze_plate, ion_source, wein_filter) wired to ADS1115 AIN1-AIN3 through the same filter as the outputs | `-DTESTBED_SETPOINT_READBACK=1` | `SETPOINT_MISMATCH`: three settled readings in a row differ from the command by more than 0.15 V |
+
+- The readback scale (`READBACK_VOLTS_PER_VOLT`), tolerance and settling time are constants in `main.cpp`. Set them to match the board's network before enabling the check. cone_1 and cone_2 need a second ADS1115 at address 0x49 to be covered.
+- Readback conversions fit in the gap after each diode conversion, so the 20 Hz `MEASURED` stream is unchanged. Each setpoint is read about every 150 ms.
+- `SELFTEST` and `HEALTH` report `gate=` and `readback=` as `ok`, `FAIL`, or `off` when not fitted.
+
 ## Operating modes
 The board is always in one of three modes, reported by `FAULTS` and shown on the dashboard:
 

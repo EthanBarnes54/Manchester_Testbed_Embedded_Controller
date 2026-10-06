@@ -57,10 +57,10 @@ class FakePort:
         elif word == "HEALTH":
             self.lines.put(f"HEALTH mode={self.mode} uptime_ms=1000 loop_max_us=1100 loop_peak_us=2400 "
                            "loop_budget_us=20000 overruns=0 heap_free=200000 heap_min=190000 stack_free=5000 "
-                           "adc=ok adc_conversions=20 adc_timeouts=0 rx_overflows=0")
+                           "adc=ok adc_conversions=20 adc_timeouts=0 rx_overflows=0 gate=off gate_edges=0 readback=off")
 
         elif word == "SELFTEST":
-            self.lines.put(f"SELFTEST {self.selftest} clocks=ok switch=ok adc=ok memory=ok mode={self.mode}")
+            self.lines.put(f"SELFTEST {self.selftest} clocks=ok switch=ok adc=ok memory=ok gate=off readback=off mode={self.mode}")
 
     def make_serial_class(self):
         port = self

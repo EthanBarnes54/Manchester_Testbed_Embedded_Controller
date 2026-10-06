@@ -29,6 +29,9 @@ enum class Fault : uint8_t {
   LoopOverrun,      // a loop pass took longer than its budget
   LowMemory,        // free heap or the loop task's stack fell below its floor
   SerialOverflow,   // an over-long command line was thrown away
+  GateMismatch,     // the gate output disagrees with ARMED and the switch line (loopback)
+  SwitchFrequency,  // the gate output's frequency differs from the period set (loopback)
+  SetpointMismatch, // a setpoint reads back differently from its command (readback)
   Count
 };
 
@@ -39,6 +42,9 @@ inline Severity severity_of(Fault fault) {
     case Fault::UnexpectedReset:
     case Fault::ClockConfig:
     case Fault::SwitchGenerator:
+    case Fault::GateMismatch:
+    case Fault::SwitchFrequency:
+    case Fault::SetpointMismatch:
       return Severity::Critical;
     default:
       return Severity::Warning;
@@ -64,6 +70,12 @@ inline const char* name_of(Fault fault) {
       return "LOW_MEMORY";
     case Fault::SerialOverflow:
       return "SERIAL_OVERFLOW";
+    case Fault::GateMismatch:
+      return "GATE_MISMATCH";
+    case Fault::SwitchFrequency:
+      return "SWITCH_FREQUENCY";
+    case Fault::SetpointMismatch:
+      return "SETPOINT_MISMATCH";
     default:
       return "UNKNOWN";
   }

@@ -188,6 +188,7 @@ def test_the_health_readout_summarises_the_board_report():
 
     assert summary == "Health: Loop 1.2 ms, peak 4.3 (budget 20 ms) | Heap 200 kB | ADC lost (7 timeouts) | Self-test FAIL"
     assert dashboard._health_summary({"health": {}, "selftest": None}) == "Health: --"
+    assert dashboard._health_summary({"health": {"gate": "FAIL", "readback": "off"}, "selftest": None}) ==         "Health: Output checks: gate FAIL, readback off"
 
 
 def test_momentum_edits_reach_the_model(client):
