@@ -24,7 +24,7 @@ def firmware_source():
 
     lines = [
         re.search(rf"^constexpr int {name} = [^;]+;", MAIN_CPP, re.M).group(0)
-        for name in ("SWITCH_LOGIC_PIN", "CONTROLLED_PULSE_CHANNELS")
+        for name in ("SWITCH_LOGIC_PIN", "SWITCH_ARMED_PIN", "CONTROLLED_PULSE_CHANNELS")
     ]
     lines.append(re.search(r"^constexpr int LED_CONTROL_CHANNELS\[[^;]+;", MAIN_CPP, re.M).group(0))
     lines.append(
@@ -99,7 +99,7 @@ struct GpioDev {
   GpioDev() { for (int i = 0; i < 40; ++i) func_out_sel_cfg[i].val.pin = i; }
 } GPIO;
 
-void pinMode(int, int) { pin_output_enabled = true; op("pinMode"); }
+void pinMode(int pin, int) { pin_output_enabled = true; op("pinMode " + std::to_string(pin)); }
 
 // LEDC: the switch timer's conf register as one word laid out as in ledc_struct.h
 // (resolution 0-4, divider 5-22, pause 23, rst 24, tick_sel 25), so a write through
@@ -190,6 +190,7 @@ static const uint32_t pin = SWITCH_LOGIC_PIN;
 static bool on_gpio() { return (pin_route[pin] & 0x1FF) == SIG_GPIO_OUT_IDX && (pin_route[pin] & GPIO_FUNC0_OEN_SEL); }
 static bool on_ledc() { return (pin_route[pin] & 0x1FF) == SWITCH_LEDC_SIGNAL && (pin_route[pin] & GPIO_FUNC0_OEN_SEL); }
 static bool gpio_high() { return (gpio_out >> pin) & 1; }
+static bool armed() { return (gpio_out >> SWITCH_ARMED_PIN) & 1; }
 
 static int index_of(const std::string& what, int from = 0) {
   if (from < 0) return -1;
@@ -204,7 +205,7 @@ static int count_of(const std::string& what) {
 static void fire_timer_interrupt() { if (hardware_timer.isr) hardware_timer.isr(); }
 
 static void reset_world() {
-  ops.clear(); now_us = 1000; critical_depth = 0; gpio_out = BIT(pin); pin_output_enabled = false;
+  ops.clear(); now_us = 1000; critical_depth = 0; gpio_out = BIT(pin) | BIT(SWITCH_ARMED_PIN); pin_output_enabled = false;
   for (uint32_t& r : pin_route) r = 0;
   LEDC = LedcDev(); timer_conf = LEDC_HSTIMER0_PAUSE | (1UL << 25); ledc_count_started_us = 0;
   ledc_never_overflows = ledc_drops_fraction = ledc_bind_fails = false;
@@ -217,8 +218,8 @@ int main() {
   { // Boot: the output register is cleared before the output is enabled.
     reset_world();
     SwitchLine::hold_low_at_boot();
-    CHECK(ops.size() == 2 && ops[0] == "gpio_clear" && ops[1] == "pinMode");
-    CHECK(!gpio_high() && pin_output_enabled);
+    CHECK(ops.size() == 3 && ops[0] == "gpio_clear" && ops[1] == "pinMode " + std::to_string(SWITCH_LOGIC_PIN) && ops[2] == "pinMode " + std::to_string(SWITCH_ARMED_PIN));
+    CHECK(!gpio_high() && !armed() && pin_output_enabled);
   }
 
   { // begin(): held low on the output register, both generators parked.
@@ -368,6 +369,21 @@ int main() {
     SwitchLine other; other.begin();
     CHECK(!other.start(5));
     CHECK(on_gpio() && !gpio_high() && other.reported_level() == 0);
+  }
+
+  { // ARMED follows set_armed() alone: no switch transition or interrupt ever moves it.
+    reset_world();
+    SwitchLine::hold_low_at_boot();      // as setup() does, before begin()
+    SwitchLine line; line.begin();
+    CHECK(!armed());
+    SwitchLine::set_armed(true);
+    CHECK(armed() && !gpio_high());
+    line.start(1); line.start(5); line.hold(true); line.hold(false);
+    line.start(5000); fire_timer_interrupt(); fire_timer_interrupt(); line.hold(false);
+    CHECK(armed());
+    SwitchLine::set_armed(false);
+    line.start(5); line.start(5000); fire_timer_interrupt();
+    CHECK(!armed());
   }
 
   CHECK(critical_depth == 0);

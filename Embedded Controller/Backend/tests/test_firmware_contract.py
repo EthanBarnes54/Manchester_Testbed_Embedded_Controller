@@ -166,6 +166,35 @@ def test_failsafe_holds_the_switch_line_low():
     assert "switch_line_.hold(switch_level != 0);" in cpp_block("void stop_switching(int switch_level)")
 
 
+def firmware_pins():
+    return {name: int(number) for name, number in re.findall(r"constexpr int (\w+_PIN) = (\d+);", MAIN_CPP)}
+
+
+def test_armed_pin_is_free_and_untouched_at_boot():
+    pins = firmware_pins()
+    armed = pins.pop("SWITCH_ARMED_PIN")
+
+    assert armed not in pins.values(), "ARMED shares a pin with another output"
+    assert armed not in {0, 2, 5, 12, 15}, "strapping pins are read at reset"
+    assert armed not in set(range(6, 12)) | {16, 17}, "flash, and the PSRAM probe's chip-select and clock"
+    assert armed not in {1, 3, 21, 22}, "UART0 and the I2C bus to the ADS1115"
+    assert armed < 32, "set_armed() writes the GPIO 0-31 output registers"
+
+
+def test_the_failsafe_closes_the_gate_before_anything_else():
+    body = cpp_block("void engage_safe_state()")
+    assert body.strip().startswith("set_switch_armed(false);")
+    assert body.index("set_switch_armed(false);") < body.index("stop_switching(0);")
+
+
+def test_the_gate_opens_before_a_command_runs_and_once_setup_is_done():
+    handler = cpp_block("void handle_command(String command)")
+    assert handler.index("channels_.set_switch_armed(true);") < handler.index('command.equalsIgnoreCase("PING")')
+
+    setup = cpp_block("\nvoid setup()")
+    assert setup.index("channels.begin();") < setup.index("channels.set_switch_armed(true);")
+
+
 def test_keepalive_runs_well_inside_the_failsafe_timeout():
     timeout_s = int(cpp_constant("COMMAND_TIMEOUT_MS").rstrip("UL")) / 1000.0
     assert timeout_s >= 2 * backend_constant("KEEPALIVE_INTERVAL_SEC")

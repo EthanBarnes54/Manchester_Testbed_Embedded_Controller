@@ -6,6 +6,8 @@
 //  4) cone_1         (PWM 0..1023)
 //  5) cone_2         (PWM 0..1023)
 //  6) switch_logic   (digital 0/1)
+//
+// GPIO 23 (ARMED) enables the external AND gate between switch_logic and its load.
 
 #include <Arduino.h>
 #include "log.h"
@@ -37,6 +39,11 @@ constexpr int WEIN_FILTER_PIN = 27;
 constexpr int CONE_1_PIN = 32;
 constexpr int CONE_2_PIN = 33;
 constexpr int SWITCH_LOGIC_PIN = 16;
+
+// Second input of the AND gate between GPIO 16 and the load, with a pull-down on the board.
+// GPIO 23 is not a strapping pin, and neither the bootloader nor the PSRAM probe touches
+// it, unlike GPIO 16 (the PSRAM chip-select on this chip).
+constexpr int SWITCH_ARMED_PIN = 23;
 
 constexpr int CHANNEL_COUNT = 6;
 constexpr int CONTROLLED_PULSE_CHANNELS = 5;
@@ -85,6 +92,7 @@ constexpr int SWITCH_PERIOD_MAX_US = 2000000;
 constexpr int SWITCH_HARDWARE_MAX_US = 1000;
 
 constexpr uint32_t SWITCH_PIN_MASK = (1UL << SWITCH_LOGIC_PIN);
+constexpr uint32_t SWITCH_ARMED_PIN_MASK = (1UL << SWITCH_ARMED_PIN);
 
 // The Arduino core maps LEDC channel c to speed group c / 8 and timer (c / 2) % 4, so the
 // setpoints on channels 0-4 hold high-speed timers 0-2 and channel 6 has timer 3 to
@@ -161,12 +169,26 @@ Adafruit_ADS1115 ads;
 // it on purpose, including at boot and when the failsafe trips.
 class SwitchLine {
  public:
-  // GPIO 16 floats from reset until this runs, so setup() calls it before anything else.
-  // The output register is cleared before the output is enabled, so the pin goes
-  // straight from floating to low.
+  // GPIO 16 and ARMED float from reset until this runs, so setup() calls it before
+  // anything else. The output register is cleared before the outputs are enabled, so both
+  // pins go straight from floating to low.
   static void hold_low_at_boot() {
-    GPIO.out_w1tc = SWITCH_PIN_MASK;
+    GPIO.out_w1tc = SWITCH_PIN_MASK | SWITCH_ARMED_PIN_MASK;
     pinMode(SWITCH_LOGIC_PIN, OUTPUT);
+    pinMode(SWITCH_ARMED_PIN, OUTPUT);
+  }
+
+  // ARMED opens the external AND gate that passes GPIO 16 to the load. It is low from
+  // reset, held there by the board's pull-down until this firmware drives it, so nothing
+  // the chip does to GPIO 16 while booting can reach the load. The failsafe drops it as a
+  // second path to low, independent of GPIO 16. It never changes the switch mode, and
+  // nothing in the switch state machine touches it.
+  static void set_armed(bool armed) {
+    if (armed) {
+      GPIO.out_w1ts = SWITCH_ARMED_PIN_MASK;
+    } else {
+      GPIO.out_w1tc = SWITCH_ARMED_PIN_MASK;
+    }
   }
 
   // Needs the LEDC driver already up for the high-speed group, which the setpoint
@@ -457,9 +479,18 @@ class ChannelController {
     switch_line_.hold(switch_level != 0);
   }
 
+  // The external gate on the switch line: closed at boot, opened once setup() is done and
+  // whenever the host speaks, closed by the failsafe.
+  void set_switch_armed(bool armed) {
+    SwitchLine::set_armed(armed);
+  }
+
   // Drops every output back to zero and stops the switch line. Used when the host
   // stops talking to us, so a latched target cannot outlive the controlling process.
+  // The gate closes first, which takes the switch off the load in one register write.
   void engage_safe_state() {
+    set_switch_armed(false);
+
     for (int i = 0; i < CONTROLLED_PULSE_CHANNELS; ++i) {
       ledcWrite(LED_CONTROL_CHANNELS[i], 0);
       channel_values_[i] = 0;
@@ -901,6 +932,11 @@ class CommandProcessor {
     last_command_ms_ = millis();
     command_seen_ = true;
 
+    // Any command means the host is back, so the gate opens before the command runs.
+    // Left to the failsafe clearing later in the pass, a switch started by this command
+    // would reach the load part way through a pulse.
+    channels_.set_switch_armed(true);
+
     if (command.equalsIgnoreCase("PING")) {
       Serial.println("OK");
     } else if (command.equalsIgnoreCase("READ")) {
@@ -1022,6 +1058,9 @@ void setup() {
 
   channels.begin();
   ota_wifi_service.begin(WIFI_SSID, WIFI_PASSWORD, OTA_HOSTNAME);
+
+  // The switch line is held low with both generators parked, so the gate can open.
+  channels.set_switch_armed(true);
 
   LOG_INFO("Setup complete. Awaiting commands...");
   led_indicator.set_low();

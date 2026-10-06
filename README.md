@@ -138,6 +138,23 @@ Adaptive embedded control and ML feedback stack for the Manchester Ion Beam Test
 
 - Metrics separation: `MetricCollector` isolates dashboard-friendly summaries from raw data, keeping the UI lightweight.
 
+## Switch output stage (hardware)
+The switch line reaches its load through an AND gate that the firmware has to enable, so nothing GPIO 16 does before the firmware is running can reach the load.
+
+```
+ GPIO 16 (switch_logic) ──────────┐
+                                  ├─ AND ── Y ──┬── to the load
+ GPIO 23 (ARMED) ──┬──────────────┘             │
+                 10 kΩ                       10-100 kΩ
+                   │                            │
+                  GND                          GND
+```
+
+- Gate: 74LVC1G08 on 3.3 V. If the load needs 5 V logic, use a 74AHCT1G08 on 5 V: its TTL-level inputs accept the ESP32's 3.3 V, which a 5 V-powered 74LVC part does not reliably do.
+- The 10 kΩ pull-down holds ARMED low from reset until the firmware drives it. The second pull-down keeps the gate output low if the gate is unpowered.
+- Why it is needed: GPIO 16 is undriven from reset, and the Arduino core's PSRAM probe uses it as a chip-select during boot, before any of this firmware runs. The gate stays closed through all of that.
+- Firmware behaviour: ARMED is driven low first thing in `setup()`, and goes high once setup is done and the switch line is held low. The failsafe (host silent for 5 s) drops ARMED before anything else, and any host command raises it again before the command runs. The switch's own state machine never touches ARMED.
+
 ## Troubleshooting
 - Connection: confirm `SERIAL_PORT`/`upload_port` match the board; send a `PING` over serial to check link health.
 
