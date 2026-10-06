@@ -27,6 +27,7 @@ import pandas as pd
 import serial
 
 from python_ML_Metrics import MetricCollector
+from python_Autonomy_Guard import AutonomyGuard
 
 try:
 
@@ -44,6 +45,8 @@ try:
         scaler,
         compute_feature_saliencies,
         propose_control_vector,
+        get_validation_metrics,
+        get_training_feature_stats,
     )
 
 except Exception:
@@ -80,6 +83,12 @@ except Exception:
         raise RuntimeError("ERROR: Feature saliencies unavailable! (RNN controller import failed...)")
 
     propose_control_vector = None
+
+    def get_validation_metrics():
+        return {}
+
+    def get_training_feature_stats():
+        return None
 
 
 # ------------------------------------------------------------------------- # 
@@ -315,6 +324,9 @@ class SerialBackend:
         self.auto_control_period_ms = AUTO_CONTROL_DEFAULT_PERIOD_MS
         self.auto_control_change_penalty = AUTO_CONTROL_DEFAULT_CHANGE_PENALTY
         self.auto_control_status = {"state": "off", "message": "", "last_update": None}
+
+        # Runtime assurance between the model and the board (python_Autonomy_Guard).
+        self.autonomy_guard = AutonomyGuard()
 
         self.thread = None
         self.online_update_thread = None
@@ -1087,6 +1099,14 @@ class SerialBackend:
 
             self.auto_control_change_penalty = max(0.0, penalty_value)
 
+        if enabled and not self.auto_control_enabled:
+            admissible, reason = self.autonomy_guard.model_admissible(get_validation_metrics())
+
+            if not admissible:
+                self._set_auto_control_status("refused", f"Auto control refused: {reason}")
+                log.warning(f"WARNING: Auto control refused - {reason}!")
+                return self.get_auto_control()
+
         if enabled is not None and bool(enabled) != self.auto_control_enabled:
             self.auto_control_enabled = bool(enabled)
             self._set_auto_control_status("starting" if self.auto_control_enabled else "off")
@@ -1097,11 +1117,15 @@ class SerialBackend:
     def get_auto_control(self) -> dict:
         """Returns the auto control settings alongside what the controller is currently doing."""
 
+        counts = self.autonomy_guard.counts
+
         return {
             "enabled": bool(self.auto_control_enabled),
             "period_ms": float(self.auto_control_period_ms),
             "change_penalty": float(self.auto_control_change_penalty),
             **dict(self.auto_control_status),
+            "guard": {"accepted": counts.accepted, "limited": counts.limited, "rejected": counts.rejected,
+                      "held_for_drift": counts.held_for_drift},
         }
 
     def _set_auto_control_status(self, state: str, message: str = ""):
@@ -1145,17 +1169,31 @@ class SerialBackend:
             self._set_auto_control_status("waiting", f"Newest reading is {sample_age:.1f} s old")
             return False
 
+        # Outside the data the model was trained on, its proposals mean nothing: hold.
+        drifted, reason = self.autonomy_guard.drift(data_frame, get_training_feature_stats())
+
+        if drifted:
+            self._set_auto_control_status("holding", f"Input drift - {reason}")
+            return False
+
         try:
             # TODO: Replace manual change-penalty tuning with Bayesian optimisation.
-            targets = propose_control_vector(data_frame, change_penalty=self.auto_control_change_penalty)
+            proposal = propose_control_vector(data_frame, change_penalty=self.auto_control_change_penalty)
 
         except Exception as fault:
             self._set_auto_control_status("waiting", f"No proposal - {fault}")
             return False
 
-        self.set_pin_voltages(targets)
+        current = [self.pulse_to_voltage(pin) for pin in self.pins[:CONTROL_PIN_COUNT]]
+        review = self.autonomy_guard.review(proposal, current)
 
-        self._set_auto_control_status("running")
+        if review.targets is None:
+            self._set_auto_control_status("holding", f"Proposal rejected - {review.reason}")
+            return False
+
+        self.set_pin_voltages(review.targets)
+
+        self._set_auto_control_status("running", f"Limited - {review.reason}" if review.action == "limit" else "")
         self.auto_control_status["last_update"] = time.time()
 
         return True

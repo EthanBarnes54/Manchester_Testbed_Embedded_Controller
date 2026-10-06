@@ -225,7 +225,7 @@ def test_auto_control_settings_are_clamped(backend_module):
     assert backend.set_auto_control(change_penalty=-5)["change_penalty"] == 0.0
 
 
-def test_auto_control_acts_only_when_enabled_armed_fresh_and_not_sweeping(backend_module, stub_proposer, fake_port):
+def test_auto_control_acts_only_when_enabled_armed_fresh_and_not_sweeping(backend_module, stub_proposer, fake_port, validated_model):
     backend = backend_module.SerialBackend(port="FAKE0", status=False)
     backend.connect()
 
@@ -252,10 +252,11 @@ def test_auto_control_acts_only_when_enabled_armed_fresh_and_not_sweeping(backen
     backend.sweep_status = {"state": "idle"}
     assert backend._auto_control_step() is True
     assert stub_proposer == [0.3]
-    assert fake_port.commands("TARGETS") == ["TARGETS 1.000000 1.000000 1.000000 1.000000 1.000000"]
+    # The stub asks for 1 V from 0 V; the guard moves each channel one 0.25 V step.
+    assert fake_port.commands("TARGETS") == ["TARGETS 0.250000 0.250000 0.250000 0.250000 0.250000"]
 
 
-def test_auto_control_runs_on_its_own_thread_at_the_configured_rate(armed_backend, fake_port, stub_proposer):
+def test_auto_control_runs_on_its_own_thread_at_the_configured_rate(armed_backend, fake_port, stub_proposer, validated_model):
     live_backend = armed_backend
     live_backend.set_auto_control(enabled=True, period_ms=100)
     time.sleep(1.5)
@@ -269,7 +270,7 @@ def test_auto_control_runs_on_its_own_thread_at_the_configured_rate(armed_backen
     assert len(fake_port.commands("TARGETS")) == sent, "kept actuating after being disabled"
 
 
-def test_auto_control_stops_steering_when_the_board_goes_quiet(backend_module, armed_backend, fake_port, stub_proposer, monkeypatch):
+def test_auto_control_stops_steering_when_the_board_goes_quiet(backend_module, armed_backend, fake_port, stub_proposer, monkeypatch, validated_model):
     live_backend = armed_backend
     monkeypatch.setattr(backend_module, "AUTO_CONTROL_MAX_SAMPLE_AGE_SEC", 0.3)
     live_backend.set_auto_control(enabled=True, period_ms=100)
@@ -485,3 +486,63 @@ def test_frame_and_unframe_round_trip(backend_module):
     assert backend_module.unframe_line(framed) == ("HEALTH", "valid")
     assert backend_module.unframe_line(framed[:-1] + ("0" if framed[-1] != "0" else "1"))[1] == "invalid"
     assert backend_module.unframe_line("WiFi associating...") == ("WiFi associating...", "absent")
+
+
+# ----------------------------------------------------------------------------
+#                          Auto control safeguards
+# ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("validation, reason", [
+    ({}, "no held-out validation score"),
+    ({"validation_r2": -6.0}, "below the 0.50 floor"),
+])
+def test_auto_control_is_refused_without_a_validated_model(backend_module, monkeypatch, validation, reason):
+    monkeypatch.setattr(backend_module, "get_validation_metrics", lambda: validation)
+    backend = backend_module.SerialBackend(port="FAKE0", status=True)
+
+    state = backend.set_auto_control(enabled=True)
+
+    assert state["enabled"] is False and state["state"] == "refused" and reason in state["message"]
+
+
+@pytest.fixture
+def stepping_backend(backend_module, fake_port, validated_model):
+    backend = backend_module.SerialBackend(port="FAKE0", status=False)
+    backend.connect()
+    backend._handle_board_line(time.time(), "ACK ARM")
+    backend.update_pin_values(1, backend.voltage_to_pulse(1.0))
+    backend._append_measurement(time.time(), 1.0, "MEASURED 1.0 V")
+    backend.set_auto_control(enabled=True)
+    return backend
+
+
+def test_a_wild_proposal_is_held_to_the_envelope_and_the_step_limit(backend_module, stepping_backend, fake_port, monkeypatch):
+    monkeypatch.setattr(backend_module, "propose_control_vector", lambda frame, change_penalty=0.1: [9.0, -4.0, 1.0, 3.3, 0.0])
+
+    assert stepping_backend._auto_control_step() is True
+    sent = [float(v) for v in fake_port.commands("TARGETS")[-1].split()[1:]]
+
+    # Pin 1 starts at 1.0 V and pins 2-5 at 0 V; nothing moves more than 0.25 V or leaves 0-3.3 V.
+    assert sent == pytest.approx([1.25, 0.0, 0.25, 0.25, 0.0], abs=0.005)
+    assert "limited" in stepping_backend.get_auto_control()["message"].lower()
+    assert stepping_backend.get_auto_control()["guard"]["limited"] == 1
+
+
+def test_a_malformed_proposal_sends_nothing(backend_module, stepping_backend, fake_port, monkeypatch):
+    monkeypatch.setattr(backend_module, "propose_control_vector", lambda frame, change_penalty=0.1: [1.0, float("nan"), 1.0, 1.0, 1.0])
+    before = len(fake_port.commands("TARGETS"))
+
+    assert stepping_backend._auto_control_step() is False
+    assert len(fake_port.commands("TARGETS")) == before
+    assert stepping_backend.get_auto_control()["state"] == "holding"
+
+
+def test_inputs_outside_the_training_data_hold_the_rig(backend_module, stepping_backend, fake_port, monkeypatch, stub_proposer):
+    stats = {"columns": ["pin_1", "pin_2", "pin_3", "pin_4", "pin_5", "voltage"], "mean": [100.0] * 5 + [1.0], "scale": [10.0] * 5 + [0.1]}
+    monkeypatch.setattr(backend_module, "get_training_feature_stats", lambda: stats)
+    before = len(fake_port.commands("TARGETS"))
+
+    assert stepping_backend._auto_control_step() is False
+    assert len(fake_port.commands("TARGETS")) == before and stub_proposer == []
+    assert "drift" in stepping_backend.get_auto_control()["message"].lower()

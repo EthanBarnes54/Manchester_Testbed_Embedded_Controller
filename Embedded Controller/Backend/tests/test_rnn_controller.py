@@ -142,3 +142,33 @@ def test_pipeline_controller_builds_and_predicts():
 
     assert predictions[:-1] == [None] * (rnn.SEQUENCE_LENGTH - 1)
     assert predictions[-1].shape == (1,)
+
+
+def test_training_records_the_held_out_score_the_weights_earned(trained):
+    metrics = rnn.train_model(trained, number_of_epochs=2)
+    validation = rnn.get_validation_metrics()
+
+    assert validation["validation_r2"] == pytest.approx(metrics["validation_r2"])
+    assert validation["online_updates_since"] == 0
+
+    rnn.online_update(trained)
+    assert rnn.get_validation_metrics()["online_updates_since"] == 1
+
+
+def test_the_held_out_score_travels_with_the_checkpoint(trained, tmp_path, monkeypatch):
+    monkeypatch.setattr(rnn, "MODEL_DIR", tmp_path)
+    monkeypatch.setattr(rnn, "MODEL_PATH", tmp_path / f"{rnn.MODEL_BASENAME}.pt")
+    rnn.train_model(trained, number_of_epochs=2)
+    saved = rnn.get_validation_metrics()
+    rnn.save_nn_weights(rnn.model, rnn.scaler)
+
+    rnn.VALIDATION.clear()
+    assert rnn.load_previous_weights(rnn._RNN(rnn.INPUT_SIZE, rnn.HIDDEN_SIZE, rnn.OUTPUT_SIZE), StandardScaler())
+    assert rnn.get_validation_metrics() == saved
+
+
+def test_the_training_distribution_is_available_for_drift_checks(trained):
+    stats = rnn.get_training_feature_stats()
+
+    assert stats["columns"] == ["pin_1", "pin_2", "pin_3", "pin_4", "pin_5", "voltage"]
+    assert len(stats["mean"]) == len(stats["scale"]) == 6 and all(scale > 0 for scale in stats["scale"])

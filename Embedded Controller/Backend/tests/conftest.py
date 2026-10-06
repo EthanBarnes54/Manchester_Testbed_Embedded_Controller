@@ -55,6 +55,14 @@ def live_backend(backend_module, fake_port):
 
 
 @pytest.fixture
+def validated_model(backend_module, monkeypatch):
+    """A model whose held-out score clears the auto control floor, as after a good sweep."""
+
+    monkeypatch.setattr(backend_module, "get_validation_metrics", lambda: {"validation_r2": 0.9})
+    monkeypatch.setattr(backend_module, "get_training_feature_stats", lambda: None)
+
+
+@pytest.fixture
 def armed_backend(live_backend):
     """A live backend whose (fake) board has accepted ARM, as an operator would do first."""
 

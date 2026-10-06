@@ -280,7 +280,7 @@ def toggle(client, n_clicks, changed):
     return reply["auto-mode-button"]["children"]
 
 
-def test_every_tab_mirrors_the_backend_auto_control_state(client, shared_backend):
+def test_every_tab_mirrors_the_backend_auto_control_state(client, shared_backend, validated_model):
     assert toggle(client, 1, "auto-mode-button.n_clicks") == "Auto Control: ON"
     assert shared_backend.get_auto_control()["enabled"]
 
@@ -301,7 +301,7 @@ def test_auto_control_settings_reach_the_backend_and_new_tabs(client, shared_bac
     assert layout_component(client, "auto-change-penalty")["value"] == pytest.approx(0.4)
 
 
-def test_the_plot_callback_never_actuates(client, shared_backend):
+def test_the_plot_callback_never_actuates(client, shared_backend, validated_model):
     shared_backend.set_auto_control(enabled=True, period_ms=100)
 
     for tick in range(3):
@@ -348,3 +348,20 @@ def test_plot_history_is_bounded_and_contiguous(shared_backend, monkeypatch):
     assert dashboard.PLOT_HISTORY.maxlen == 50000
     assert len(dashboard.PLOT_HISTORY) == dashboard.PLOT_HISTORY_MIN_SAMPLES + 1000
     assert np.allclose(np.diff([point[0] for point in dashboard.PLOT_HISTORY]), 0.05)
+
+
+def test_the_auto_button_explains_a_refusal(client, shared_backend, backend_module, monkeypatch):
+    monkeypatch.setattr(backend_module, "get_validation_metrics", lambda: {})
+    reply = fire(client, [("auto-mode-button", "children"), ("auto-mode-button", "style"), ("auto-mode-status", "children")],
+                 [("auto-mode-button", "n_clicks", 1), ("update-interval", "n_intervals", 0)], "auto-mode-button.n_clicks")
+
+    assert reply["auto-mode-button"]["children"] == "Auto Control: OFF"
+    assert "no held-out validation score" in reply["auto-mode-status"]["children"]
+
+
+def test_a_manual_edit_takes_over_from_auto_control(client, armed_shared_backend, validated_model):
+    armed_shared_backend.set_auto_control(enabled=True)
+    reply = fire(client, PIN_OUTPUTS, DEFAULT_PINS + [("switch-time-us", "value", None)], "pwm1.value")
+
+    assert not armed_shared_backend.get_auto_control()["enabled"]
+    assert reply["pins-ack"]["children"].endswith("(auto control switched off by this manual edit)")

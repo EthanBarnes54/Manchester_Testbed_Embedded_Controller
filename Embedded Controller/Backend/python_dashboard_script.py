@@ -1293,7 +1293,9 @@ def _toggle_auto_mode(User_Input, _):
         return "Auto Control: ON", style, f"{auto_state['state'].capitalize()}" + (f" - {detail}" if detail else "")
 
     style = {**base_style, "background": "#e74c3c", "boxShadow": "0 0 4px rgba(231,76,60,0.6)"}
-    return "Auto Control: OFF", style, ""
+
+    # A refusal (no validated model) is shown, so a click that did nothing explains itself.
+    return "Auto Control: OFF", style, detail if auto_state["state"] == "refused" else ""
 
 
 @app.callback(
@@ -1774,6 +1776,14 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
                 {"color": "red", "fontWeight": "bold"},
             )
 
+        # The operator takes over: a manual edit switches auto control off rather than
+        # letting the model undo it on its next step.
+        override_note = ""
+
+        if get_auto_control()["enabled"]:
+            set_auto_control(enabled=False)
+            override_note = " (auto control switched off by this manual edit)"
+
         Back_End_Controller.set_pin_voltages(targets)
 
         # Report what the backend will actually drive, not what was typed, so the
@@ -1815,6 +1825,7 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
             f"cone_1={applied[3]:.3f}, "
             f"cone_2={applied[4]:.3f}, "
             f"switch_time={switch_timing_messgae}"
+            f"{override_note}"
         )
 
         return status_message, {"color": "#1e8449", "fontWeight": "bold", "display": "block"}

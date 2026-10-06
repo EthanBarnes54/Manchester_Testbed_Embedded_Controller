@@ -183,6 +183,16 @@ The board is always in one of three modes, reported by `FAULTS` and shown on the
 - A loop that stops for 5 s resets the chip (the loop watchdog), which comes back up in FAULT with the reset recorded. OTA uploads are only accepted while SAFE.
 - On the dashboard, ARM asks for confirmation. Sweeps and auto control refuse to run unless the board is ARMED, and closing the backend cleanly sends DISARM.
 
+## Auto control safeguards
+Auto control lets the RNN steer the rig unattended, so `python_Autonomy_Guard.py` sits between its proposals and the board as an independent monitor with rules simple enough to check by reading:
+
+- **A validated model only.** Auto control will not switch on unless the current weights earned a held-out R² of at least 0.5 when last trained. The score is saved with the weights in every checkpoint, and online updates since then are counted.
+- **Envelope and rate limits.** Every proposal is held within 0-3.3 V per channel and moves each channel by at most 0.25 V per decision. A proposal that is not five finite numbers is rejected and nothing is sent.
+- **Drift.** If the last 2 s of inputs sit more than four training standard deviations from the data the model was trained on, nothing new is sent.
+- **Fallback.** Whenever a proposal is rejected or the inputs have drifted, the guard holds the targets already on the rig.
+- **Operator override.** A manual target edit on the dashboard switches auto control off.
+- Auto control also needs the board ARMED (see "Operating modes"). The guard's counts of accepted, limited, rejected and drift-held decisions are reported with the auto control state.
+
 ## Serial link integrity
 - **Framing.** Every line in both directions ends with `*XXXX`, a CRC-16/CCITT-FALSE of the text (`include/line_protocol.h`; `binascii.crc_hqx` on the backend). The board refuses a command whose CRC does not match (`ERROR: Bad checksum!`, fault `BAD_CHECKSUM`), and such a line does not count as the host being alive. Lines typed by hand at a terminal carry no CRC and are accepted. Once the board has confirmed its protocol, the backend drops corrupted lines and protocol lines without a CRC, and counts both.
 - **Version handshake.** `VERSION` answers `firmware=<git describe> protocol=<n> build=<env> gate_loopback=<0|1> setpoint_readback=<0|1>`. The firmware is stamped at build time by `tools/firmware_version.py`. The backend asks on connect and will not arm a board whose protocol differs from its own `PROTOCOL_VERSION`.

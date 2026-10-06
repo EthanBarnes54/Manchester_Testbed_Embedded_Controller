@@ -187,6 +187,11 @@ def load_previous_weights(model, scaler):
         state_dict = checkpoint.get("state_dict") if isinstance(checkpoint, dict) and "state_dict" in checkpoint else checkpoint
         model.load_state_dict(state_dict)
 
+        VALIDATION.clear()
+
+        if isinstance(checkpoint, dict) and isinstance(checkpoint.get("validation"), dict):
+            VALIDATION.update(checkpoint["validation"])
+
         if isinstance(checkpoint, dict) and _restore_scaler(scaler, checkpoint.get("scaler") or {}):
             log.info(f"Successfully loaded model weights and scalers from {model_path}...")
 
@@ -204,7 +209,7 @@ def load_previous_weights(model, scaler):
 def save_nn_weights(model, scaler):
     """Saves the current model weights and scaler state (if available) to a timestamped checkpoint file."""
 
-    payload = {"state_dict": model.state_dict()}
+    payload = {"state_dict": model.state_dict(), "validation": dict(VALIDATION)}
 
     if hasattr(scaler, "mean_") and hasattr(scaler, "scale_"):
         payload["scaler"] = {
@@ -261,6 +266,43 @@ def _make_optimiser(parameters, learning_rate: float | None = None):
 
 
 scaler = StandardScaler()
+
+# The model's inputs, in the order the scaler and the network see them.
+FEATURE_COLUMNS = [f"pin_{i}" for i in range(1, 6)] + ["voltage"]
+
+# The held-out scores the current weights earned when they were last trained, saved with
+# them in every checkpoint. Auto control will not drive the rig on a model without them
+# (python_Autonomy_Guard). Online updates move the weights afterwards; how many have is
+# counted so a stale score can be seen.
+VALIDATION = {}
+
+
+def get_validation_metrics() -> dict:
+    """The held-out scores of the current weights, or {} if they have none."""
+
+    return dict(VALIDATION)
+
+
+def get_training_feature_stats():
+    """Mean and spread of each input in the data the scaler was fitted on, or None before any training."""
+
+    if not _check_scaler_fitted():
+        return None
+
+    return {"columns": list(FEATURE_COLUMNS), "mean": [float(v) for v in scaler.mean_], "scale": [float(v) for v in scaler.scale_]}
+
+
+def _record_validation(metrics: dict, training_rows: int):
+    VALIDATION.clear()
+
+    if metrics.get("validation_r2") is not None:
+        VALIDATION.update(
+            validation_r2=float(metrics["validation_r2"]),
+            validation_rmse=float(metrics.get("validation_rmse") or 0.0),
+            trained_at=time.time(),
+            training_rows=int(training_rows),
+            online_updates_since=0,
+        )
 
 
 def model_init(retrain: bool = False):
@@ -529,6 +571,7 @@ def train_model(data_frame: pd.DataFrame, number_of_epochs: int = 10, grad_clip_
 
     metrics = {"loss": last_loss, "r2": last_r2}
     metrics.update(_validation_metrics(validation_frame))
+    _record_validation(metrics, len(training_frame))
 
     if save:
         save_nn_weights(model, scaler)
@@ -659,6 +702,10 @@ def online_update(new_data_frame: pd.DataFrame, grad_clip_threshold: float = 1.0
             nn.utils.clip_grad_norm_(model.parameters(), grad_clip_threshold)
 
         optimiser.step()
+
+    # The weights have moved on from the ones the held-out score was earned by.
+    if VALIDATION:
+        VALIDATION["online_updates_since"] = int(VALIDATION.get("online_updates_since", 0)) + 1
 
     if save:
         save_nn_weights(model, scaler)
