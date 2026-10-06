@@ -115,6 +115,16 @@ def _require_dashboard_credentials():
     )
 
 
+SAFETY_BUTTON_STYLE = {
+    "minWidth": "110px",
+    "padding": "0.6em 1.2em",
+    "fontWeight": "bold",
+    "borderRadius": "6px",
+    "border": "none",
+    "color": "#ffffff",
+    "cursor": "pointer",
+}
+
 # The plot keeps a longer view than the backend buffer, but a bounded one: whichever is
 # larger of ten minutes at the 20 Hz sample rate or the buffer itself.
 PLOT_HISTORY_MIN_SAMPLES = 12000
@@ -406,6 +416,22 @@ def _control_tab():
                         children="OFFLINE",
                         style={"color": "red", "fontWeight": "bold"},
                     ),
+                ],
+            ),
+
+            # Arming is a deliberate step: the board boots safe, and only ARM (after a
+            # confirmation) makes the outputs live. DISARM is always one click.
+            html.Div(
+                style={"display": "flex", "gap": "0.75em", "alignItems": "center", "flexWrap": "wrap", "marginTop": "0.75em"},
+                children=[
+                    dcc.ConfirmDialogProvider(
+                        id="arm-confirm",
+                        message="Arm the rig? The setpoints and the switch line become live.",
+                        children=html.Button("ARM", id="arm-button", style={**SAFETY_BUTTON_STYLE, "background": "#e67e22"}),
+                    ),
+                    html.Button("DISARM", id="disarm-button", style={**SAFETY_BUTTON_STYLE, "background": "#c0392b"}),
+                    html.Button("Clear faults", id="clear-faults-button", style={**SAFETY_BUTTON_STYLE, "background": "#7f8c8d"}),
+                    html.Div(id="safety-status", children="Board: --", style={"fontWeight": "bold"}),
                 ],
             ),
 
@@ -1572,9 +1598,53 @@ def update_status(_):
     
     elif "Connected" in str(status_text):
         return "CONNECTED", {"color": "green", "fontWeight": "bold"}
-    
+
     else:
         return "OFFLINE", {"color": "red", "fontWeight": "bold"}
+
+
+SAFETY_MODE_COLOURS = {"ARMED": "#e67e22", "SAFE": "#1e8449", "FAULT": "#c0392b"}
+
+
+@app.callback(
+    Output("safety-status", "children"),
+    Output("safety-status", "style"),
+    Input("arm-confirm", "submit_n_clicks"),
+    Input("disarm-button", "n_clicks"),
+    Input("clear-faults-button", "n_clicks"),
+    Input("update-interval", "n_intervals"),
+)
+
+def _safety_controls(arm_clicks, disarm_clicks, clear_clicks, _):
+    """Sends ARM, DISARM or CLEAR FAULTS on a click, and otherwise mirrors the board's mode and faults."""
+
+    trigger = ctx.triggered_id
+
+    try:
+        if trigger == "arm-confirm" and arm_clicks:
+            Back_End_Controller.arm()
+
+        elif trigger == "disarm-button" and disarm_clicks:
+            Back_End_Controller.disarm()
+
+        elif trigger == "clear-faults-button" and clear_clicks:
+            Back_End_Controller.clear_faults()
+
+    except Exception as fault:
+        log.error(f"ERROR: Safety command failed - {fault}!")
+
+    safety = Back_End_Controller.get_board_safety()
+    mode = safety["mode"]
+    text = f"Board: {mode}"
+
+    latched = safety["faults"].get("latched", "none")
+    if latched and latched != "none":
+        text += f" | Latched: {latched}"
+
+    if safety["last_arm_refusal"]:
+        text += f" | {safety['last_arm_refusal']}"
+
+    return text, {"fontWeight": "bold", "color": SAFETY_MODE_COLOURS.get(mode, "#555")}
 
 # -------------------------------------------------------------------------
 #                             Pin control updates
@@ -1627,6 +1697,14 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
                 )
             
             targets.append(float_voltages)
+
+        # The board refuses output commands until it is armed; saying so here is clearer
+        # than a refusal the operator never sees.
+        if not Back_End_Controller.is_armed():
+            return (
+                f"ERROR: Board is {Back_End_Controller.board_mode} - press ARM before setting outputs!",
+                {"color": "red", "fontWeight": "bold"},
+            )
 
         Back_End_Controller.set_pin_voltages(targets)
 

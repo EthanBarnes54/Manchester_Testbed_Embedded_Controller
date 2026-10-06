@@ -170,15 +170,16 @@ def firmware_pins():
     return {name: int(number) for name, number in re.findall(r"constexpr int (\w+_PIN) = (\d+);", MAIN_CPP)}
 
 
-def test_armed_pin_is_free_and_untouched_at_boot():
+@pytest.mark.parametrize("name", ["SWITCH_ARMED_PIN", "HEARTBEAT_PIN"])
+def test_safety_outputs_sit_on_free_pins_untouched_at_boot(name):
     pins = firmware_pins()
-    armed = pins.pop("SWITCH_ARMED_PIN")
+    pin = pins.pop(name)
 
-    assert armed not in pins.values(), "ARMED shares a pin with another output"
-    assert armed not in {0, 2, 5, 12, 15}, "strapping pins are read at reset"
-    assert armed not in set(range(6, 12)) | {16, 17}, "flash, and the PSRAM probe's chip-select and clock"
-    assert armed not in {1, 3, 21, 22}, "UART0 and the I2C bus to the ADS1115"
-    assert armed < 32, "set_armed() writes the GPIO 0-31 output registers"
+    assert pin not in pins.values(), f"{name} shares a pin with another output"
+    assert pin not in {0, 2, 5, 12, 15}, "strapping pins are read at reset"
+    assert pin not in set(range(6, 12)) | {16, 17}, "flash, and the PSRAM probe's chip-select and clock"
+    assert pin not in {1, 3, 21, 22}, "UART0 and the I2C bus to the ADS1115"
+    assert pin < 32, "written through the GPIO 0-31 output registers"
 
 
 def test_the_failsafe_closes_the_gate_before_anything_else():
@@ -187,12 +188,62 @@ def test_the_failsafe_closes_the_gate_before_anything_else():
     assert body.index("set_switch_armed(false);") < body.index("stop_switching(0);")
 
 
-def test_the_gate_opens_before_a_command_runs_and_once_setup_is_done():
-    handler = cpp_block("void handle_command(String command)")
-    assert handler.index("channels_.set_switch_armed(true);") < handler.index('command.equalsIgnoreCase("PING")')
+def test_the_gate_opens_only_on_an_explicit_arm():
+    # The one place the gate is opened is SystemSupervisor::arm(), after the safety state agreed.
+    assert MAIN_CPP.count("set_switch_armed(true)") == 1
+    arm = cpp_block("  void arm()")
+    assert arm.index("state_.arm_refusal()") < arm.index("state_.arm();") < arm.index("channels_.set_switch_armed(true);")
 
-    setup = cpp_block("\nvoid setup()")
-    assert setup.index("channels.begin();") < setup.index("channels.set_switch_armed(true);")
+    # Setup leaves the board Safe, and a command arriving does not re-arm it.
+    assert "set_switch_armed(true)" not in cpp_block("\nvoid setup()")
+    assert "set_switch_armed(true)" not in cpp_block("void handle_command(String command)")
+
+
+@pytest.mark.parametrize(
+    "header, guarded_before",
+    [
+        ('command.startsWith("TARGETS")', "channels_.apply_target_voltages(args)"),
+        ('command.startsWith("PIN")', "channels_.set_channel(pin_index, value)"),
+        ('command.startsWith("SWITCH_PERIOD_US")', "channels_.automate_switching("),
+    ],
+)
+def test_commands_that_drive_an_output_are_refused_unless_armed(header, guarded_before):
+    handler = cpp_block("void handle_command(String command)")
+    branch = handler[handler.index(header):]
+    branch = branch[: branch.index(guarded_before) + len(guarded_before)]
+
+    assert "supervisor_.armed()" in branch
+    assert '"ERROR: Not armed!"' in branch
+
+
+@pytest.mark.parametrize("command", ["ARM", "DISARM", "FAULTS", "CLEAR FAULTS", "CLEAR LOG", "arm", "Clear Faults"])
+def test_safety_commands_reach_their_own_handlers(command):
+    assert route(command) == command.upper()
+
+
+def test_a_hung_loop_resets_the_chip_and_an_update_never_runs_while_armed():
+    assert "enableLoopWDT();" in cpp_block("\nvoid setup()")
+    assert "ota_wifi_service.loop(!supervisor.armed());" in cpp_block("\nvoid loop()")
+    assert "if (ota_started_ && updates_allowed)" in MAIN_CPP
+
+    # The upload holds the loop without feeding the watchdog, so it stands down for it.
+    begin = cpp_block("void begin(const char* ssid, const char* password, const char* hostname)")
+    on_start = begin[begin.index("ArduinoOTA.onStart"):begin.index("ArduinoOTA.onEnd")]
+    assert "disableLoopWDT();" in on_start
+    assert "enableLoopWDT();" in begin[begin.index("ArduinoOTA.onEnd"):]
+
+
+def test_the_heartbeat_is_driven_every_pass():
+    assert cpp_block("\nvoid loop()").strip().startswith("supervisor.heartbeat();")
+
+
+def test_an_unexpected_reset_comes_up_in_fault():
+    begin = cpp_block("  void begin() {\n    pinMode(HEARTBEAT_PIN")
+    assert "reset_was_unexpected(reset_reason_)" in begin
+    assert "raise(safety::Fault::UnexpectedReset);" in begin
+
+    for reason in ("ESP_RST_PANIC", "ESP_RST_INT_WDT", "ESP_RST_TASK_WDT", "ESP_RST_WDT", "ESP_RST_BROWNOUT"):
+        assert reason in cpp_block("static bool reset_was_unexpected(esp_reset_reason_t reason)")
 
 
 def test_keepalive_runs_well_inside_the_failsafe_timeout():
@@ -229,6 +280,7 @@ def test_measured_lines_keep_sub_count_precision():
         "class MeasurementService",
         "class LedIndicator",
         "class OtaWifiService",
+        "class SystemSupervisor",
         "class CommandProcessor",
         "void enforce_command_timeout",
     ],

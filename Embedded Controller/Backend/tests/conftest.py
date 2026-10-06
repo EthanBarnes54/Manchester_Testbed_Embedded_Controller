@@ -55,6 +55,20 @@ def live_backend(backend_module, fake_port):
 
 
 @pytest.fixture
+def armed_backend(live_backend):
+    """A live backend whose (fake) board has accepted ARM, as an operator would do first."""
+
+    live_backend.arm()
+
+    deadline = time.time() + 5
+    while not live_backend.is_armed() and time.time() < deadline:
+        time.sleep(0.02)
+
+    assert live_backend.is_armed()
+    return live_backend
+
+
+@pytest.fixture
 def shared_backend(backend_module, monkeypatch):
     """The module-level backend the dashboard drives, with commands captured instead of
     sent and its settings put back afterwards."""
@@ -75,3 +89,4 @@ def shared_backend(backend_module, monkeypatch):
     )
     backend.sweep_status = {"state": "idle", "progress": 0.0, "message": ""}
     backend.set_save_dataset_enabled(False)
+    backend.board_mode = "SAFE"

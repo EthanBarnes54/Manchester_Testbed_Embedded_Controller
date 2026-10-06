@@ -222,6 +222,13 @@ class SerialBackend:
         self.pins_timestamp = 0.0
         self.switch_timing = None
 
+        # The board's safety state as it last reported it. UNKNOWN until it has said, and
+        # again whenever the link drops. A simulated board boots SAFE like a real one.
+        self.board_mode = "SAFE" if self.force_offline else "UNKNOWN"
+        self.board_faults = {}
+        self.last_board_fault = None
+        self.last_arm_refusal = ""
+
         self.sweep_thread = None
         self.sweep_status = {"state": "idle", "progress": 0.0, "message": ""}
         self.sweep_cancel = threading.Event()
@@ -327,6 +334,9 @@ class SerialBackend:
 
         self.serial = None
         self._set_offline_state(True)
+
+        if not self.force_offline:
+            self.board_mode = "UNKNOWN"
 
     def set_save_dataset_enabled(self, enabled: bool):
         """Toggles dataset saving."""
@@ -662,48 +672,7 @@ class SerialBackend:
                 if not self.lines.full():
                     self.lines.put((timestamp, message))
 
-                if message.startswith("MEASURED"):
-
-                    try:
-                        voltage = float(message.split()[1])
-
-                    except (IndexError, ValueError):
-                        log.warning("WARNING: Inappropriate measurement received!")
-                        voltage = None
-
-                    self._append_measurement(timestamp, voltage, message)
-
-                elif message.startswith("PINS"):
-                    try:
-                        for pin_assignment in message.split()[1:]:
-
-                            if "=" not in pin_assignment:
-                                continue
-
-                            name, value_string = pin_assignment.split("=", 1)
-
-                            try:
-                                pin_value = int(float(value_string))
-
-                            except ValueError as fault:
-                                log.error(f"ERROR: Invalid pin value received - {fault}!")
-                                continue
-
-                            pin_index = self._name_to_pin_index(name)
-                            self.update_pin_values(pin_index, pin_value)
-
-                    except Exception as fault:
-                        log.error(f"ERROR: Processing of pin ouputs unsuccessful - {fault}!")
-                        pass
-
-                elif message.startswith("ACK PIN"):
-                    try:
-                        tokens = message.split()
-                        self.update_pin_values(int(tokens[2]), int(tokens[3]))
-
-                    except Exception as fault:
-                        log.error(f"ERROR: Processing of pin input readings unsuccessful - {fault}!")
-                        pass
+                self._handle_board_line(timestamp, message)
 
             except serial.SerialException as serial_fault:
                 log.warning(f"ERROR: Serial exception - {serial_fault}! Reconnecting...")
@@ -713,6 +682,142 @@ class SerialBackend:
             except Exception as fault:
                 log.error(f"ERROR: Unexpected fault - {fault}! Reconnecting...")
                 self._stop_event.wait(0.5)
+
+    def _handle_board_line(self, timestamp: float, message: str):
+        """Acts on one line from the board: measurements, pin reports and safety state."""
+
+        if message.startswith("MEASURED"):
+
+            try:
+                voltage = float(message.split()[1])
+
+            except (IndexError, ValueError):
+                log.warning("WARNING: Inappropriate measurement received!")
+                voltage = None
+
+            self._append_measurement(timestamp, voltage, message)
+
+        elif message.startswith("PINS"):
+            try:
+                for pin_assignment in message.split()[1:]:
+
+                    if "=" not in pin_assignment:
+                        continue
+
+                    name, value_string = pin_assignment.split("=", 1)
+
+                    try:
+                        pin_value = int(float(value_string))
+
+                    except ValueError as fault:
+                        log.error(f"ERROR: Invalid pin value received - {fault}!")
+                        continue
+
+                    pin_index = self._name_to_pin_index(name)
+                    self.update_pin_values(pin_index, pin_value)
+
+            except Exception as fault:
+                log.error(f"ERROR: Processing of pin ouputs unsuccessful - {fault}!")
+                pass
+
+        elif message.startswith("ACK PIN"):
+            try:
+                tokens = message.split()
+                self.update_pin_values(int(tokens[2]), int(tokens[3]))
+
+            except Exception as fault:
+                log.error(f"ERROR: Processing of pin input readings unsuccessful - {fault}!")
+                pass
+
+        else:
+            self._handle_safety_line(timestamp, message)
+
+    def _handle_safety_line(self, timestamp: float, message: str):
+        """Tracks the board's mode and faults from ACK ARM/DISARM, FAULT(S) and FAILSAFE lines."""
+
+        if message == "ACK ARM":
+            self.board_mode = "ARMED"
+            self.last_arm_refusal = ""
+            log.info("Board ARMED...")
+
+        elif message == "ACK DISARM" or message.startswith("FAILSAFE outputs zeroed"):
+            self.board_mode = "SAFE" if self.board_mode != "FAULT" else "FAULT"
+
+        elif message.startswith("ACK CLEAR FAULTS") or message.startswith("FAULTS "):
+            fields = self._key_values(message)
+
+            if "mode" in fields:
+                self.board_mode = fields["mode"]
+
+            if message.startswith("FAULTS "):
+                self.board_faults = fields
+
+        elif message.startswith("FAULT "):
+            tokens = message.split()
+            fields = self._key_values(message)
+            self.last_board_fault = {"time": timestamp, "fault": tokens[1] if len(tokens) > 1 else "",
+                                     "severity": tokens[2] if len(tokens) > 2 else ""}
+
+            if "mode" in fields:
+                self.board_mode = fields["mode"]
+
+            log.warning(f"WARNING: Board reported {message}")
+
+        elif message.startswith("ERROR: Cannot arm"):
+            self.last_arm_refusal = message
+            log.warning(f"WARNING: {message}")
+
+        elif message.startswith("ERROR: Not armed"):
+            log.warning("WARNING: The board refused an output command because it is not armed!")
+
+    @staticmethod
+    def _key_values(message: str) -> dict:
+        """The key=value fields of a board line."""
+
+        fields = {}
+
+        for token in message.split():
+            if "=" in token:
+                key, value = token.split("=", 1)
+                fields[key] = value
+
+        return fields
+
+    # ------------------------------------------------------------------ #
+    #                               Safety                               #
+    # ------------------------------------------------------------------ #
+
+    def is_armed(self) -> bool:
+        return self.board_mode == "ARMED"
+
+    def arm(self):
+        """Asks the board to arm. It refuses while a critical fault is latched."""
+
+        self.send_command("ARM")
+
+    def disarm(self):
+        """Zeroes every output and closes the switch gate. Always accepted."""
+
+        self.send_command("DISARM")
+
+    def clear_faults(self):
+        """Clears latched faults whose condition has gone, and asks for the fault report."""
+
+        self.send_command("CLEAR FAULTS")
+        self.send_command("FAULTS")
+
+    def request_faults(self):
+        self.send_command("FAULTS")
+
+    def get_board_safety(self) -> dict:
+        """The board's mode and fault report as last received."""
+
+        return {
+            "mode": self.board_mode,
+            "faults": dict(self.board_faults),
+            "last_fault": self.last_board_fault,
+            "last_arm_refusal": self.last_arm_refusal,
+        }
 
     def _keepalive_manager(self):
         """Pings the board on a fixed cadence so its output failsafe stays satisfied.
@@ -732,6 +837,10 @@ class SerialBackend:
 
             try:
                 self.send_command("PING")
+
+                # Also keeps the board's mode and faults current for the dashboard and
+                # for the auto control and sweep checks.
+                self.send_command("FAULTS")
 
             except Exception as fault:
                 log.warning(f"WARNING: Keepalive ping failed - {fault}!")
@@ -801,6 +910,10 @@ class SerialBackend:
 
         if str(self.sweep_status.get("state", "")).lower() == "running":
             self._set_auto_control_status("paused", "Training sweep in progress")
+            return False
+
+        if not self.is_armed():
+            self._set_auto_control_status("waiting", f"Board is not armed ({self.board_mode})")
             return False
 
         data_frame = self.get_training_data()
@@ -957,6 +1070,24 @@ class SerialBackend:
                             self.update_pin_values(offset, pwm_value)
 
                         log.info(f"[SIMULATED] TARGETS applied: {raw_values}")
+
+                # A simulated board arms like a real one. A real board that has dropped
+                # off the link is never reported as armed.
+                elif command == "ARM" and self.force_offline:
+                    if self.board_mode != "FAULT":
+                        self.board_mode = "ARMED"
+                    log.info(f"[SIMULATED] Board {self.board_mode}")
+
+                elif command == "DISARM" and self.force_offline:
+                    if self.board_mode != "FAULT":
+                        self.board_mode = "SAFE"
+                    for pin_index in range(1, 7):
+                        self.update_pin_values(pin_index, 0)
+                    log.info("[SIMULATED] Board disarmed, outputs zeroed")
+
+                elif command_string.strip().upper() == "CLEAR FAULTS" and self.force_offline:
+                    if self.board_mode == "FAULT":
+                        self.board_mode = "SAFE"
 
                 else:
                     log.info(f"[SIMULATED] Received command: {command_string}")
@@ -1143,6 +1274,10 @@ class SerialBackend:
         """Stops background threads and closes the serial connection."""
 
         log.info("Backend thread disconnecting...")
+
+        # A clean shutdown leaves the rig safe at once rather than after the failsafe timeout.
+        if self.serial is not None and getattr(self.serial, "is_open", False):
+            self.disarm()
 
         self.alive.clear()
         self._stop_event.set()
@@ -1433,7 +1568,13 @@ class SerialBackend:
         if self.sweep_thread and self.sweep_thread.is_alive():
             log.info("Sweep already running! Please wait before attempting to start another training sweep...")
             return False
-        
+
+        # A sweep drives every output, so it needs the board armed first like any operator would.
+        if not self.is_armed():
+            self.sweep_status = {"state": "idle", "progress": 0.0, "message": f"Board is not armed ({self.board_mode})"}
+            log.warning("WARNING: Sweep refused, the board is not armed!")
+            return False
+
         self.sweep_cancel.clear()
         self.sweep_status = {"state": "queued", "progress": 0.0, "message": ""}
 

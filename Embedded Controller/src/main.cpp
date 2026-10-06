@@ -18,6 +18,8 @@
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <Adafruit_ADS1X15.h>
+#include <Preferences.h>
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "driver/ledc.h"
@@ -27,6 +29,7 @@
 #include "soc/ledc_reg.h"
 #include "soc/ledc_struct.h"
 #include "soc/soc.h"
+#include "safety_state.h"
 #include "switch_timing.h"
 
 namespace{
@@ -44,6 +47,11 @@ constexpr int SWITCH_LOGIC_PIN = 16;
 // GPIO 23 is not a strapping pin, and neither the bootloader nor the PSRAM probe touches
 // it, unlike GPIO 16 (the PSRAM chip-select on this chip).
 constexpr int SWITCH_ARMED_PIN = 23;
+
+// Toggled every loop pass for an external watchdog (for example a TPS3823) whose output
+// also enables the gate. If the loop stops, the gate closes within the watchdog's
+// timeout, without relying on this processor. Harmless with nothing fitted.
+constexpr int HEARTBEAT_PIN = 18;
 
 constexpr int CHANNEL_COUNT = 6;
 constexpr int CONTROLLED_PULSE_CHANNELS = 5;
@@ -77,6 +85,9 @@ constexpr int COMMAND_BUFFER_LIMIT = 256;
 // Host silence tolerated before the outputs are dropped. The backend keepalive runs
 // well inside this, so only a genuinely dead host trips it.
 constexpr unsigned long COMMAND_TIMEOUT_MS = 5000;
+
+// Flash namespace for the fault log that survives resets (Preferences, at most 15 characters).
+constexpr const char* FAULT_LOG_NAMESPACE = "testbed_faults";
 
 // SWITCH_PERIOD_US is the time between edges, half a cycle. Up to SWITCH_HARDWARE_MAX_US
 // an LEDC channel generates the line with no CPU work per edge. Above it the timer
@@ -456,6 +467,24 @@ class ChannelController {
     return true;
   }
 
+  // True when these TARGETS would drive any channel above zero. A line that does not
+  // parse is left for apply_target_voltages() to reject.
+  static bool targets_would_energise(const String& args) {
+    float targets[CONTROLLED_PULSE_CHANNELS];
+
+    if (!parse_voltage_targets(args, targets, CONTROLLED_PULSE_CHANNELS)) {
+      return false;
+    }
+
+    for (int i = 0; i < CONTROLLED_PULSE_CHANNELS; ++i) {
+      if (convert_voltage_to_pwm(targets[i]) > 0) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   // switch_logic is 0 or 1: the held level, or 1 while the line switches automatically.
   void report_channels() const {
     int snapshot[CHANNEL_COUNT];
@@ -479,8 +508,8 @@ class ChannelController {
     switch_line_.hold(switch_level != 0);
   }
 
-  // The external gate on the switch line: closed at boot, opened once setup() is done and
-  // whenever the host speaks, closed by the failsafe.
+  // The external gate on the switch line. Opened only by SystemSupervisor on ARM, closed
+  // by engage_safe_state().
   void set_switch_armed(bool armed) {
     SwitchLine::set_armed(armed);
   }
@@ -750,12 +779,17 @@ class OtaWifiService {
 
     ArduinoOTA.setHostname(hostname);
 
+    // An upload holds the loop for its whole length without feeding the loop watchdog,
+    // so the watchdog stands down for it. Uploads are only serviced while disarmed (see
+    // loop()), so nothing is live while the loop is held.
     ArduinoOTA.onStart([]() {
+      disableLoopWDT();
       Serial.println("OTA connection starting...");
     });
 
     ArduinoOTA.onEnd([]() {
       Serial.println("OTA connection established...");
+      enableLoopWDT();
     });
 
     ArduinoOTA.onProgress([](unsigned int connection_progress, unsigned int connection_capacity) {
@@ -765,6 +799,7 @@ class OtaWifiService {
     });
 
     ArduinoOTA.onError([](ota_error_t error) {
+      enableLoopWDT();
       Serial.printf("Error[%u]: ", error);
 
       if (error == OTA_AUTH_ERROR) Serial.println("ERROR: Authentication Failed!");
@@ -779,7 +814,10 @@ class OtaWifiService {
     start_association();
   }
 
-  void loop() {
+  // updates_allowed is false while the board is armed: an OTA upload blocks the loop, and
+  // with it the failsafe, for as long as it runs, so one is never accepted with outputs
+  // live. The client is simply not answered and times out.
+  void loop(bool updates_allowed) {
     switch (link_state_) {
       case LinkState::Disabled:
         return;
@@ -798,7 +836,7 @@ class OtaWifiService {
           return;
         }
 
-        if (ota_started_) {
+        if (ota_started_ && updates_allowed) {
           ArduinoOTA.handle();
         }
 
@@ -866,10 +904,215 @@ class OtaWifiService {
   }
 };
 
+// Owns the safety state and everything it drives: the gate (ARMED), the external
+// watchdog heartbeat, the fault log in flash and the FAULTS report. Every change of mode
+// goes through here, so the outputs and the reported mode cannot disagree.
+class SystemSupervisor {
+ public:
+  explicit SystemSupervisor(ChannelController& channels) : channels_(channels) {}
+
+  // Loads the fault history kept in flash, counts the boot and records why the chip
+  // last reset. A watchdog, panic or brownout reset is a critical fault: the board comes
+  // up in Fault and will not arm until the operator has cleared it.
+  void begin() {
+    pinMode(HEARTBEAT_PIN, OUTPUT);
+    digitalWrite(HEARTBEAT_PIN, LOW);
+
+    reset_reason_ = esp_reset_reason();
+    log_ready_ = log_.begin(FAULT_LOG_NAMESPACE, false);
+
+    if (log_ready_) {
+      state_.restore_history(log_.getULong("history", 0));
+      persisted_history_ = state_.history();
+      boots_ = log_.getULong("boots", 0);
+      unexpected_resets_ = log_.getULong("unexpected", 0);
+    }
+
+    ++boots_;
+
+    if (reset_was_unexpected(reset_reason_)) {
+      ++unexpected_resets_;
+      raise(safety::Fault::UnexpectedReset);
+      resolve(safety::Fault::UnexpectedReset);
+    }
+
+    if (log_ready_) {
+      log_.putULong("boots", boots_);
+      log_.putULong("unexpected", unexpected_resets_);
+    }
+
+    persist_history();
+  }
+
+  bool armed() const {
+    return state_.armed();
+  }
+
+  // ARM opens the gate. The outputs are zero whenever the board is not armed, so the gate
+  // always opens onto a held-low switch line and zero setpoints.
+  void arm() {
+    const char* refusal = state_.arm_refusal();
+
+    if (refusal != nullptr) {
+      Serial.println(String("ERROR: Cannot arm - ") + refusal + "!");
+      return;
+    }
+
+    state_.arm();
+    channels_.set_switch_armed(true);
+    Serial.println("ACK ARM");
+  }
+
+  void disarm() {
+    make_safe();
+    Serial.println("ACK DISARM");
+  }
+
+  // Zeroes every output and closes the gate, whatever the mode.
+  void make_safe() {
+    state_.disarm();
+    channels_.engage_safe_state();
+  }
+
+  // A fault condition present now. Reported once at its onset; a critical one disarms.
+  void raise(safety::Fault fault) {
+    const bool onset = (state_.active() & safety::bit_of(fault)) == 0;
+
+    if (state_.raise(fault)) {
+      channels_.engage_safe_state();
+    }
+
+    if (onset) {
+      const bool critical = safety::severity_of(fault) == safety::Severity::Critical;
+      Serial.println(String("FAULT ") + safety::name_of(fault) + (critical ? " CRITICAL" : " WARNING") +
+                     " mode=" + safety::name_of(state_.mode()));
+    }
+
+    persist_history();
+  }
+
+  void resolve(safety::Fault fault) {
+    state_.resolve(fault);
+  }
+
+  void clear_faults() {
+    state_.clear_latched();
+    Serial.println(String("ACK CLEAR FAULTS mode=") + safety::name_of(state_.mode()));
+  }
+
+  void clear_log() {
+    state_.clear_history();
+    unexpected_resets_ = 0;
+
+    if (log_ready_) {
+      log_.putULong("unexpected", unexpected_resets_);
+    }
+
+    persist_history();
+    Serial.println("ACK CLEAR LOG");
+  }
+
+  void report_faults() const {
+    String line = String("FAULTS mode=") + safety::name_of(state_.mode());
+    line += " active=" + fault_list(state_.active());
+    line += " latched=" + fault_list(state_.latched());
+    line += " history=" + fault_list(state_.history());
+    line += " counts=" + fault_counts();
+    line += String(" boots=") + boots_;
+    line += String(" unexpected_resets=") + unexpected_resets_;
+    line += String(" last_reset=") + reset_name(reset_reason_);
+    Serial.println(line);
+  }
+
+  // Called once per loop pass, so the heartbeat stops if the loop does.
+  void heartbeat() {
+    heartbeat_high_ = !heartbeat_high_;
+    digitalWrite(HEARTBEAT_PIN, heartbeat_high_ ? HIGH : LOW);
+  }
+
+ private:
+  ChannelController& channels_;
+  safety::SafetyState state_;
+  Preferences log_;
+  bool log_ready_ = false;
+  uint32_t persisted_history_ = 0;
+  uint32_t boots_ = 0;
+  uint32_t unexpected_resets_ = 0;
+  esp_reset_reason_t reset_reason_ = ESP_RST_UNKNOWN;
+  bool heartbeat_high_ = false;
+
+  // Flash is only written when the history gains a fault, so at most once per fault type
+  // between CLEAR LOGs, never at loop rate.
+  void persist_history() {
+    if (!log_ready_ || state_.history() == persisted_history_) {
+      return;
+    }
+
+    log_.putULong("history", state_.history());
+    persisted_history_ = state_.history();
+  }
+
+  static bool reset_was_unexpected(esp_reset_reason_t reason) {
+    return reason == ESP_RST_PANIC || reason == ESP_RST_INT_WDT || reason == ESP_RST_TASK_WDT ||
+           reason == ESP_RST_WDT || reason == ESP_RST_BROWNOUT;
+  }
+
+  static const char* reset_name(esp_reset_reason_t reason) {
+    switch (reason) {
+      case ESP_RST_POWERON: return "POWERON";
+      case ESP_RST_EXT: return "EXTERNAL";
+      case ESP_RST_SW: return "SOFTWARE";
+      case ESP_RST_PANIC: return "PANIC";
+      case ESP_RST_INT_WDT: return "INT_WDT";
+      case ESP_RST_TASK_WDT: return "TASK_WDT";
+      case ESP_RST_WDT: return "WDT";
+      case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+      case ESP_RST_BROWNOUT: return "BROWNOUT";
+      case ESP_RST_SDIO: return "SDIO";
+      default: return "UNKNOWN";
+    }
+  }
+
+  static String fault_list(uint32_t faults) {
+    String list;
+
+    for (uint8_t index = 0; index < safety::FAULT_COUNT; ++index) {
+      if (faults & (1UL << index)) {
+        if (list.length() > 0) {
+          list += ",";
+        }
+
+        list += safety::name_of(static_cast<safety::Fault>(index));
+      }
+    }
+
+    return list.length() > 0 ? list : String("none");
+  }
+
+  String fault_counts() const {
+    String list;
+
+    for (uint8_t index = 0; index < safety::FAULT_COUNT; ++index) {
+      const safety::Fault fault = static_cast<safety::Fault>(index);
+
+      if (state_.count(fault) > 0) {
+        if (list.length() > 0) {
+          list += ",";
+        }
+
+        list += String(safety::name_of(fault)) + ":" + state_.count(fault);
+      }
+    }
+
+    return list.length() > 0 ? list : String("none");
+  }
+};
+
 class CommandProcessor {
  public:
-  CommandProcessor(ChannelController& channels, MeasurementService& measurement, LedIndicator& leds)
-      : channels_(channels), measurement_(measurement), leds_(leds) {}
+  CommandProcessor(ChannelController& channels, MeasurementService& measurement, LedIndicator& leds,
+                   SystemSupervisor& supervisor)
+      : channels_(channels), measurement_(measurement), leds_(leds), supervisor_(supervisor) {}
 
   bool has_received_command() const {
     return command_seen_;
@@ -904,6 +1147,7 @@ class CommandProcessor {
   ChannelController& channels_;
   MeasurementService& measurement_;
   LedIndicator& leds_;
+  SystemSupervisor& supervisor_;
   String command_buffer_;
   unsigned long last_command_ms_ = 0;
   bool command_seen_ = false;
@@ -932,13 +1176,20 @@ class CommandProcessor {
     last_command_ms_ = millis();
     command_seen_ = true;
 
-    // Any command means the host is back, so the gate opens before the command runs.
-    // Left to the failsafe clearing later in the pass, a switch started by this command
-    // would reach the load part way through a pulse.
-    channels_.set_switch_armed(true);
-
+    // Commands that would drive an output are refused unless the board is armed; ones that
+    // set an output to zero are always accepted.
     if (command.equalsIgnoreCase("PING")) {
       Serial.println("OK");
+    } else if (command.equalsIgnoreCase("ARM")) {
+      supervisor_.arm();
+    } else if (command.equalsIgnoreCase("DISARM")) {
+      supervisor_.disarm();
+    } else if (command.equalsIgnoreCase("FAULTS")) {
+      supervisor_.report_faults();
+    } else if (command.equalsIgnoreCase("CLEAR FAULTS")) {
+      supervisor_.clear_faults();
+    } else if (command.equalsIgnoreCase("CLEAR LOG")) {
+      supervisor_.clear_log();
     } else if (command.equalsIgnoreCase("READ")) {
       measurement_.request_reading();
       leds_.blink_once(80);
@@ -954,6 +1205,11 @@ class CommandProcessor {
 
       const String args = command.substring(first_space_index + 1);
 
+      if (!supervisor_.armed() && ChannelController::targets_would_energise(args)) {
+        Serial.println("ERROR: Not armed!");
+        return;
+      }
+
       if (channels_.apply_target_voltages(args)) {
         Serial.println("ACK TARGETS");
       } else {
@@ -968,6 +1224,12 @@ class CommandProcessor {
         const uint8_t pin_index = to_pin_index(token);
 
         const int value = command.substring(second_space_index + 1).toInt();
+
+        if (!supervisor_.armed() && value > 0) {
+          Serial.println("ERROR: Not armed!");
+          return;
+        }
+
         channels_.set_channel(pin_index, value);
       } else {
         Serial.println("ERROR: Invalid PIN syntax!");
@@ -987,6 +1249,11 @@ class CommandProcessor {
       if (switch_period_us <= 0) {
         channels_.stop_switching(0);
         Serial.println("ACK SWITCH_PERIOD_US 0 (disabled)");
+        return;
+      }
+
+      if (!supervisor_.armed()) {
+        Serial.println("ERROR: Not armed!");
         return;
       }
 
@@ -1013,13 +1280,14 @@ ChannelController channels;
 MeasurementService measurement_service(ads);
 LedIndicator led_indicator(LED_PIN);
 OtaWifiService ota_wifi_service;
-CommandProcessor command_processor(channels, measurement_service, led_indicator);
+SystemSupervisor supervisor(channels);
+CommandProcessor command_processor(channels, measurement_service, led_indicator, supervisor);
 
 bool failsafe_engaged = false;
 
-// Once the host has spoken to us it is expected to keep doing so. If it goes quiet
-// the outputs are dropped, otherwise a set of targets would stay latched on the rig
-// for as long as the board has power.
+// Once the host has spoken to us it is expected to keep doing so. If it goes quiet the
+// board disarms, otherwise a set of targets would stay latched on the rig for as long as
+// it has power. The host coming back does not re-arm it: that takes an explicit ARM.
 void enforce_command_timeout(unsigned long now_ms) {
   if (!command_processor.has_received_command()) {
     return;
@@ -1028,12 +1296,14 @@ void enforce_command_timeout(unsigned long now_ms) {
   const bool host_overdue = (now_ms - command_processor.last_command_ms()) >= COMMAND_TIMEOUT_MS;
 
   if (host_overdue && !failsafe_engaged) {
-    channels.engage_safe_state();
+    supervisor.make_safe();
     failsafe_engaged = true;
     Serial.println("FAILSAFE outputs zeroed, no command received from host");
+    supervisor.raise(safety::Fault::HostTimeout);
 
   } else if (!host_overdue && failsafe_engaged) {
     failsafe_engaged = false;
+    supervisor.resolve(safety::Fault::HostTimeout);
     Serial.println("FAILSAFE cleared, host link restored");
   }
 }
@@ -1057,23 +1327,27 @@ void setup() {
   }
 
   channels.begin();
+  supervisor.begin();
   ota_wifi_service.begin(WIFI_SSID, WIFI_PASSWORD, OTA_HOSTNAME);
 
-  // The switch line is held low with both generators parked, so the gate can open.
-  channels.set_switch_armed(true);
+  // The board comes up Safe, with the gate closed, and stays that way until an ARM.
+  // From here a loop that stops for 5 s resets the chip, which records the reset as a
+  // fault and brings the board back up Safe.
+  enableLoopWDT();
 
   LOG_INFO("Setup complete. Awaiting commands...");
   led_indicator.set_low();
 }
 
 void loop() {
+  supervisor.heartbeat();
   command_processor.poll_serial();
 
   const unsigned long now_ms = millis();
   measurement_service.update(now_ms);
   led_indicator.heartbeat(now_ms);
   led_indicator.update(now_ms);
-  ota_wifi_service.loop();
+  ota_wifi_service.loop(!supervisor.armed());
   enforce_command_timeout(now_ms);
 
   delay(1);

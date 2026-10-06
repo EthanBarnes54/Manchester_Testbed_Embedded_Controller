@@ -78,6 +78,20 @@ def test_a_configured_password_gates_every_request(client, monkeypatch):
 # ----------------------------------------------------------------------------
 
 PIN_OUTPUTS = [("pins-ack", "children"), ("pins-ack", "style")]
+SAFETY_OUTPUTS = [("safety-status", "children"), ("safety-status", "style")]
+
+
+@pytest.fixture
+def armed_shared_backend(shared_backend):
+    """The shared backend with its board reporting ARMED, as after an operator's ARM."""
+
+    shared_backend.board_mode = "ARMED"
+    return shared_backend
+
+
+def safety_inputs(arm=None, disarm=None, clear=None):
+    return [("arm-confirm", "submit_n_clicks", arm), ("disarm-button", "n_clicks", disarm),
+            ("clear-faults-button", "n_clicks", clear), ("update-interval", "n_intervals", 0)]
 DEFAULT_PINS = [("pwm1", "value", "1.0"), ("pwm2", "value", "0"), ("pwm3", "value", "0"), ("pwm4", "value", "0"), ("pwm5", "value", "0")]
 
 
@@ -89,7 +103,8 @@ def test_the_switch_field_uses_the_shared_bounds_and_starts_empty(client):
 
 
 @pytest.mark.parametrize("switch_us, accepted", [(1, True), (5, True), (0, False), (2_000_000, True), (2_000_001, False)])
-def test_the_switch_field_accepts_1_us_to_2_s(client, shared_backend, monkeypatch, switch_us, accepted):
+def test_the_switch_field_accepts_1_us_to_2_s(client, armed_shared_backend, monkeypatch, switch_us, accepted):
+    shared_backend = armed_shared_backend
     monkeypatch.setattr(shared_backend, "switch_timing", None)
     reply = fire(client, PIN_OUTPUTS, DEFAULT_PINS + [("switch-time-us", "value", switch_us)], "switch-time-us.value")
     message = reply["pins-ack"]["children"]
@@ -102,7 +117,8 @@ def test_the_switch_field_accepts_1_us_to_2_s(client, shared_backend, monkeypatc
         assert shared_backend.switch_timing is None
 
 
-def test_a_fractional_switch_time_is_refused_not_truncated(client, shared_backend, monkeypatch):
+def test_a_fractional_switch_time_is_refused_not_truncated(client, armed_shared_backend, monkeypatch):
+    shared_backend = armed_shared_backend
     monkeypatch.setattr(shared_backend, "switch_timing", None)
     reply = fire(client, PIN_OUTPUTS, DEFAULT_PINS + [("switch-time-us", "value", 7.5)], "switch-time-us.value")
 
@@ -112,11 +128,49 @@ def test_a_fractional_switch_time_is_refused_not_truncated(client, shared_backen
     assert "border" not in dashboard._validate_switch_time_input(7)
 
 
-def test_editing_a_voltage_sends_targets_and_leaves_the_switch_alone(client, shared_backend):
+def test_editing_a_voltage_sends_targets_and_leaves_the_switch_alone(client, armed_shared_backend):
+    shared_backend = armed_shared_backend
     reply = fire(client, PIN_OUTPUTS, DEFAULT_PINS + [("switch-time-us", "value", None)], "pwm1.value")
 
     assert reply["pins-ack"]["children"].startswith("Targets updated")
     assert shared_backend.sent == ["TARGETS 1.000000 0.000000 0.000000 0.000000 0.000000"]
+
+
+def test_pin_edits_are_refused_until_the_board_is_armed(client, shared_backend):
+    reply = fire(client, PIN_OUTPUTS, DEFAULT_PINS + [("switch-time-us", "value", 5)], "pwm1.value")
+
+    assert reply["pins-ack"]["children"] == "ERROR: Board is SAFE - press ARM before setting outputs!"
+    assert shared_backend.sent == []
+
+
+@pytest.mark.parametrize(
+    "button, inputs, sent",
+    [
+        ("arm-confirm.submit_n_clicks", safety_inputs(arm=1), ["ARM"]),
+        ("disarm-button.n_clicks", safety_inputs(disarm=1), ["DISARM"]),
+        ("clear-faults-button.n_clicks", safety_inputs(clear=1), ["CLEAR FAULTS", "FAULTS"]),
+        ("update-interval.n_intervals", safety_inputs(), []),
+    ],
+)
+def test_the_safety_buttons_send_their_commands_and_nothing_else_does(client, shared_backend, button, inputs, sent):
+    fire(client, SAFETY_OUTPUTS, inputs, button)
+    assert shared_backend.sent == sent
+
+
+def test_the_safety_readout_mirrors_the_board(client, shared_backend):
+    shared_backend.board_mode = "FAULT"
+    shared_backend.board_faults = {"latched": "UNEXPECTED_RESET"}
+    shared_backend.last_arm_refusal = "ERROR: Cannot arm - a critical fault is latched, send CLEAR FAULTS!"
+
+    try:
+        reply = fire(client, SAFETY_OUTPUTS, safety_inputs(), "update-interval.n_intervals")
+        text = reply["safety-status"]["children"]
+
+        assert text.startswith("Board: FAULT") and "UNEXPECTED_RESET" in text and "Cannot arm" in text
+        assert reply["safety-status"]["style"]["color"] == dashboard.SAFETY_MODE_COLOURS["FAULT"]
+    finally:
+        shared_backend.board_faults = {}
+        shared_backend.last_arm_refusal = ""
 
 
 def test_momentum_edits_reach_the_model(client):
@@ -142,7 +196,8 @@ def test_editing_one_setting_does_not_rebuild_the_optimiser(client, shared_backe
     assert rnn.optimiser is before
 
 
-def test_the_sweep_button_reaches_the_sweep_worker(client, shared_backend, monkeypatch):
+def test_the_sweep_button_reaches_the_sweep_worker(client, armed_shared_backend, monkeypatch):
+    shared_backend = armed_shared_backend
     received = []
     monkeypatch.setattr(shared_backend, "_RNN_training_sweeps", lambda *args: received.append(args))
 

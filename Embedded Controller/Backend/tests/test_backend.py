@@ -172,7 +172,8 @@ def run_sweep(backend, **overrides):
     backend.sweep_thread.join(timeout=60)
 
 
-def test_a_sweep_trains_on_everything_it_recorded_not_just_the_buffer(backend_module, live_backend, monkeypatch):
+def test_a_sweep_trains_on_everything_it_recorded_not_just_the_buffer(backend_module, armed_backend, monkeypatch):
+    live_backend = armed_backend
     trained_on = []
     monkeypatch.setattr(backend_module, "train_model", lambda frame, number_of_epochs=1: trained_on.append(frame) or {"loss": 0.0, "r2": 0.0})
 
@@ -184,7 +185,8 @@ def test_a_sweep_trains_on_everything_it_recorded_not_just_the_buffer(backend_mo
     assert set(trained_on[0]["source"]) == {"hardware"}
 
 
-def test_an_aborted_sweep_closes_its_capture_and_skips_training(backend_module, live_backend, monkeypatch):
+def test_an_aborted_sweep_closes_its_capture_and_skips_training(backend_module, armed_backend, monkeypatch):
+    live_backend = armed_backend
     trained = []
     monkeypatch.setattr(backend_module, "train_model", lambda *args, **kwargs: trained.append(1))
 
@@ -223,7 +225,7 @@ def test_auto_control_settings_are_clamped(backend_module):
     assert backend.set_auto_control(change_penalty=-5)["change_penalty"] == 0.0
 
 
-def test_auto_control_acts_only_when_enabled_fresh_and_not_sweeping(backend_module, stub_proposer, fake_port):
+def test_auto_control_acts_only_when_enabled_armed_fresh_and_not_sweeping(backend_module, stub_proposer, fake_port):
     backend = backend_module.SerialBackend(port="FAKE0", status=False)
     backend.connect()
 
@@ -231,6 +233,10 @@ def test_auto_control_acts_only_when_enabled_fresh_and_not_sweeping(backend_modu
     assert backend.get_auto_control()["state"] == "off"
 
     backend.set_auto_control(enabled=True, change_penalty=0.3)
+    assert backend._auto_control_step() is False
+    assert "not armed" in backend.get_auto_control()["message"]
+
+    backend._handle_board_line(time.time(), "ACK ARM")
     assert backend._auto_control_step() is False
     assert backend.get_auto_control()["state"] == "waiting"  # nothing read yet
 
@@ -249,7 +255,8 @@ def test_auto_control_acts_only_when_enabled_fresh_and_not_sweeping(backend_modu
     assert fake_port.commands("TARGETS") == ["TARGETS 1.000000 1.000000 1.000000 1.000000 1.000000"]
 
 
-def test_auto_control_runs_on_its_own_thread_at_the_configured_rate(live_backend, fake_port, stub_proposer):
+def test_auto_control_runs_on_its_own_thread_at_the_configured_rate(armed_backend, fake_port, stub_proposer):
+    live_backend = armed_backend
     live_backend.set_auto_control(enabled=True, period_ms=100)
     time.sleep(1.5)
     live_backend.set_auto_control(enabled=False)
@@ -262,7 +269,8 @@ def test_auto_control_runs_on_its_own_thread_at_the_configured_rate(live_backend
     assert len(fake_port.commands("TARGETS")) == sent, "kept actuating after being disabled"
 
 
-def test_auto_control_stops_steering_when_the_board_goes_quiet(backend_module, live_backend, fake_port, stub_proposer, monkeypatch):
+def test_auto_control_stops_steering_when_the_board_goes_quiet(backend_module, armed_backend, fake_port, stub_proposer, monkeypatch):
+    live_backend = armed_backend
     monkeypatch.setattr(backend_module, "AUTO_CONTROL_MAX_SAMPLE_AGE_SEC", 0.3)
     live_backend.set_auto_control(enabled=True, period_ms=100)
     assert wait_for(lambda: fake_port.commands("TARGETS"))
@@ -274,3 +282,90 @@ def test_auto_control_stops_steering_when_the_board_goes_quiet(backend_module, l
 
     assert len(fake_port.commands("TARGETS")) == sent
     assert live_backend.get_auto_control()["state"] == "waiting"
+
+
+# ----------------------------------------------------------------------------
+#                               Safety state
+# ----------------------------------------------------------------------------
+
+
+def test_arming_follows_what_the_board_says(live_backend, fake_port):
+    assert live_backend.board_mode in ("UNKNOWN", "SAFE")
+
+    live_backend.arm()
+    assert wait_for(live_backend.is_armed)
+
+    live_backend.disarm()
+    assert wait_for(lambda: live_backend.board_mode == "SAFE")
+
+
+def test_a_refused_arm_is_recorded_and_leaves_the_board_unarmed(live_backend, fake_port):
+    fake_port.mode = "FAULT"
+    live_backend.arm()
+
+    assert wait_for(lambda: "Cannot arm" in live_backend.get_board_safety()["last_arm_refusal"])
+    assert not live_backend.is_armed()
+
+    live_backend.clear_faults()
+    assert wait_for(lambda: live_backend.board_mode == "SAFE")
+
+
+def test_fault_reports_and_the_failsafe_update_the_mode(live_backend, fake_port):
+    fake_port.lines.put("FAULTS mode=FAULT active=none latched=UNEXPECTED_RESET history=UNEXPECTED_RESET "
+                        "counts=UNEXPECTED_RESET:1 boots=7 unexpected_resets=1 last_reset=TASK_WDT")
+    assert wait_for(lambda: live_backend.board_mode == "FAULT")
+    assert live_backend.get_board_safety()["faults"]["last_reset"] == "TASK_WDT"
+
+    fake_port.lines.put("FAULT HOST_TIMEOUT WARNING mode=FAULT")
+    assert wait_for(lambda: (live_backend.get_board_safety()["last_fault"] or {}).get("fault") == "HOST_TIMEOUT")
+
+    live_backend.board_mode = "ARMED"
+    fake_port.lines.put("FAILSAFE outputs zeroed, no command received from host")
+    assert wait_for(lambda: live_backend.board_mode == "SAFE")
+
+
+def test_the_keepalive_also_keeps_the_fault_report_current(fast_keepalive, live_backend, fake_port):
+    assert wait_for(lambda: len(fake_port.commands("FAULTS")) >= 2)
+    assert live_backend.get_board_safety()["faults"].get("boots") == "1"
+
+
+def test_a_sweep_needs_the_board_armed(backend_module, live_backend, monkeypatch):
+    monkeypatch.setattr(backend_module, "train_model", lambda *args, **kwargs: {"loss": 0.0, "r2": 0.0})
+
+    assert live_backend.start_training_sweep(voltage_step_size=0.5, step_linger_time=0.01, epochs=1) is False
+    assert "not armed" in live_backend.get_sweep_status()["message"]
+
+
+def test_stopping_the_backend_disarms_the_board(backend_module, fake_port):
+    backend = backend_module.SerialBackend(port="FAKE9", status=False)
+    backend.online_update_enabled = False
+    backend.start()
+    assert wait_for(lambda: fake_port.opened == ["FAKE9"])
+
+    backend.stop()
+    assert fake_port.commands("DISARM") == ["DISARM"]
+
+
+def test_a_dropped_link_forgets_the_mode(armed_backend):
+    armed_backend.disconnect()
+    assert armed_backend.board_mode == "UNKNOWN"
+    assert not armed_backend.is_armed()
+
+
+def test_a_simulated_board_arms_and_disarms_like_a_real_one(backend_module):
+    backend = backend_module.SerialBackend(port="FAKE0", status=True)
+    assert backend.board_mode == "SAFE"
+
+    backend.arm()
+    assert backend.is_armed()
+
+    backend.update_pin_values(1, 500)
+    backend.disarm()
+    assert backend.board_mode == "SAFE" and backend.pins[0] == 0
+
+
+def test_a_disconnected_board_is_never_reported_armed(backend_module):
+    backend = backend_module.SerialBackend(port="FAKE0", status=False)
+    backend.arm()  # no port open, so this goes down the offline path
+
+    assert not backend.is_armed()

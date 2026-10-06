@@ -10,7 +10,8 @@ import pandas as pd
 
 class FakePort:
     """Plays the board's side of the serial link. Serves queued lines, falls back to a
-    steady MEASURED stream while streaming is on, and records everything written."""
+    steady MEASURED stream while streaming is on, records everything written, and answers
+    the safety commands (ARM, DISARM, FAULTS, CLEAR FAULTS) the way the firmware does."""
 
     def __init__(self):
         self.lines = queue.Queue()
@@ -19,9 +20,37 @@ class FakePort:
         self.streaming = threading.Event()
         self.streaming.set()
         self.line_interval = 0.01
+        self.mode = "SAFE"
 
     def commands(self, prefix=""):
         return [command for _, command in self.written if command.startswith(prefix)]
+
+    def faults_line(self):
+        return (f"FAULTS mode={self.mode} active=none latched=none history=none counts=none "
+                "boots=1 unexpected_resets=0 last_reset=POWERON")
+
+    def respond(self, command):
+        word = command.strip().upper()
+
+        if word == "ARM":
+            if self.mode == "FAULT":
+                self.lines.put("ERROR: Cannot arm - a critical fault is latched, send CLEAR FAULTS!")
+            else:
+                self.mode = "ARMED"
+                self.lines.put("ACK ARM")
+
+        elif word == "DISARM":
+            if self.mode != "FAULT":
+                self.mode = "SAFE"
+            self.lines.put("ACK DISARM")
+
+        elif word == "FAULTS":
+            self.lines.put(self.faults_line())
+
+        elif word == "CLEAR FAULTS":
+            if self.mode == "FAULT":
+                self.mode = "SAFE"
+            self.lines.put(f"ACK CLEAR FAULTS mode={self.mode}")
 
     def make_serial_class(self):
         port = self
@@ -40,7 +69,9 @@ class FakePort:
                     return b"MEASURED 1.23456 V\n" if port.streaming.is_set() else b""
 
             def write(self, data):
-                port.written.append((time.time(), data.decode().strip()))
+                command = data.decode().strip()
+                port.written.append((time.time(), command))
+                port.respond(command)
 
             def close(self):
                 self.is_open = False

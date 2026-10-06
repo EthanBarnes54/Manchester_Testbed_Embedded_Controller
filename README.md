@@ -153,7 +153,23 @@ The switch line reaches its load through an AND gate that the firmware has to en
 - Gate: 74LVC1G08 on 3.3 V. If the load needs 5 V logic, use a 74AHCT1G08 on 5 V: its TTL-level inputs accept the ESP32's 3.3 V, which a 5 V-powered 74LVC part does not reliably do.
 - The 10 kΩ pull-down holds ARMED low from reset until the firmware drives it. The second pull-down keeps the gate output low if the gate is unpowered.
 - Why it is needed: GPIO 16 is undriven from reset, and the Arduino core's PSRAM probe uses it as a chip-select during boot, before any of this firmware runs. The gate stays closed through all of that.
-- Firmware behaviour: ARMED is driven low first thing in `setup()`, and goes high once setup is done and the switch line is held low. The failsafe (host silent for 5 s) drops ARMED before anything else, and any host command raises it again before the command runs. The switch's own state machine never touches ARMED.
+- Firmware behaviour: ARMED is driven low first thing in `setup()` and goes high only on an explicit `ARM` (see "Operating modes"). DISARM, the failsafe (host silent for 5 s) and any critical fault drop it before anything else. The switch's own state machine never touches ARMED.
+- External watchdog (recommended): GPIO 18 (HEARTBEAT) toggles on every loop pass. Feed it to a watchdog supervisor such as a TPS3823 and AND its output into the gate (a 3-input 74LVC1G11 in place of the 74LVC1G08), so the gate closes within the watchdog's timeout if the firmware stops, independently of the ESP32. With nothing fitted the pin is harmless.
+
+## Operating modes
+The board is always in one of three modes, reported by `FAULTS` and shown on the dashboard:
+
+| Mode | Outputs | How it is entered | How it is left |
+|---|---|---|---|
+| SAFE | Setpoints zero, switch held low, ARMED low | Boot, `DISARM`, the failsafe | `ARM` |
+| ARMED | Live; `TARGETS`, `PIN` and `SWITCH_PERIOD_US` accepted | `ARM`, only if no critical fault is latched | `DISARM`, the failsafe, a critical fault |
+| FAULT | As SAFE; `ARM` refused | A critical fault, including a reset by watchdog, panic or brownout | `CLEAR FAULTS`, once the fault's condition has gone |
+
+- Commands that would drive an output are answered `ERROR: Not armed!` unless the board is ARMED. Commands that set an output to zero are always accepted.
+- The host coming back after a failsafe does not re-arm the board; the operator presses ARM again.
+- `FAULTS` reports the mode, active, latched and historical faults, counts, the boot count and the last reset reason. The history and the reset counters survive power cycles; `CLEAR LOG` resets them.
+- A loop that stops for 5 s resets the chip (the loop watchdog), which comes back up in FAULT with the reset recorded. OTA uploads are only accepted while SAFE.
+- On the dashboard, ARM asks for confirmation. Sweeps and auto control refuse to run unless the board is ARMED, and closing the backend cleanly sends DISARM.
 
 ### Still to be decided before relying on 1 us
 - **What the gate output drives. NOT YET DECIDED.** It could be an on-board driver a few centimetres away, or a cable to the HV switch. This decides:
