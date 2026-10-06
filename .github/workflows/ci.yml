@@ -55,4 +55,16 @@ jobs:
         run: pip install platformio==6.1.19
 
       - name: Build every environment
-        run: pio run -e esp32dev -e esp32_debug
+        run: pio run -e esp32dev -e esp32_debug -e esp32_deploy
+
+      # After the build, so the Arduino core PlatformIO installed is listed too.
+      - name: Software bill of materials
+        run: python tools/generate_sbom.py sbom.cdx.json
+
+      - name: Keep the images and the SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ github.sha }}
+          path: |
+            Embedded Controller/.pio/build/*/firmware.bin
+            Embedded Controller/sbom.cdx.json

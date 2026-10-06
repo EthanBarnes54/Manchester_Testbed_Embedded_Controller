@@ -15,3 +15,8 @@ __pycache__/
 *.pt
 DataLog_*.csv
 sweep_dataset_*.csv
+
+# Site records - the audit trail and dataset provenance sidecars
+audit_log.jsonl
+sweep_dataset_*.json
+sbom.cdx.json

@@ -14,9 +14,11 @@
 
 import binascii
 import itertools
+import json
 import logging
 from collections import deque
 import os
+from pathlib import Path
 import queue
 import random
 import threading
@@ -28,6 +30,7 @@ import serial
 
 from python_ML_Metrics import MetricCollector
 from python_Autonomy_Guard import AutonomyGuard
+import python_Audit as audit
 
 try:
 
@@ -47,6 +50,7 @@ try:
         propose_control_vector,
         get_validation_metrics,
         get_training_feature_stats,
+        set_training_provenance,
     )
 
 except Exception:
@@ -88,6 +92,9 @@ except Exception:
         return {}
 
     def get_training_feature_stats():
+        return None
+
+    def set_training_provenance(_details):
         return None
 
 
@@ -995,18 +1002,22 @@ class SerialBackend:
                       else f"the board speaks protocol {self.board_version.get('protocol')}, not {PROTOCOL_VERSION}")
             self.last_arm_refusal = f"Backend refused to arm: {reason}"
             log.error(f"ERROR: {self.last_arm_refusal}!")
+            audit.record({"source": "backend", "action": "ARM", "result": "refused", "reason": reason})
             return
 
+        audit.record({"source": "backend", "action": "ARM"})
         self.send_command("ARM")
 
     def disarm(self):
         """Zeroes every output and closes the switch gate. Always accepted."""
 
+        audit.record({"source": "backend", "action": "DISARM"})
         self.send_command("DISARM")
 
     def clear_faults(self):
         """Clears latched faults whose condition has gone, and asks for the fault report."""
 
+        audit.record({"source": "backend", "action": "CLEAR FAULTS"})
         self.send_command("CLEAR FAULTS")
         self.send_command("FAULTS")
 
@@ -1017,6 +1028,22 @@ class SerialBackend:
         """Asks the board to rerun its power-on self-test and report the result."""
 
         self.send_command("SELFTEST")
+
+    def _write_dataset_provenance(self, csv_path, frame, sweep_settings: dict):
+        """Writes <dataset>.json beside a saved dataset: what produced it and the CSV's SHA-256."""
+
+        sidecar = Path(csv_path).with_suffix(".json")
+        details = audit.provenance(
+            self.board_version,
+            dataset=Path(csv_path).name,
+            sha256=audit.file_sha256(csv_path),
+            rows=len(frame),
+            sources=frame["source"].value_counts().to_dict() if "source" in frame.columns else {},
+            switch_period_us=self.switch_timing,
+            sweep=sweep_settings,
+        )
+        sidecar.write_text(json.dumps(details, indent=2, default=str), encoding="utf-8")
+        return sidecar
 
     def get_link_health(self) -> dict:
         """The link's state: the board's VERSION reply, whether its protocol matches, and counts."""
@@ -1564,6 +1591,11 @@ class SerialBackend:
 
             self.sweep_status = {"state": "running", "progress": 0.0, "message": ""}
 
+            # As requested, for the provenance of the dataset and model this sweep produces.
+            sweep_settings = {"minimum_v": minimum_voltage, "maximum_v": maximum_voltage, "step_v": voltage_step_size,
+                              "hold_s": hold_time, "epochs": epochs, "reference_voltages": reference_voltages,
+                              "factorial_levels": factorial_levels, "random_samples": random_samples}
+
             try:
                 minimum_voltage = float(minimum_voltage)
                 maximum_voltage = float(maximum_voltage)
@@ -1760,6 +1792,9 @@ class SerialBackend:
                         file_path = f"sweep_dataset_{time_stamp}.csv"
                         sweep_dataset.to_csv(file_path, index=False)
 
+                        # A sidecar records what produced the file and a hash that proves it unchanged.
+                        self._write_dataset_provenance(file_path, sweep_dataset, sweep_settings)
+
                         log.info(f"Sweep dataset successfully saved to {file_path}...")
 
                     except Exception as fault:
@@ -1767,6 +1802,9 @@ class SerialBackend:
 
                 if train_model is not None:
                     try:
+                        set_training_provenance(audit.provenance(
+                            self.board_version, dataset_sha256=audit.frame_sha256(data_frame), rows=len(data_frame),
+                            switch_period_us=self.switch_timing, sweep=sweep_settings))
                         metrics = train_model(data_frame, number_of_epochs=int(max(1, epochs)))
                         current_time = time.time()
 

@@ -2,6 +2,7 @@
 simulation, and pyserial is replaced before anything imports it."""
 
 import os
+import tempfile
 import time
 
 import pytest
@@ -11,6 +12,9 @@ from helpers import FakePort
 
 # Set before python_Backend is first imported, so its shared backend is simulated.
 os.environ["OFFLINE"] = "1"
+
+# The audit trail goes to a scratch file, never the real one beside the backend.
+os.environ["TESTBED_AUDIT_LOG"] = os.path.join(tempfile.gettempdir(), f"testbed_audit_{os.getpid()}.jsonl")
 
 
 class _NoHardware:

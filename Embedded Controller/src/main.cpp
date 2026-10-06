@@ -19,6 +19,7 @@
 #include <ArduinoOTA.h>
 #include <Adafruit_ADS1X15.h>
 #include <Preferences.h>
+#include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -192,6 +193,14 @@ constexpr uint32_t SWITCH_LEDC_CLOCK_HZ = REF_CLK_FREQ;
 
 // Slack on top of two cycles before a new LEDC setting is declared stuck.
 constexpr unsigned long SWITCH_LEDC_SETTLE_MARGIN_US = 100;
+
+// A production build (the esp32_deploy environment) never starts the radio: no Wi-Fi, no
+// OTA, nothing listening. Updates then go over the cable only.
+#ifndef TESTBED_PRODUCTION
+#define TESTBED_PRODUCTION 0
+#endif
+
+constexpr bool WIRELESS_ENABLED = TESTBED_PRODUCTION == 0;
 
 // WiFi/OTA configuration. Override these from platformio.ini build_flags rather than
 // editing them here, so site credentials never end up committed:
@@ -1397,6 +1406,12 @@ class SystemSupervisor {
     return state_.armed();
   }
 
+  // The checks that say this firmware image brought its own peripherals up. A missing
+  // ADC or verification hardware is not the image's fault, so it does not count here.
+  bool image_checks_passed() const {
+    return (state_.active() & (safety::bit_of(safety::Fault::ClockConfig) | safety::bit_of(safety::Fault::SwitchGenerator))) == 0;
+  }
+
   // ARM opens the gate. The outputs are zero whenever the board is not armed, so the gate
   // always opens onto a held-low switch line and zero setpoints.
   void arm() {
@@ -1801,6 +1816,34 @@ CommandProcessor command_processor(channels, measurement_service, led_indicator,
 
 bool failsafe_engaged = false;
 
+// The core asks this before marking a freshly updated image as good (esp32-hal-misc.c).
+// Saying "later" leaves the image pending until setup() has run the power-on self-test.
+bool verifyRollbackLater() {
+  return true;
+}
+
+// After an OTA update the bootloader runs the new image once, pending verification. It is
+// kept only if its self-test shows it brought up its own clocks and switch generators;
+// otherwise the bootloader goes back to the previous image. An image flashed over the
+// cable is never pending, so this does nothing then.
+void confirm_or_roll_back_image() {
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+
+  if (running == nullptr || esp_ota_get_state_partition(running, &state) != ESP_OK || state != ESP_OTA_IMG_PENDING_VERIFY) {
+    return;
+  }
+
+  if (supervisor.image_checks_passed()) {
+    esp_ota_mark_app_valid_cancel_rollback();
+    send_line("OTA image confirmed by the power-on self-test");
+  } else {
+    send_line("ERROR: OTA image failed its power-on self-test, rolling back!");
+    Serial.flush();
+    esp_ota_mark_app_invalid_rollback_and_reboot();
+  }
+}
+
 // Once the host has spoken to us it is expected to keep doing so. If it goes quiet the
 // board disarms, otherwise a set of targets would stay latched on the rig for as long as
 // it has power. The host coming back does not re-arm it: that takes an explicit ARM.
@@ -1848,7 +1891,11 @@ void setup() {
   // Records the reset and runs the power-on self-test, so after the ADC, the switch
   // generators and the output checks have been brought up.
   supervisor.begin();
-  ota_wifi_service.begin(WIFI_SSID, WIFI_PASSWORD, OTA_HOSTNAME);
+  confirm_or_roll_back_image();
+
+  if (WIRELESS_ENABLED) {
+    ota_wifi_service.begin(WIFI_SSID, WIFI_PASSWORD, OTA_HOSTNAME);
+  }
 
   // The board comes up Safe, with the gate closed, and stays that way until an ARM.
   // From here a loop that stops for 5 s resets the chip, which records the reset as a
@@ -1868,7 +1915,9 @@ void loop() {
   measurement_service.update(now_ms);
   led_indicator.heartbeat(now_ms);
   led_indicator.update(now_ms);
-  ota_wifi_service.loop(!supervisor.armed());
+  if (WIRELESS_ENABLED) {
+    ota_wifi_service.loop(!supervisor.armed());
+  }
   enforce_command_timeout(now_ms);
   supervisor.monitor(now_ms, static_cast<uint32_t>(micros() - pass_started_us));
 

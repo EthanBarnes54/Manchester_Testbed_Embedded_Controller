@@ -22,6 +22,8 @@ import os
 import threading
 from collections import deque
 
+import python_Audit as audit
+
 log = logging.getLogger("Dashboard")
 
 from python_Backend import (
@@ -81,7 +83,32 @@ DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8050"))
 DASHBOARD_USER = os.getenv("DASHBOARD_USER", "operator").strip()
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 
+# A second, read-only login. Observers see everything and can make the rig safe (DISARM,
+# stop a sweep), but cannot make anything live.
+DASHBOARD_OBSERVER_USER = os.getenv("DASHBOARD_OBSERVER_USER", "observer").strip()
+DASHBOARD_OBSERVER_PASSWORD = os.getenv("DASHBOARD_OBSERVER_PASSWORD", "")
+
+# TLS certificate and key. Off loopback the dashboard refuses to serve without them, since
+# basic auth over plain HTTP hands the password to anyone on the network.
+DASHBOARD_TLS_CERT = os.getenv("DASHBOARD_TLS_CERT", "")
+DASHBOARD_TLS_KEY = os.getenv("DASHBOARD_TLS_KEY", "")
+
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+# Callback inputs that change the rig, its model or its data. Only an operator may fire
+# them. Everything else (the update tick, the plot window, DISARM, stopping a sweep) is open
+# to observers too: anyone may make the rig safe, only an operator may make it live.
+OPERATOR_ONLY_INPUTS = {
+    "pwm1.value", "pwm2.value", "pwm3.value", "pwm4.value", "pwm5.value", "switch-time-us.value",
+    "arm-confirm.submit_n_clicks", "clear-faults-button.n_clicks", "selftest-button.n_clicks",
+    "auto-mode-button.n_clicks", "auto-rate-ms.value", "auto-change-penalty.value",
+    "sweep-btn.n_clicks", "save-model-button.n_clicks", "save-dataset-button.n_clicks",
+    "apply-buffer-samples.n_clicks", "compute-shap-button.n_clicks",
+    "online-window-seconds.value", "online-learning-rate.value", "online-momentum.value", "optimiser-type.value",
+}
+
+# Recorded in the audit trail whoever fires them.
+AUDITED_INPUTS = OPERATOR_ONLY_INPUTS | {"disarm-button.n_clicks", "sweep-stop-btn.n_clicks"}
 
 
 def _is_loopback(host: str) -> bool:
@@ -90,29 +117,84 @@ def _is_loopback(host: str) -> bool:
     return str(host).strip().lower() in LOOPBACK_HOSTS
 
 
-@server.before_request
-def _require_dashboard_credentials():
-    """Gates every request behind basic auth whenever a password has been configured."""
+def _launch_refusal(host: str, password: str, tls_cert: str, tls_key: str, allow_plaintext: bool = False) -> str | None:
+    """Why the dashboard must not serve with this configuration, or None if it may."""
 
-    if not DASHBOARD_PASSWORD:
+    if _is_loopback(host):
         return None
 
-    credentials = request.authorization
+    if not password:
+        return (f"ERROR: Refusing to serve the dashboard on {host} without a password! This panel drives the rig "
+                "outputs directly, so set DASHBOARD_PASSWORD (and DASHBOARD_USER) before exposing it, or leave "
+                "DASHBOARD_HOST on 127.0.0.1.")
 
-    if credentials is not None:
-        user_ok = hmac.compare_digest(credentials.username or "", DASHBOARD_USER)
-        password_ok = hmac.compare_digest(credentials.password or "", DASHBOARD_PASSWORD)
+    if not (tls_cert and tls_key) and not allow_plaintext:
+        return (f"ERROR: Refusing to serve the dashboard on {host} without TLS! Basic auth over plain HTTP sends the "
+                "password in the clear. Set DASHBOARD_TLS_CERT and DASHBOARD_TLS_KEY, or set "
+                "DASHBOARD_ALLOW_PLAINTEXT=1 to accept the risk on a trusted network.")
 
-        # Both are compared every time so a wrong username cannot be told from a
-        # wrong password by how long the reply takes.
-        if user_ok and password_ok:
-            return None
+    return None
 
-    return Response(
-        "ERROR: Authentication required!",
-        401,
-        {"WWW-Authenticate": 'Basic realm="Manchester Testbed Controller"'},
-    )
+
+def _role_for(credentials) -> str | None:
+    """"operator", "observer", or None if these credentials match neither login."""
+
+    if credentials is None:
+        return None
+
+    username, password = credentials.username or "", credentials.password or ""
+
+    # Every comparison is made every time, so neither a username nor a role can be told
+    # from another by how long the reply takes.
+    operator = hmac.compare_digest(username, DASHBOARD_USER) & hmac.compare_digest(password, DASHBOARD_PASSWORD)
+    observer = (hmac.compare_digest(username, DASHBOARD_OBSERVER_USER)
+                & hmac.compare_digest(password, DASHBOARD_OBSERVER_PASSWORD) & bool(DASHBOARD_OBSERVER_PASSWORD))
+
+    return "operator" if operator else "observer" if observer else None
+
+
+def _changed_inputs() -> set:
+    """The inputs that fired this Dash callback request, or an empty set for anything else."""
+
+    if request.method != "POST" or not request.path.endswith("/_dash-update-component"):
+        return set()
+
+    payload = request.get_json(silent=True) or {}
+    return set(payload.get("changedPropIds") or [])
+
+
+@server.before_request
+def _require_dashboard_credentials():
+    """Gates every request behind basic auth whenever a password has been configured, keeps
+    observers to read-only use, and records every action on the rig in the audit trail."""
+
+    changed = _changed_inputs()
+
+    if not DASHBOARD_PASSWORD:
+        role, user = "operator", "local"
+    else:
+        role = _role_for(request.authorization)
+        user = request.authorization.username if request.authorization else None
+
+        if role is None:
+            return Response(
+                "ERROR: Authentication required!",
+                401,
+                {"WWW-Authenticate": 'Basic realm="Manchester Testbed Controller"'},
+            )
+
+    if role == "observer" and changed & OPERATOR_ONLY_INPUTS:
+        audit.record({"source": "dashboard", "user": user, "role": role, "from": request.remote_addr,
+                      "inputs": sorted(changed), "result": "refused"})
+        return Response("ERROR: Observers cannot change the rig!", 403)
+
+    if changed & AUDITED_INPUTS:
+        payload = request.get_json(silent=True) or {}
+        values = {f"{item.get('id')}.{item.get('property')}": item.get("value") for item in payload.get("inputs") or []
+                  if f"{item.get('id')}.{item.get('property')}" in changed}
+        audit.record({"source": "dashboard", "user": user, "role": role, "from": request.remote_addr, "inputs": values})
+
+    return None
 
 
 SAFETY_BUTTON_STYLE = {
@@ -2481,19 +2563,21 @@ def update_ml_tab(_):
 
 if __name__ == "__main__":
 
-    if not _is_loopback(DASHBOARD_HOST) and not DASHBOARD_PASSWORD:
-        raise SystemExit(
-            f"ERROR: Refusing to serve the dashboard on {DASHBOARD_HOST} without a password! "
-            "This panel drives the rig outputs directly, so set DASHBOARD_PASSWORD "
-            "(and DASHBOARD_USER) before exposing it, or leave DASHBOARD_HOST on 127.0.0.1."
-        )
+    refusal = _launch_refusal(DASHBOARD_HOST, DASHBOARD_PASSWORD, DASHBOARD_TLS_CERT, DASHBOARD_TLS_KEY,
+                              allow_plaintext=os.getenv("DASHBOARD_ALLOW_PLAINTEXT", "").strip().lower() in {"1", "true", "yes"})
+
+    if refusal:
+        raise SystemExit(refusal)
 
     if DASHBOARD_PASSWORD:
-        log.info(f"Dashboard authentication enabled for user '{DASHBOARD_USER}'...")
+        observers = f" and read-only observer '{DASHBOARD_OBSERVER_USER}'" if DASHBOARD_OBSERVER_PASSWORD else ""
+        log.info(f"Dashboard authentication enabled for operator '{DASHBOARD_USER}'{observers}...")
     else:
         log.info("Dashboard bound to loopback only, no authentication required...")
 
+    log.info(f"Audit trail: {audit.audit_log_path()}")
     start_backend()
 
-    log.info("Launching ESP-12F Control Dashboard...")
-    app.run(debug=False, host=DASHBOARD_HOST, port=DASHBOARD_PORT)
+    tls = (DASHBOARD_TLS_CERT, DASHBOARD_TLS_KEY) if DASHBOARD_TLS_CERT and DASHBOARD_TLS_KEY else None
+    log.info(f"Launching ESP-12F Control Dashboard{' over TLS' if tls else ''}...")
+    app.run(debug=False, host=DASHBOARD_HOST, port=DASHBOARD_PORT, ssl_context=tls)

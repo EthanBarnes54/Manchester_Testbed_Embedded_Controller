@@ -183,6 +183,14 @@ The board is always in one of three modes, reported by `FAULTS` and shown on the
 - A loop that stops for 5 s resets the chip (the loop watchdog), which comes back up in FAULT with the reset recorded. OTA uploads are only accepted while SAFE.
 - On the dashboard, ARM asks for confirmation. Sweeps and auto control refuse to run unless the board is ARMED, and closing the backend cleanly sends DISARM.
 
+## Deployment and security
+- **Deploy build.** `pio run -e esp32_deploy -t upload` builds what goes on the rig: Wi-Fi and OTA compiled out (nothing listening; the image is about 26% of flash against 65%), and both output verification checks on. It expects the loopback and readback hardware to be fitted.
+- **OTA rollback.** After an OTA update the bootloader runs the new image pending verification. It keeps the image only if the power-on self-test shows it brought up its own clocks and switch generators; otherwise it goes back to the previous image. OTA is only accepted while the board is SAFE. Secure boot and flash encryption are **not** enabled: they burn one-time eFuses and need a board set aside for the procedure.
+- **Dashboard access.** Off loopback the dashboard refuses to start without a password and TLS (`DASHBOARD_TLS_CERT`, `DASHBOARD_TLS_KEY`), unless `DASHBOARD_ALLOW_PLAINTEXT=1` deliberately accepts the risk. A second, read-only login (`DASHBOARD_OBSERVER_USER`, `DASHBOARD_OBSERVER_PASSWORD`) can watch everything and can DISARM or stop a sweep, but cannot make anything live.
+- **Audit trail.** Every operator action on the dashboard (with user, role and address), every refused observer action, and every ARM, DISARM and CLEAR FAULTS the backend sends are appended as JSON lines to `audit_log.jsonl` (or `TESTBED_AUDIT_LOG`).
+- **Provenance.** A saved sweep dataset gets a `.json` sidecar with the board's VERSION, the backend's git revision, the sweep settings, the switch period and the CSV's SHA-256. A model checkpoint carries the hash of the data it was trained on, alongside its validation score.
+- **SBOM.** `python tools/generate_sbom.py` writes a CycloneDX 1.5 bill of materials of every pinned Python package, the PlatformIO platform and libraries, and the installed Arduino core. CI builds all three firmware environments and keeps the images and the SBOM as artefacts.
+
 ## Auto control safeguards
 Auto control lets the RNN steer the rig unattended, so `python_Autonomy_Guard.py` sits between its proposals and the board as an independent monitor with rules simple enough to check by reading:
 

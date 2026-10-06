@@ -192,6 +192,11 @@ def load_previous_weights(model, scaler):
         if isinstance(checkpoint, dict) and isinstance(checkpoint.get("validation"), dict):
             VALIDATION.update(checkpoint["validation"])
 
+        PROVENANCE.clear()
+
+        if isinstance(checkpoint, dict) and isinstance(checkpoint.get("provenance"), dict):
+            PROVENANCE.update(checkpoint["provenance"])
+
         if isinstance(checkpoint, dict) and _restore_scaler(scaler, checkpoint.get("scaler") or {}):
             log.info(f"Successfully loaded model weights and scalers from {model_path}...")
 
@@ -209,7 +214,7 @@ def load_previous_weights(model, scaler):
 def save_nn_weights(model, scaler):
     """Saves the current model weights and scaler state (if available) to a timestamped checkpoint file."""
 
-    payload = {"state_dict": model.state_dict(), "validation": dict(VALIDATION)}
+    payload = {"state_dict": model.state_dict(), "validation": dict(VALIDATION), "provenance": dict(PROVENANCE)}
 
     if hasattr(scaler, "mean_") and hasattr(scaler, "scale_"):
         payload["scaler"] = {
@@ -275,6 +280,19 @@ FEATURE_COLUMNS = [f"pin_{i}" for i in range(1, 6)] + ["voltage"]
 # (python_Autonomy_Guard). Online updates move the weights afterwards; how many have is
 # counted so a stale score can be seen.
 VALIDATION = {}
+
+# What the current weights were trained on (dataset hash, firmware, backend revision), set
+# by the backend before training and saved alongside the weights.
+PROVENANCE = {}
+
+
+def set_training_provenance(details: dict):
+    PROVENANCE.clear()
+    PROVENANCE.update(details or {})
+
+
+def get_training_provenance() -> dict:
+    return dict(PROVENANCE)
 
 
 def get_validation_metrics() -> dict:
