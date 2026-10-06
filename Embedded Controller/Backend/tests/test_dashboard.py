@@ -102,6 +102,16 @@ def test_the_switch_field_accepts_5_us_to_2_s(client, shared_backend, monkeypatc
         assert shared_backend.switch_timing is None
 
 
+def test_a_fractional_switch_time_is_refused_not_truncated(client, shared_backend, monkeypatch):
+    monkeypatch.setattr(shared_backend, "switch_timing", None)
+    reply = fire(client, PIN_OUTPUTS, DEFAULT_PINS + [("switch-time-us", "value", 7.5)], "switch-time-us.value")
+
+    assert reply["pins-ack"]["children"] == "ERROR: Switch time must be a whole number of us!"
+    assert shared_backend.switch_timing is None
+    assert "border" in dashboard._validate_switch_time_input(7.5)
+    assert "border" not in dashboard._validate_switch_time_input(7)
+
+
 def test_editing_a_voltage_sends_targets_and_leaves_the_switch_alone(client, shared_backend):
     reply = fire(client, PIN_OUTPUTS, DEFAULT_PINS + [("switch-time-us", "value", None)], "pwm1.value")
 

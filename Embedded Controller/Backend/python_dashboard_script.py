@@ -1543,7 +1543,7 @@ def _validate_switch_time_input(input_value):
         log.error(f"ERROR: Invalid switch time - {fault}! (Must be in {SWITCH_PERIOD_MIN_US}-{SWITCH_PERIOD_MAX_US} us range...)")
         return {**base_style, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
 
-    if float(SWITCH_PERIOD_MIN_US) <= fval <= float(SWITCH_PERIOD_MAX_US):
+    if fval.is_integer() and float(SWITCH_PERIOD_MIN_US) <= fval <= float(SWITCH_PERIOD_MAX_US):
         return base_style
 
     return {**base_style, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
@@ -1648,6 +1648,10 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
                     f"ERROR: Switch time out of range ({SWITCH_PERIOD_MIN_US}-{SWITCH_PERIOD_MAX_US} us)!",
                     {"color": "red", "fontWeight": "bold"},
                 )
+
+            # The board takes whole microseconds, and a fraction would otherwise be dropped silently.
+            if not float_switch_timing.is_integer():
+                return "ERROR: Switch time must be a whole number of us!", {"color": "red", "fontWeight": "bold"}
 
             try:
                 Back_End_Controller.set_switch_timing(float_switch_timing)

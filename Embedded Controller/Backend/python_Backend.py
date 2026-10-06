@@ -1064,7 +1064,11 @@ class SerialBackend:
         self.set_pin_voltage(channel, duty)
 
     def set_switch_timing(self, timing_input: float):
-        """Sets the switch timing (in microseconds) given to the control board."""
+        """Sets the switch timing (microseconds between edges) given to the control board.
+
+        The board takes whole microseconds only, so a fractional period is refused rather
+        than truncated. One outside the shared bounds is clamped, with a warning.
+        """
 
         try:
             switch_timing = float(timing_input)
@@ -1074,7 +1078,19 @@ class SerialBackend:
 
             return
 
+        if not switch_timing.is_integer():
+            log.warning(f"WARNING: Switch timing not set: {switch_timing} us is not a whole number of microseconds!")
+
+            return
+
         board_switch_timing = max(float(SWITCH_PERIOD_MIN_US), min(float(SWITCH_PERIOD_MAX_US), switch_timing))
+
+        if board_switch_timing != switch_timing:
+            log.warning(
+                f"WARNING: Switch timing {switch_timing:.0f} us is outside {SWITCH_PERIOD_MIN_US}-{SWITCH_PERIOD_MAX_US} us, "
+                f"clamped to {board_switch_timing:.0f} us!"
+            )
+
         self.switch_timing = board_switch_timing
 
         if self.offline:
