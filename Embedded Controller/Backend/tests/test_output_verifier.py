@@ -6,24 +6,23 @@ hardware declared fitted and once without it.
 """
 
 import re
-import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
 
+from host_build import build_and_run, needs_compiler
+
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 FIRMWARE_DIR = BACKEND_DIR.parent
-INCLUDE_DIR = FIRMWARE_DIR / "include"
 MAIN_CPP = (FIRMWARE_DIR / "src" / "main.cpp").read_text(encoding="utf-8")
 
 
-def firmware_source():
-    parts = [re.search(rf"^constexpr int {name} = [^;]+;", MAIN_CPP, re.M).group(0)
+def firmware_source(main_cpp=MAIN_CPP):
+    parts = [re.search(rf"^constexpr int {name} = [^;]+;", main_cpp, re.M).group(0)
              for name in ("MODULATION_RESOLUTION", "MAX_MODULATION_VALUE", "GATE_LOOPBACK_PIN")]
     parts.append(re.search(r"^#ifndef TESTBED_GATE_LOOPBACK.*?^constexpr uint8_t READBACK_MISMATCH_READINGS = [^;]+;",
-                           MAIN_CPP, re.S | re.M).group(0))
-    parts.append(re.search(r"^class OutputVerifier \{.*?^\};", MAIN_CPP, re.S | re.M).group(0))
+                           main_cpp, re.S | re.M).group(0))
+    parts.append(re.search(r"^class OutputVerifier \{.*?^\};", main_cpp, re.S | re.M).group(0))
     return "\n".join(parts)
 
 
@@ -228,16 +227,17 @@ int main() {
 """
 
 
-@pytest.mark.skipif(shutil.which("g++") is None, reason="needs a host C++ compiler")
+def harness_source(main_cpp=MAIN_CPP):
+    return HARNESS.replace("#include <cstdint>", "#include <cstdint>\n#include <string>").replace("@@FIRMWARE@@", firmware_source(main_cpp))
+
+
+def fitted_defines(fitted):
+    return {"TESTBED_GATE_LOOPBACK": fitted, "TESTBED_SETPOINT_READBACK": fitted}
+
+
+@pytest.mark.req("OUT-01", "OUT-02", "OUT-03")
+@needs_compiler
 @pytest.mark.parametrize("fitted", [1, 0], ids=["hardware fitted", "not fitted"])
 def test_output_verifier_on_the_host(tmp_path, fitted):
-    source, binary = tmp_path / "output_verifier.cpp", tmp_path / "output_verifier"
-    source.write_text(HARNESS.replace("#include <cstdint>", "#include <cstdint>\n#include <string>").replace("@@FIRMWARE@@", firmware_source()))
-
-    flags = [f"-DTESTBED_GATE_LOOPBACK={fitted}", f"-DTESTBED_SETPOINT_READBACK={fitted}"]
-    build = subprocess.run(["g++", "-std=gnu++11", "-Wall", *flags, f"-I{INCLUDE_DIR}", "-o", str(binary), str(source)],
-                           capture_output=True, text=True)
-    assert build.returncode == 0, build.stderr
-
-    run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=60)
+    run = build_and_run(harness_source(), tmp_path, "output_verifier", defines=fitted_defines(fitted))
     assert run.returncode == 0, run.stdout + run.stderr

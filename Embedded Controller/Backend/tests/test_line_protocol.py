@@ -8,12 +8,12 @@ against good, corrupted and unframed lines.
 
 import random
 import shutil
-import subprocess
-from pathlib import Path
 
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
-INCLUDE_DIR = Path(__file__).resolve().parents[2] / "include"
+from host_build import COMPILER, build, run
 
 HARNESS = r"""
 #include <cstdio>
@@ -47,25 +47,25 @@ int main(int argc, char** argv) {
 """
 
 
-@pytest.fixture(scope="module")
-def harness(tmp_path_factory):
-    if shutil.which("g++") is None:
-        pytest.skip("needs a host C++ compiler")
+def make_harness(work, include_dirs=(), **options):
+    """Builds the framing harness; returns a function that feeds it lines and returns its output lines."""
 
-    work = tmp_path_factory.mktemp("line_protocol")
-    source, binary = work / "line_protocol.cpp", work / "line_protocol"
-    source.write_text(HARNESS)
+    binary = build(HARNESS, work, "line_protocol", include_dirs=include_dirs, **options)
 
-    build = subprocess.run(["g++", "-std=gnu++11", "-Wall", "-Wextra", "-Werror", f"-I{INCLUDE_DIR}", "-o", str(binary), str(source)],
-                           capture_output=True, text=True)
-    assert build.returncode == 0, build.stderr
-
-    def run(lines, *args):
-        result = subprocess.run([str(binary), *args], input="\n".join(lines) + "\n", capture_output=True, text=True, timeout=60)
+    def feed(lines, *args):
+        result = run(binary, *args, input="\n".join(lines) + "\n")
         assert result.returncode == 0, result.stderr
         return result.stdout.splitlines()
 
-    return run
+    return feed
+
+
+@pytest.fixture(scope="module")
+def harness(tmp_path_factory):
+    if shutil.which(COMPILER) is None:
+        pytest.skip("needs a host C++ compiler")
+
+    return make_harness(tmp_path_factory.mktemp("line_protocol"))
 
 
 def sample_lines():
@@ -77,15 +77,18 @@ def sample_lines():
     return fixed + randoms
 
 
+@pytest.mark.req("LINK-01")
 def test_the_crc_is_the_standard_ccitt_false(harness):
     assert harness(["123456789"]) == ["123456789*29B1"]
 
 
+@pytest.mark.req("LINK-01")
 def test_firmware_and_backend_frame_every_line_identically(backend_module, harness):
     lines = sample_lines()
     assert harness(lines) == [backend_module.frame_line(line) for line in lines]
 
 
+@pytest.mark.req("LINK-01")
 def test_the_firmware_accepts_good_lines_and_rejects_corrupted_ones(backend_module, harness):
     framed = backend_module.frame_line("TARGETS 1.000000 0.500000 0.000000 3.300000 2.000000")
     corrupted = framed.replace("3.300000", "8.300000")
@@ -105,6 +108,7 @@ def test_the_firmware_accepts_good_lines_and_rejects_corrupted_ones(backend_modu
     ]
 
 
+@pytest.mark.req("LINK-01")
 def test_every_single_bit_flip_in_a_command_is_caught(backend_module, harness):
     framed = backend_module.frame_line("SWITCH_PERIOD_US 5")
     body = framed[:-5].encode()
@@ -119,3 +123,36 @@ def test_every_single_bit_flip_in_a_command_is_caught(backend_module, harness):
                 flipped.append(text + framed[-5:])
 
     assert set(line.split()[0] for line in harness(flipped, "verify")) == {"invalid"}
+
+
+# Lines dense in what the parser cares about: '*', hex digits in both cases, and lengths
+# around the five-character suffix. Printable ASCII only, as on the wire.
+WIRE_TEXT = st.text(alphabet=st.sampled_from("*0123456789abcdefABCDEFxyz =._-"), max_size=24)
+FRAMED_OR_NOT = st.one_of(WIRE_TEXT, WIRE_TEXT.map(lambda text: text + "*"), WIRE_TEXT.flatmap(
+    lambda text: st.sampled_from(["", "*", "*F", "*FFF"]).map(lambda tail: text + tail)))
+
+
+@pytest.mark.req("LINK-01")
+@settings(max_examples=60, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(lines=st.lists(FRAMED_OR_NOT, min_size=1, max_size=40))
+def test_the_firmware_and_backend_agree_on_every_line_however_malformed(backend_module, harness, lines):
+    expected = []
+    for line in lines:
+        text, verdict = backend_module.unframe_line(line)
+        expected.append(f"{verdict} {len(text) if verdict != 'absent' else len(line)}")
+
+    assert harness(lines, "verify") == expected
+
+
+@pytest.mark.req("LINK-01")
+@settings(max_examples=60, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(body=st.text(alphabet=st.characters(min_codepoint=32, max_codepoint=126), min_size=1, max_size=80),
+       data=st.data())
+def test_any_one_changed_character_is_caught_at_both_ends(backend_module, harness, body, data):
+    framed = backend_module.frame_line(body)
+    index = data.draw(st.integers(0, len(body) - 1))
+    replacement = data.draw(st.characters(min_codepoint=32, max_codepoint=126).filter(lambda c: c != body[index]))
+    corrupted = body[:index] + replacement + body[index + 1:] + framed[-5:]
+
+    assert backend_module.unframe_line(corrupted)[1] == "invalid"
+    assert harness([corrupted], "verify") == [f"invalid {len(body)}"]

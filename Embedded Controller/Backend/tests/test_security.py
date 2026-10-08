@@ -29,6 +29,7 @@ def load_sbom_tool():
 # ----------------------------------------------------------------------------
 
 
+@pytest.mark.req("SEC-07")
 def test_the_sbom_lists_every_pin_the_project_declares():
     tool = load_sbom_tool()
     sbom = tool.build_sbom()
@@ -47,6 +48,7 @@ def test_the_sbom_lists_every_pin_the_project_declares():
     assert all(" " not in purl for purl in purls), "package URLs are percent-encoded"
 
 
+@pytest.mark.req("SEC-07")
 def test_the_sbom_tool_writes_a_file(tmp_path):
     output = tmp_path / "sbom.json"
     load_sbom_tool().main(["generate_sbom.py", str(output)])
@@ -82,6 +84,7 @@ ARM_INPUTS = [{"id": "arm-confirm", "property": "submit_n_clicks", "value": 1},
               {"id": "update-interval", "property": "n_intervals", "value": 0}]
 
 
+@pytest.mark.req("SEC-01")
 def test_an_observer_can_watch_and_make_safe_but_never_make_live(shared_backend, secured):
     client = dashboard.server.test_client()
     observer = ("observer", "obs-secret")
@@ -96,6 +99,7 @@ def test_an_observer_can_watch_and_make_safe_but_never_make_live(shared_backend,
     assert shared_backend.sent == ["DISARM"]
 
 
+@pytest.mark.req("SEC-01", "SEC-03")
 def test_an_operator_can_arm_and_every_action_is_audited(shared_backend, secured):
     client = dashboard.server.test_client()
 
@@ -113,6 +117,7 @@ def test_an_operator_can_arm_and_every_action_is_audited(shared_backend, secured
     assert {"source": "backend", "action": "ARM"}.items() <= next(e for e in entries if e["source"] == "backend").items()
 
 
+@pytest.mark.req("SEC-01")
 def test_wrong_or_empty_observer_credentials_are_refused(shared_backend, secured, monkeypatch):
     client = dashboard.server.test_client()
     assert client.get("/", auth=("observer", "wrong")).status_code == 401
@@ -121,6 +126,7 @@ def test_wrong_or_empty_observer_credentials_are_refused(shared_backend, secured
     assert client.get("/", auth=("observer", "")).status_code == 401
 
 
+@pytest.mark.req("SEC-01")
 def test_every_input_that_changes_the_rig_is_operator_only():
     # Any input of a callback that sends a command must be classed; only the safe ones are open.
     source = (BACKEND_DIR / "python_dashboard_script.py").read_text(encoding="utf-8")
@@ -131,6 +137,7 @@ def test_every_input_that_changes_the_rig_is_operator_only():
     assert inputs - open_to_observers == dashboard.OPERATOR_ONLY_INPUTS
 
 
+@pytest.mark.req("SEC-02")
 @pytest.mark.parametrize(
     "host, password, cert, key, plaintext, refused",
     [
@@ -147,6 +154,7 @@ def test_the_dashboard_only_serves_off_loopback_with_a_password_and_tls(host, pa
     assert (refusal is None) if refused is None else refused in refusal
 
 
+@pytest.mark.req("SEC-03")
 def test_the_audit_trail_never_stops_the_rig(monkeypatch, tmp_path):
     monkeypatch.setenv("TESTBED_AUDIT_LOG", str(tmp_path / "missing-dir" / "audit.jsonl"))
     audit.record({"source": "test"})   # the directory does not exist: nothing raised
@@ -157,6 +165,7 @@ def test_the_audit_trail_never_stops_the_rig(monkeypatch, tmp_path):
 # ----------------------------------------------------------------------------
 
 
+@pytest.mark.req("SEC-04")
 def test_a_saved_dataset_carries_what_produced_it_and_its_hash(backend_module, tmp_path):
     import pandas as pd
 
@@ -177,6 +186,7 @@ def test_a_saved_dataset_carries_what_produced_it_and_its_hash(backend_module, t
     assert details["backend_revision"]
 
 
+@pytest.mark.req("SEC-04")
 def test_a_model_checkpoint_carries_its_training_provenance(tmp_path, monkeypatch):
     import python_RNN_Controller as rnn
     from sklearn.preprocessing import StandardScaler
@@ -195,6 +205,7 @@ def test_a_model_checkpoint_carries_its_training_provenance(tmp_path, monkeypatc
     assert rnn.get_training_provenance() == saved and saved["board"]["firmware"] == "abc1234"
 
 
+@pytest.mark.req("SEC-04")
 def test_the_dataset_hash_ignores_the_index_but_not_the_values():
     import pandas as pd
 
@@ -208,6 +219,7 @@ def test_the_dataset_hash_ignores_the_index_but_not_the_values():
 # ----------------------------------------------------------------------------
 
 
+@pytest.mark.req("SEC-05", "OUT-03")
 def test_the_deploy_build_has_no_radio_and_expects_the_verification_hardware():
     deploy = PLATFORMIO_INI[PLATFORMIO_INI.index("[env:esp32_deploy]"):]
     for flag in ("-DTESTBED_PRODUCTION=1", "-DTESTBED_GATE_LOOPBACK=1", "-DTESTBED_SETPOINT_READBACK=1", "-DLOG_LEVEL=0"):
@@ -220,6 +232,7 @@ def test_the_deploy_build_has_no_radio_and_expects_the_verification_hardware():
     assert "ota_wifi_service." not in re.sub(r"if \(WIRELESS_ENABLED\) \{\s+ota_wifi_service\.\w+\([^;]*\);", "", setup + loop)
 
 
+@pytest.mark.req("SEC-06")
 def test_an_updated_image_is_kept_only_if_its_self_test_passes():
     assert "bool verifyRollbackLater() {\n  return true;\n}" in MAIN_CPP
 

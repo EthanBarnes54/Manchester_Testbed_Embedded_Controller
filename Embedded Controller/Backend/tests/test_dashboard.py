@@ -65,6 +65,7 @@ def layout_component(client, component_id):
 # ----------------------------------------------------------------------------
 
 
+@pytest.mark.req("SEC-02")
 def test_a_configured_password_gates_every_request(client, monkeypatch):
     monkeypatch.setattr(dashboard, "DASHBOARD_PASSWORD", "s3cret")
 
@@ -95,6 +96,7 @@ def safety_inputs(arm=None, disarm=None, clear=None):
 DEFAULT_PINS = [("pwm1", "value", "1.0"), ("pwm2", "value", "0"), ("pwm3", "value", "0"), ("pwm4", "value", "0"), ("pwm5", "value", "0")]
 
 
+@pytest.mark.req("SW-05")
 def test_the_switch_field_uses_the_shared_bounds_and_starts_empty(client):
     switch = layout_component(client, "switch-time-us")
 
@@ -102,6 +104,7 @@ def test_the_switch_field_uses_the_shared_bounds_and_starts_empty(client):
     assert switch.get("value") is None
 
 
+@pytest.mark.req("SW-01")
 @pytest.mark.parametrize("switch_us, accepted", [(1, True), (5, True), (0, False), (2_000_000, True), (2_000_001, False)])
 def test_the_switch_field_accepts_1_us_to_2_s(client, armed_shared_backend, monkeypatch, switch_us, accepted):
     shared_backend = armed_shared_backend
@@ -117,6 +120,7 @@ def test_the_switch_field_accepts_1_us_to_2_s(client, armed_shared_backend, monk
         assert shared_backend.switch_timing is None
 
 
+@pytest.mark.req("SW-02")
 def test_a_fractional_switch_time_is_refused_not_truncated(client, armed_shared_backend, monkeypatch):
     shared_backend = armed_shared_backend
     monkeypatch.setattr(shared_backend, "switch_timing", None)
@@ -128,6 +132,7 @@ def test_a_fractional_switch_time_is_refused_not_truncated(client, armed_shared_
     assert "border" not in dashboard._validate_switch_time_input(7)
 
 
+@pytest.mark.req("UI-01")
 def test_editing_a_voltage_sends_targets_and_leaves_the_switch_alone(client, armed_shared_backend):
     shared_backend = armed_shared_backend
     reply = fire(client, PIN_OUTPUTS, DEFAULT_PINS + [("switch-time-us", "value", None)], "pwm1.value")
@@ -136,6 +141,7 @@ def test_editing_a_voltage_sends_targets_and_leaves_the_switch_alone(client, arm
     assert shared_backend.sent == ["TARGETS 1.000000 0.000000 0.000000 0.000000 0.000000"]
 
 
+@pytest.mark.req("SAF-02")
 def test_pin_edits_are_refused_until_the_board_is_armed(client, shared_backend):
     reply = fire(client, PIN_OUTPUTS, DEFAULT_PINS + [("switch-time-us", "value", 5)], "pwm1.value")
 
@@ -143,6 +149,7 @@ def test_pin_edits_are_refused_until_the_board_is_armed(client, shared_backend):
     assert shared_backend.sent == []
 
 
+@pytest.mark.req("UI-01")
 @pytest.mark.parametrize(
     "button, inputs, sent",
     [
@@ -157,6 +164,7 @@ def test_the_safety_buttons_send_their_commands_and_nothing_else_does(client, sh
     assert shared_backend.sent == sent
 
 
+@pytest.mark.req("UI-02")
 def test_the_safety_readout_mirrors_the_board(client, shared_backend):
     shared_backend.board_mode = "FAULT"
     shared_backend.board_faults = {"latched": "UNEXPECTED_RESET"}
@@ -173,12 +181,14 @@ def test_the_safety_readout_mirrors_the_board(client, shared_backend):
         shared_backend.last_arm_refusal = ""
 
 
+@pytest.mark.req("BIT-03")
 def test_the_self_test_button_asks_the_board(client, shared_backend):
     fire(client, [("health-status", "children"), ("link-status", "children")],
          [("selftest-button", "n_clicks", 1), ("update-interval", "n_intervals", 0)], "selftest-button.n_clicks")
     assert shared_backend.sent == ["SELFTEST"]
 
 
+@pytest.mark.req("UI-02", "BIT-03")
 def test_the_health_readout_summarises_the_board_report():
     summary = dashboard._health_summary({
         "health": {"loop_max_us": "1200", "loop_peak_us": "4300", "loop_budget_us": "20000", "heap_free": "204800",
@@ -191,6 +201,7 @@ def test_the_health_readout_summarises_the_board_report():
     assert dashboard._health_summary({"health": {"gate": "FAIL", "readback": "off"}, "selftest": None}) ==         "Health: Output checks: gate FAIL, readback off"
 
 
+@pytest.mark.req("UI-02")
 def test_the_link_readout_names_the_firmware_and_what_went_wrong():
     link = {"version": {"firmware": "1fa3f43"}, "protocol_ok": True, "bad_checksums": 2, "measured_missing": 5, "reply_timeouts": 1}
     assert dashboard._link_summary(link) == \
@@ -301,6 +312,7 @@ def test_auto_control_settings_reach_the_backend_and_new_tabs(client, shared_bac
     assert layout_component(client, "auto-change-penalty")["value"] == pytest.approx(0.4)
 
 
+@pytest.mark.req("UI-01")
 def test_the_plot_callback_never_actuates(client, shared_backend, validated_model):
     shared_backend.set_auto_control(enabled=True, period_ms=100)
 
@@ -350,6 +362,7 @@ def test_plot_history_is_bounded_and_contiguous(shared_backend, monkeypatch):
     assert np.allclose(np.diff([point[0] for point in dashboard.PLOT_HISTORY]), 0.05)
 
 
+@pytest.mark.req("AUTO-01")
 def test_the_auto_button_explains_a_refusal(client, shared_backend, backend_module, monkeypatch):
     monkeypatch.setattr(backend_module, "get_validation_metrics", lambda: {})
     reply = fire(client, [("auto-mode-button", "children"), ("auto-mode-button", "style"), ("auto-mode-status", "children")],
@@ -359,6 +372,7 @@ def test_the_auto_button_explains_a_refusal(client, shared_backend, backend_modu
     assert "no held-out validation score" in reply["auto-mode-status"]["children"]
 
 
+@pytest.mark.req("AUTO-04")
 def test_a_manual_edit_takes_over_from_auto_control(client, armed_shared_backend, validated_model):
     armed_shared_backend.set_auto_control(enabled=True)
     reply = fire(client, PIN_OUTPUTS, DEFAULT_PINS + [("switch-time-us", "value", None)], "pwm1.value")

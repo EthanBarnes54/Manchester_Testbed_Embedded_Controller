@@ -20,3 +20,10 @@ sweep_dataset_*.csv
 audit_log.jsonl
 sweep_dataset_*.json
 sbom.cdx.json
+
+# Verification output - coverage data, Hypothesis example database, the generated matrix
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+Embedded Controller/Backend/traceability.md

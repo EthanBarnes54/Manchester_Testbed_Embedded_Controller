@@ -5,25 +5,25 @@ and flags any conversion restarted while one is still running.
 """
 
 import re
-import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from host_build import build_and_run, needs_compiler
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 FIRMWARE_DIR = BACKEND_DIR.parent
 MAIN_CPP = (FIRMWARE_DIR / "src" / "main.cpp").read_text(encoding="utf-8")
 
 
-def firmware_source():
+def firmware_source(main_cpp=MAIN_CPP):
     names = ("MEASUREMENT_INTERVAL_MS", "ADC_FIRST_POLL_MS", "ADC_CONVERSION_TIMEOUT_MS", "MEASURED_DECIMAL_PLACES")
-    lines = [re.search(rf"^constexpr [\w ]+ {name} = [^;]+;", MAIN_CPP, re.M).group(0) for name in names]
-    lines.append(re.search(r"^constexpr adsGain_t ADC_GAIN = [^;]+;", MAIN_CPP, re.M).group(0))
-    lines.append(re.search(r"^#ifndef TESTBED_SETPOINT_READBACK\n.*?^#endif", MAIN_CPP, re.S | re.M).group(0))
+    lines = [re.search(rf"^constexpr [\w ]+ {name} = [^;]+;", main_cpp, re.M).group(0) for name in names]
+    lines.append(re.search(r"^constexpr adsGain_t ADC_GAIN = [^;]+;", main_cpp, re.M).group(0))
+    lines.append(re.search(r"^#ifndef TESTBED_SETPOINT_READBACK\n.*?^#endif", main_cpp, re.S | re.M).group(0))
     for name in ("SETPOINT_READBACK_FITTED", "READBACK_INPUTS", "READBACK_START_WINDOW_MS"):
-        lines.append(re.search(rf"^constexpr [\w ]+ {name} = [^;]+;", MAIN_CPP, re.M).group(0))
-    lines.append(re.search(r"^class MeasurementService \{.*?^\};", MAIN_CPP, re.S | re.M).group(0))
+        lines.append(re.search(rf"^constexpr [\w ]+ {name} = [^;]+;", main_cpp, re.M).group(0))
+    lines.append(re.search(r"^class MeasurementService \{.*?^\};", main_cpp, re.S | re.M).group(0))
     return "\n".join(lines)
 
 
@@ -230,21 +230,19 @@ int main() {
 """
 
 
-@pytest.mark.skipif(shutil.which("g++") is None, reason="needs a host C++ compiler")
+def harness_source(main_cpp=MAIN_CPP):
+    return HARNESS.replace("@@FIRMWARE@@", firmware_source(main_cpp))
+
+
+@pytest.mark.req("MEAS-01", "OUT-02")
+@needs_compiler
 @pytest.mark.parametrize("readback", [0, 1], ids=["readback not fitted", "readback fitted"])
 def test_adc_sampling_on_the_host(tmp_path, readback):
-    source = tmp_path / "adc_sampling.cpp"
-    binary = tmp_path / "adc_sampling"
-    source.write_text(HARNESS.replace("@@FIRMWARE@@", firmware_source()))
-
-    build = subprocess.run(["g++", "-std=gnu++11", "-Wall", f"-DTESTBED_SETPOINT_READBACK={readback}", "-o", str(binary), str(source)],
-                           capture_output=True, text=True)
-    assert build.returncode == 0, build.stderr
-
-    run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=60)
+    run = build_and_run(harness_source(), tmp_path, "adc_sampling", defines={"TESTBED_SETPOINT_READBACK": readback})
     assert run.returncode == 0, run.stdout + run.stderr
 
 
+@pytest.mark.req("MEAS-01")
 def test_nothing_in_the_firmware_waits_on_a_conversion():
     assert ".readADC_SingleEnded(" not in MAIN_CPP
     assert "measurement_.request_reading();" in MAIN_CPP

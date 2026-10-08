@@ -1,0 +1,11 @@
+# Line coverage of the product code; the tests themselves are not counted.
+[run]
+source = .
+omit =
+    tests/*
+    hil/*
+
+[report]
+# A ratchet, not a target: 63.7% when this was set. Raise it as coverage grows, never lower it.
+fail_under = 60
+skip_empty = true

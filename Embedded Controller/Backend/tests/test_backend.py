@@ -3,7 +3,6 @@
 import threading
 import time
 
-import pandas as pd
 import pytest
 
 from helpers import wait_for
@@ -18,6 +17,7 @@ def backend_threads():
 # ----------------------------------------------------------------------------
 
 
+@pytest.mark.req("DATA-01")
 @pytest.mark.parametrize(
     "value, expected",
     [(None, False), ("", False), ("0", False), ("false", False), ("FALSE", False), ("Off", False), ("no", False),
@@ -32,6 +32,7 @@ def test_offline_flag_is_case_folded(backend_module, monkeypatch, value, expecte
     assert backend_module._env_flag("OFFLINE") is expected
 
 
+@pytest.mark.req("SEC-08")
 @pytest.mark.parametrize("value, expected", [(None, "COM4"), ("", "COM4"), ("  ", "COM4"), ("/dev/ttyUSB0", "/dev/ttyUSB0")])
 def test_serial_port_comes_from_the_environment(backend_module, monkeypatch, value, expected):
     if value is None:
@@ -78,6 +79,7 @@ def test_start_opens_the_port_and_stop_joins_every_worker(backend_module, fake_p
 # ----------------------------------------------------------------------------
 
 
+@pytest.mark.req("DATA-01")
 def test_measurements_are_buffered_as_hardware_readings(live_backend):
     latest = live_backend.get_data().iloc[-1]
 
@@ -98,6 +100,7 @@ def fast_keepalive(backend_module, monkeypatch):
     monkeypatch.setattr(backend_module, "KEEPALIVE_INTERVAL_SEC", 0.1)
 
 
+@pytest.mark.req("LINK-04")
 def test_keepalive_pings_a_quiet_link(fast_keepalive, live_backend, fake_port):
     assert wait_for(lambda: len(fake_port.commands("PING")) >= 2)
 
@@ -108,6 +111,7 @@ def test_commands_are_newline_terminated_on_the_wire(live_backend, fake_port):
     assert fake_port.commands("TARGETS") == ["TARGETS 1.000000 0.500000 0.000000 3.300000 3.300000"]
 
 
+@pytest.mark.req("SW-05")
 def test_switch_timing_is_clamped_to_the_shared_bounds(backend_module, live_backend, fake_port):
     live_backend.set_switch_timing(1)
     live_backend.set_switch_timing(10 ** 9)
@@ -118,6 +122,7 @@ def test_switch_timing_is_clamped_to_the_shared_bounds(backend_module, live_back
     ]
 
 
+@pytest.mark.req("SW-02")
 def test_a_switch_period_is_never_rounded_and_never_clamped_quietly(live_backend, fake_port, caplog):
     live_backend.set_switch_timing(7.5)
     assert fake_port.commands("SWITCH_PERIOD_US") == []
@@ -131,6 +136,7 @@ def test_a_switch_period_is_never_rounded_and_never_clamped_quietly(live_backend
     assert fake_port.commands("SWITCH_PERIOD_US")[-1] == "SWITCH_PERIOD_US 7"
 
 
+@pytest.mark.req("SW-01")
 def test_the_1_us_switch_floor_reaches_the_board(live_backend, fake_port, caplog):
     live_backend.set_switch_timing(1)
     live_backend.set_switch_timing(5)
@@ -144,6 +150,7 @@ def test_the_1_us_switch_floor_reaches_the_board(live_backend, fake_port, caplog
 # ----------------------------------------------------------------------------
 
 
+@pytest.mark.req("DATA-01")
 def test_simulated_samples_never_reach_training_on_a_real_run(backend_module):
     backend = backend_module.SerialBackend(port="FAKE0", status=False)
     backend._append_measurement(1.0, 1.0, "MEASURED 1.0 V")
@@ -152,6 +159,7 @@ def test_simulated_samples_never_reach_training_on_a_real_run(backend_module):
     assert backend.get_training_data()["voltage"].tolist() == [1.0]
 
 
+@pytest.mark.req("DATA-01")
 def test_simulated_samples_are_admissible_when_simulation_was_asked_for(backend_module):
     backend = backend_module.SerialBackend(port="FAKE0", status=True)
     backend._append_measurement(2.0, 2.0, "MEASURED 2.0 SIMULATED", source=backend_module.SIMULATED_SOURCE)
@@ -172,6 +180,7 @@ def run_sweep(backend, **overrides):
     backend.sweep_thread.join(timeout=60)
 
 
+@pytest.mark.req("DATA-02")
 def test_a_sweep_trains_on_everything_it_recorded_not_just_the_buffer(backend_module, armed_backend, monkeypatch):
     live_backend = armed_backend
     trained_on = []
@@ -185,6 +194,7 @@ def test_a_sweep_trains_on_everything_it_recorded_not_just_the_buffer(backend_mo
     assert set(trained_on[0]["source"]) == {"hardware"}
 
 
+@pytest.mark.req("DATA-02")
 def test_an_aborted_sweep_closes_its_capture_and_skips_training(backend_module, armed_backend, monkeypatch):
     live_backend = armed_backend
     trained = []
@@ -217,6 +227,7 @@ def stub_proposer(backend_module, monkeypatch):
     return proposals
 
 
+@pytest.mark.req("AUTO-04")
 def test_auto_control_settings_are_clamped(backend_module):
     backend = backend_module.SerialBackend(port="FAKE0", status=False)
 
@@ -225,6 +236,7 @@ def test_auto_control_settings_are_clamped(backend_module):
     assert backend.set_auto_control(change_penalty=-5)["change_penalty"] == 0.0
 
 
+@pytest.mark.req("AUTO-04")
 def test_auto_control_acts_only_when_enabled_armed_fresh_and_not_sweeping(backend_module, stub_proposer, fake_port, validated_model):
     backend = backend_module.SerialBackend(port="FAKE0", status=False)
     backend.connect()
@@ -256,6 +268,7 @@ def test_auto_control_acts_only_when_enabled_armed_fresh_and_not_sweeping(backen
     assert fake_port.commands("TARGETS") == ["TARGETS 0.250000 0.250000 0.250000 0.250000 0.250000"]
 
 
+@pytest.mark.req("AUTO-04")
 def test_auto_control_runs_on_its_own_thread_at_the_configured_rate(armed_backend, fake_port, stub_proposer, validated_model):
     live_backend = armed_backend
     live_backend.set_auto_control(enabled=True, period_ms=100)
@@ -270,6 +283,7 @@ def test_auto_control_runs_on_its_own_thread_at_the_configured_rate(armed_backen
     assert len(fake_port.commands("TARGETS")) == sent, "kept actuating after being disabled"
 
 
+@pytest.mark.req("AUTO-04")
 def test_auto_control_stops_steering_when_the_board_goes_quiet(backend_module, armed_backend, fake_port, stub_proposer, monkeypatch, validated_model):
     live_backend = armed_backend
     monkeypatch.setattr(backend_module, "AUTO_CONTROL_MAX_SAMPLE_AGE_SEC", 0.3)
@@ -290,6 +304,7 @@ def test_auto_control_stops_steering_when_the_board_goes_quiet(backend_module, a
 # ----------------------------------------------------------------------------
 
 
+@pytest.mark.req("SAF-02", "UI-02")
 def test_arming_follows_what_the_board_says(live_backend, fake_port):
     assert live_backend.board_mode in ("UNKNOWN", "SAFE")
 
@@ -300,6 +315,7 @@ def test_arming_follows_what_the_board_says(live_backend, fake_port):
     assert wait_for(lambda: live_backend.board_mode == "SAFE")
 
 
+@pytest.mark.req("SAF-02", "SAF-04")
 def test_a_refused_arm_is_recorded_and_leaves_the_board_unarmed(live_backend, fake_port):
     fake_port.mode = "FAULT"
     live_backend.arm()
@@ -311,6 +327,7 @@ def test_a_refused_arm_is_recorded_and_leaves_the_board_unarmed(live_backend, fa
     assert wait_for(lambda: live_backend.board_mode == "SAFE")
 
 
+@pytest.mark.req("SAF-03", "UI-02")
 def test_fault_reports_and_the_failsafe_update_the_mode(live_backend, fake_port):
     fake_port.lines.put("FAULTS mode=FAULT active=none latched=UNEXPECTED_RESET history=UNEXPECTED_RESET "
                         "counts=UNEXPECTED_RESET:1 boots=7 unexpected_resets=1 last_reset=TASK_WDT")
@@ -325,11 +342,13 @@ def test_fault_reports_and_the_failsafe_update_the_mode(live_backend, fake_port)
     assert wait_for(lambda: live_backend.board_mode == "SAFE")
 
 
+@pytest.mark.req("LINK-04")
 def test_the_keepalive_also_keeps_the_fault_report_current(fast_keepalive, live_backend, fake_port):
     assert wait_for(lambda: len(fake_port.commands("FAULTS")) >= 2)
     assert live_backend.get_board_safety()["faults"].get("boots") == "1"
 
 
+@pytest.mark.req("SAF-02")
 def test_a_sweep_needs_the_board_armed(backend_module, live_backend, monkeypatch):
     monkeypatch.setattr(backend_module, "train_model", lambda *args, **kwargs: {"loss": 0.0, "r2": 0.0})
 
@@ -337,6 +356,7 @@ def test_a_sweep_needs_the_board_armed(backend_module, live_backend, monkeypatch
     assert "not armed" in live_backend.get_sweep_status()["message"]
 
 
+@pytest.mark.req("SAF-02")
 def test_stopping_the_backend_disarms_the_board(backend_module, fake_port):
     backend = backend_module.SerialBackend(port="FAKE9", status=False)
     backend.online_update_enabled = False
@@ -347,6 +367,7 @@ def test_stopping_the_backend_disarms_the_board(backend_module, fake_port):
     assert fake_port.commands("DISARM") == ["DISARM"]
 
 
+@pytest.mark.req("UI-02")
 def test_a_dropped_link_forgets_the_mode(armed_backend):
     armed_backend.disconnect()
     assert armed_backend.board_mode == "UNKNOWN"
@@ -365,6 +386,7 @@ def test_a_simulated_board_arms_and_disarms_like_a_real_one(backend_module):
     assert backend.board_mode == "SAFE" and backend.pins[0] == 0
 
 
+@pytest.mark.req("UI-02")
 def test_a_disconnected_board_is_never_reported_armed(backend_module):
     backend = backend_module.SerialBackend(port="FAKE0", status=False)
     backend.arm()  # no port open, so this goes down the offline path
@@ -377,12 +399,14 @@ def test_a_disconnected_board_is_never_reported_armed(backend_module):
 # ----------------------------------------------------------------------------
 
 
+@pytest.mark.req("LINK-04", "BIT-03")
 def test_the_keepalive_polls_the_board_health(fast_keepalive, live_backend, fake_port):
     assert wait_for(lambda: len(fake_port.commands("HEALTH")) >= 2)
     health = live_backend.get_board_health()["health"]
     assert health["loop_budget_us"] == "20000" and health["adc"] == "ok"
 
 
+@pytest.mark.req("BIT-03")
 def test_a_self_test_result_is_recorded_and_a_failure_logged(live_backend, fake_port, caplog):
     live_backend.run_selftest()
     assert wait_for(lambda: (live_backend.get_board_health()["selftest"] or {}).get("result") == "PASS")
@@ -398,6 +422,7 @@ def test_a_self_test_result_is_recorded_and_a_failure_logged(live_backend, fake_
 # ----------------------------------------------------------------------------
 
 
+@pytest.mark.req("LINK-01")
 def test_every_command_goes_out_with_a_crc(armed_backend, fake_port):
     armed_backend.set_pin_voltages([1.0, 0.5, 0.0, 3.3, 2.0])
     armed_backend.set_switch_timing(5)
@@ -406,11 +431,13 @@ def test_every_command_goes_out_with_a_crc(armed_backend, fake_port):
     assert fake_port.commands("TARGETS") == ["TARGETS 1.000000 0.500000 0.000000 3.300000 2.000000"]
 
 
+@pytest.mark.req("LINK-02")
 def test_the_backend_learns_the_board_version_on_connect(live_backend):
     assert wait_for(lambda: live_backend.protocol_ok is True)
     assert live_backend.get_link_health()["version"]["firmware"] == "fake"
 
 
+@pytest.mark.req("LINK-02")
 def test_a_board_speaking_another_protocol_is_never_armed(backend_module, fake_port):
     fake_port.protocol = 1
     backend = backend_module.SerialBackend(port="FAKE0", status=False)
@@ -429,6 +456,7 @@ def test_a_board_speaking_another_protocol_is_never_armed(backend_module, fake_p
         backend.stop()
 
 
+@pytest.mark.req("LINK-01")
 def test_corrupted_and_unchecksummed_lines_are_dropped_and_counted(live_backend, fake_port):
     assert wait_for(lambda: live_backend.protocol_ok is True)
 
@@ -440,6 +468,7 @@ def test_corrupted_and_unchecksummed_lines_are_dropped_and_counted(live_backend,
     assert not (live_backend.get_data()["voltage"] > 5).any()
 
 
+@pytest.mark.req("MEAS-02")
 def test_missing_readings_and_board_restarts_are_counted(live_backend, fake_port):
     fake_port.streaming.clear()
     time.sleep(0.2)
@@ -453,6 +482,7 @@ def test_missing_readings_and_board_restarts_are_counted(live_backend, fake_port
     assert live_backend.link_stats["measured_missing"] - missing_before == 3
 
 
+@pytest.mark.req("LINK-03")
 def test_replies_rejections_and_silence_are_all_accounted_for(live_backend, fake_port):
     assert wait_for(lambda: live_backend.protocol_ok is True)
     before = dict(live_backend.link_stats)
@@ -469,6 +499,7 @@ def test_replies_rejections_and_silence_are_all_accounted_for(live_backend, fake
     assert live_backend.get_link_health()["outstanding_replies"] == 0
 
 
+@pytest.mark.req("LINK-03")
 def test_unsolicited_errors_never_settle_a_command(backend_module):
     backend = backend_module.SerialBackend(port="FAKE0", status=False)
     backend._pending_replies.append((time.time(), "ARM", backend_module.COMMAND_REPLIES["ARM"]))
@@ -481,6 +512,7 @@ def test_unsolicited_errors_never_settle_a_command(backend_module):
     assert len(backend._pending_replies) == 0 and backend.link_stats["replies"] == 1
 
 
+@pytest.mark.req("LINK-01")
 def test_frame_and_unframe_round_trip(backend_module):
     framed = backend_module.frame_line("HEALTH")
     assert backend_module.unframe_line(framed) == ("HEALTH", "valid")
@@ -493,6 +525,7 @@ def test_frame_and_unframe_round_trip(backend_module):
 # ----------------------------------------------------------------------------
 
 
+@pytest.mark.req("AUTO-01")
 @pytest.mark.parametrize("validation, reason", [
     ({}, "no held-out validation score"),
     ({"validation_r2": -6.0}, "below the 0.50 floor"),
@@ -517,6 +550,7 @@ def stepping_backend(backend_module, fake_port, validated_model):
     return backend
 
 
+@pytest.mark.req("AUTO-02")
 def test_a_wild_proposal_is_held_to_the_envelope_and_the_step_limit(backend_module, stepping_backend, fake_port, monkeypatch):
     monkeypatch.setattr(backend_module, "propose_control_vector", lambda frame, change_penalty=0.1: [9.0, -4.0, 1.0, 3.3, 0.0])
 
@@ -529,6 +563,7 @@ def test_a_wild_proposal_is_held_to_the_envelope_and_the_step_limit(backend_modu
     assert stepping_backend.get_auto_control()["guard"]["limited"] == 1
 
 
+@pytest.mark.req("AUTO-02")
 def test_a_malformed_proposal_sends_nothing(backend_module, stepping_backend, fake_port, monkeypatch):
     monkeypatch.setattr(backend_module, "propose_control_vector", lambda frame, change_penalty=0.1: [1.0, float("nan"), 1.0, 1.0, 1.0])
     before = len(fake_port.commands("TARGETS"))
@@ -538,6 +573,7 @@ def test_a_malformed_proposal_sends_nothing(backend_module, stepping_backend, fa
     assert stepping_backend.get_auto_control()["state"] == "holding"
 
 
+@pytest.mark.req("AUTO-03")
 def test_inputs_outside_the_training_data_hold_the_rig(backend_module, stepping_backend, fake_port, monkeypatch, stub_proposer):
     stats = {"columns": ["pin_1", "pin_2", "pin_3", "pin_4", "pin_5", "voltage"], "mean": [100.0] * 5 + [1.0], "scale": [10.0] * 5 + [0.1]}
     monkeypatch.setattr(backend_module, "get_training_feature_stats", lambda: stats)

@@ -7,14 +7,10 @@ ever rejected when no whole divider exists.
 
 import re
 import shutil
-import subprocess
-from pathlib import Path
 
 import pytest
 
-BACKEND_DIR = Path(__file__).resolve().parents[1]
-FIRMWARE_DIR = BACKEND_DIR.parent
-INCLUDE_DIR = FIRMWARE_DIR / "include"
+from host_build import COMPILER, FIRMWARE_DIR, build, run
 
 APB_HZ = 80_000_000
 REF_TICK_HZ = 1_000_000
@@ -85,29 +81,25 @@ int main(int argc, char** argv) {
 """
 
 
-@pytest.fixture(scope="module")
-def harness(tmp_path_factory):
-    if shutil.which("g++") is None:
-        pytest.skip("needs a host C++ compiler")
+def make_harness(work, include_dirs=(), **options):
+    """Builds the LEDC arithmetic harness; returns a function that runs it and returns (exit code, output)."""
 
-    work = tmp_path_factory.mktemp("switch_timing")
-    source = work / "switch_timing_harness.cpp"
-    binary = work / "switch_timing_harness"
-    source.write_text(HARNESS)
+    # -O2 because the sweep covers every period up to 2 s.
+    binary = build(HARNESS, work, "switch_timing_harness", include_dirs=include_dirs, optimise=True, **options)
 
-    # gnu++11 because that is what the firmware itself is built with.
-    build = subprocess.run(
-        ["g++", "-std=gnu++11", "-Wall", "-Wextra", "-Werror", "-O2", f"-I{INCLUDE_DIR}", "-o", str(binary), str(source)],
-        capture_output=True,
-        text=True,
-    )
-    assert build.returncode == 0, build.stderr
-
-    def run(*args):
-        result = subprocess.run([str(binary), *map(str, args)], capture_output=True, text=True, timeout=120)
+    def invoke(*args):
+        result = run(binary, *args)
         return result.returncode, result.stdout.strip()
 
-    return run
+    return invoke
+
+
+@pytest.fixture(scope="module")
+def harness(tmp_path_factory):
+    if shutil.which(COMPILER) is None:
+        pytest.skip("needs a host C++ compiler")
+
+    return make_harness(tmp_path_factory.mktemp("switch_timing"))
 
 
 def waveform(harness, period_us, source_hz):
@@ -123,23 +115,27 @@ def sweep(harness, source_hz):
     return dict(item.split("=") for item in out.splitlines()[-1].split())
 
 
+@pytest.mark.req("SW-02")
 @pytest.mark.parametrize("source_hz", [REF_TICK_HZ, APB_HZ])
 def test_every_period_is_exact_or_rejected_never_rounded(harness, source_hz):
     assert sweep(harness, source_hz)["failures"] == "0"
 
 
+@pytest.mark.req("SW-01")
 def test_ref_tick_covers_every_period_up_to_1024_us(harness):
     # Half a cycle on the 1 MHz REF_TICK is period_us ticks, so the divider is just the
     # odd part of the period, and every odd part up to 1023 fits.
     assert sweep(harness, REF_TICK_HZ)["first_rejected"] == "1025"
 
 
+@pytest.mark.req("SW-01")
 def test_apb_runs_out_of_divider_at_205_us(harness):
     # 80 MHz carries a factor of 5 that has to go into the divider, so odd parts above
     # 204 overflow 1023. This is why the switch is clocked from REF_TICK.
     assert sweep(harness, APB_HZ)["first_rejected"] == "205"
 
 
+@pytest.mark.req("SW-02")
 def test_every_period_the_firmware_sends_to_the_ledc_is_exact(harness):
     main_cpp = (FIRMWARE_DIR / "src" / "main.cpp").read_text(encoding="utf-8")
 
@@ -156,6 +152,7 @@ def test_every_period_the_firmware_sends_to_the_ledc_is_exact(harness):
     assert ceiling_us < int(sweep(harness, REF_TICK_HZ)["first_rejected"])
 
 
+@pytest.mark.req("SW-01")
 @pytest.mark.parametrize(
     "period_us, source_hz, bits, divider",
     [
@@ -175,6 +172,10 @@ def test_known_settings(harness, period_us, source_hz, bits, divider):
     assert w["register"] == divider << 8
 
 
-@pytest.mark.parametrize("period_us, source_hz", [(0, REF_TICK_HZ), (1025, REF_TICK_HZ), (205, APB_HZ), (5, 0)])
+# The last two use a source that does not tick in whole microseconds (a 32.768 kHz
+# crystal), where a period truncated to whole ticks would otherwise be passed off as exact.
+@pytest.mark.req("SW-02")
+@pytest.mark.parametrize("period_us, source_hz", [(0, REF_TICK_HZ), (1025, REF_TICK_HZ), (205, APB_HZ), (5, 0),
+                                                  (1, 32_768), (1000, 32_768)])
 def test_unrepresentable_periods_are_rejected(harness, period_us, source_hz):
     assert waveform(harness, period_us, source_hz)["exact"] is False

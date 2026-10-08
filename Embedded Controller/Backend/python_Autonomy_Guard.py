@@ -1,40 +1,12 @@
-"""Runtime assurance for auto control.
-
-An independent monitor between the RNN's proposals and the board. The model may propose
-anything; this module decides what reaches the rig, with rules simple enough to check by
-reading them:
-
-- The model may only drive the rig while its held-out validation score clears a floor.
-  A model with no held-out score at all (never trained with a validation split) may not.
-- A proposal that is not five finite numbers is rejected outright.
-- Every proposal is held inside a per-channel envelope and moves each channel by at most
-  a fixed step per decision, however far the model wanted to go.
-- While the live inputs sit far outside the data the model was trained on, nothing new is
-  sent. The fallback is the simplest one that can be verified: hold the targets already on
-  the rig until the operator acts or the data comes back in range.
-
-Nothing here imports torch or touches the board, so it is tested on its own.
-"""
-
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import math
 
 import numpy as np
 
 CONTROL_CHANNELS = 5
-
-# Below this held-out R2 the model's predictions are not good enough to steer the rig on.
 DEFAULT_MIN_VALIDATION_R2 = 0.5
-
-# How far a channel may move in one decision. At the 100 ms fastest period this still lets
-# a channel cross the full 3.3 V range in under 1.5 s, but never in one jump.
 DEFAULT_MAX_STEP_V = 0.25
-
-# An input whose recent mean is this many training standard deviations from the training
-# mean is outside anything the model has seen.
 DEFAULT_DRIFT_Z_LIMIT = 4.0
-
-# Recent samples averaged for the drift check: 2 s of readings at 20 Hz.
 DEFAULT_DRIFT_WINDOW = 40
 
 
@@ -144,9 +116,7 @@ class AutonomyGuard:
         low = np.asarray(self.envelope.minimum_v, dtype=float)
         high = np.asarray(self.envelope.maximum_v, dtype=float)
         step = float(self.envelope.max_step_v)
-
-        # The step is taken from where the rig is, then the envelope applied, so a channel
-        # that starts outside the envelope is brought back into it rather than held out.
+        
         limited = np.clip(np.clip(proposed, current - step, current + step), low, high)
 
         if np.allclose(limited, proposed, atol=1e-9):

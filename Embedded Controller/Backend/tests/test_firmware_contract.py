@@ -6,11 +6,11 @@ honest as those files change instead of testing a hand-copied list that could dr
 
 import ast
 import re
-import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from host_build import build_and_run, needs_compiler
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 FIRMWARE_DIR = BACKEND_DIR.parent
@@ -126,6 +126,7 @@ def test_no_exact_command_is_shadowed_by_an_earlier_prefix():
                     )
 
 
+@pytest.mark.req("SW-05")
 def test_switch_bounds_match_the_backend():
     assert int(cpp_constant("SWITCH_PERIOD_MIN_US")) == backend_constant("SWITCH_PERIOD_MIN_US")
     assert int(cpp_constant("SWITCH_PERIOD_MAX_US")) == backend_constant("SWITCH_PERIOD_MAX_US")
@@ -137,6 +138,7 @@ def arduino_ledc_timer(channel):
     return channel // 8, (channel // 2) % 4
 
 
+@pytest.mark.req("SW-01")
 def test_switch_has_an_ledc_timer_of_its_own():
     switch_channel = int(cpp_constant("SWITCH_LEDC_CHANNEL"))
     setpoint_channels = [int(c) for c in re.findall(r"\d+", cpp_constant(r"LED_CONTROL_CHANNELS\[CONTROLLED_PULSE_CHANNELS\]"))]
@@ -149,11 +151,13 @@ def test_switch_has_an_ledc_timer_of_its_own():
     assert cpp_constant("SWITCH_LEDC_SIGNAL") == "LEDC_HS_SIG_OUT0_IDX + SWITCH_LEDC_CHANNEL"
 
 
+@pytest.mark.req("SW-03", "SAF-01")
 def test_switch_line_is_driven_low_before_anything_else_at_boot():
     first_statement = cpp_block("\nvoid setup()").strip().split(";")[0]
     assert first_statement == "SwitchLine::hold_low_at_boot()"
 
 
+@pytest.mark.req("SW-04")
 def test_the_ledc_handover_runs_out_of_line_from_iram():
     # Inlined into flash code, a cache miss between routing the pin and releasing the
     # count would stretch the first pulse by microseconds.
@@ -161,6 +165,7 @@ def test_the_ledc_handover_runs_out_of_line_from_iram():
     assert "hand_pin_to_ledc();" in cpp_block("bool start_hardware(unsigned long period_us)")
 
 
+@pytest.mark.req("SAF-03", "SW-03")
 def test_failsafe_holds_the_switch_line_low():
     assert "stop_switching(0);" in cpp_block("void engage_safe_state()")
     assert "switch_line_.hold(switch_level != 0);" in cpp_block("void stop_switching(int switch_level)")
@@ -170,6 +175,7 @@ def firmware_pins():
     return {name: int(number) for name, number in re.findall(r"constexpr int (\w+_PIN) = (\d+);", MAIN_CPP)}
 
 
+@pytest.mark.req("SW-03", "SAF-01")
 @pytest.mark.parametrize("name", ["SWITCH_ARMED_PIN", "HEARTBEAT_PIN"])
 def test_safety_outputs_sit_on_free_pins_untouched_at_boot(name):
     pins = firmware_pins()
@@ -182,12 +188,14 @@ def test_safety_outputs_sit_on_free_pins_untouched_at_boot(name):
     assert pin < 32, "written through the GPIO 0-31 output registers"
 
 
+@pytest.mark.req("SAF-03")
 def test_the_failsafe_closes_the_gate_before_anything_else():
     body = cpp_block("void engage_safe_state()")
     assert body.strip().startswith("set_switch_armed(false);")
     assert body.index("set_switch_armed(false);") < body.index("stop_switching(0);")
 
 
+@pytest.mark.req("SAF-02")
 def test_the_gate_opens_only_on_an_explicit_arm():
     # The one place the gate is opened is SystemSupervisor::arm(), after the safety state agreed.
     assert MAIN_CPP.count("set_switch_armed(true)") == 1
@@ -199,6 +207,7 @@ def test_the_gate_opens_only_on_an_explicit_arm():
     assert "set_switch_armed(true)" not in cpp_block("void handle_command(String command)")
 
 
+@pytest.mark.req("SAF-02")
 @pytest.mark.parametrize(
     "header, guarded_before",
     [
@@ -216,11 +225,13 @@ def test_commands_that_drive_an_output_are_refused_unless_armed(header, guarded_
     assert '"ERROR: Not armed!"' in branch
 
 
+@pytest.mark.req("SAF-02", "SAF-04")
 @pytest.mark.parametrize("command", ["ARM", "DISARM", "FAULTS", "CLEAR FAULTS", "CLEAR LOG", "arm", "Clear Faults"])
 def test_safety_commands_reach_their_own_handlers(command):
     assert route(command) == command.upper()
 
 
+@pytest.mark.req("SAF-06", "SAF-07")
 def test_a_hung_loop_resets_the_chip_and_an_update_never_runs_while_armed():
     assert "enableLoopWDT();" in cpp_block("\nvoid setup()")
     assert "ota_wifi_service.loop(!supervisor.armed());" in cpp_block("\nvoid loop()")
@@ -233,12 +244,14 @@ def test_a_hung_loop_resets_the_chip_and_an_update_never_runs_while_armed():
     assert "enableLoopWDT();" in begin[begin.index("ArduinoOTA.onEnd"):]
 
 
+@pytest.mark.req("SAF-06")
 def test_the_heartbeat_is_driven_every_pass():
     # First thing each pass, after only the pass timer starts.
     statements = [statement.strip() for statement in cpp_block("\nvoid loop()").split(";")]
     assert statements[:2] == ["const unsigned long pass_started_us = micros()", "supervisor.heartbeat()"]
 
 
+@pytest.mark.req("SAF-05")
 def test_an_unexpected_reset_comes_up_in_fault():
     begin = cpp_block("  void begin() {\n    pinMode(HEARTBEAT_PIN")
     assert "reset_was_unexpected(reset_reason_)" in begin
@@ -248,11 +261,13 @@ def test_an_unexpected_reset_comes_up_in_fault():
         assert reason in cpp_block("static bool reset_was_unexpected(esp_reset_reason_t reason)")
 
 
+@pytest.mark.req("LINK-04")
 def test_keepalive_runs_well_inside_the_failsafe_timeout():
     timeout_s = int(cpp_constant("COMMAND_TIMEOUT_MS").rstrip("UL")) / 1000.0
     assert timeout_s >= 2 * backend_constant("KEEPALIVE_INTERVAL_SEC")
 
 
+@pytest.mark.req("MEAS-03")
 def test_adc_range_fits_the_signal_without_wasting_resolution():
     gain = cpp_constant("ADC_GAIN")
     assert "adc_.setGain(ADC_GAIN)" in cpp_block("bool begin()")
@@ -264,6 +279,7 @@ def test_adc_range_fits_the_signal_without_wasting_resolution():
     ), "a tighter gain would still cover 3.3 V"
 
 
+@pytest.mark.req("MEAS-03")
 def test_measured_lines_keep_sub_count_precision():
     count_v = ADS1115_FULL_SCALE_V[cpp_constant("ADC_GAIN")] / 32768
     places = int(cpp_constant("MEASURED_DECIMAL_PLACES"))
@@ -274,6 +290,7 @@ def test_measured_lines_keep_sub_count_precision():
     assert "String(volts, MEASURED_DECIMAL_PLACES)" in cpp_block("void report_voltage(float volts)")
 
 
+@pytest.mark.req("MEAS-01", "BIT-02")
 @pytest.mark.parametrize(
     "header",
     [
@@ -291,11 +308,13 @@ def test_nothing_on_the_loop_path_blocks(header):
     assert "delay(" not in cpp_block(header)
 
 
+@pytest.mark.req("MEAS-01")
 def test_loop_only_yields():
     # Anchored to the line start so it finds the free loop(), not OtaWifiService::loop.
     assert re.findall(r"delay\((\d+)\)", cpp_block("\nvoid loop()")) == ["1"]
 
 
+@pytest.mark.req("SEC-08")
 def test_platform_and_libraries_are_pinned_exactly():
     platform = re.search(r"^platform\s*=\s*(\S+)", PLATFORMIO_INI, re.M).group(1)
     assert re.fullmatch(r"espressif32@\d+\.\d+\.\d+", platform), platform
@@ -308,6 +327,7 @@ def test_platform_and_libraries_are_pinned_exactly():
         assert re.search(r"@\d+\.\d+\.\d+$", library), f"{library} is not pinned to an exact version"
 
 
+@pytest.mark.req("SEC-08")
 def test_no_machine_specific_upload_port():
     for value in re.findall(r"^upload_port\s*=\s*(.+)$", PLATFORMIO_INI, re.M):
         assert value.strip() == "${sysenv.TESTBED_SERIAL_PORT}"
@@ -355,17 +375,14 @@ int main() {
 """
 
 
-@pytest.mark.skipif(shutil.which("g++") is None, reason="needs a host C++ compiler")
+def led_harness_source(main_cpp=None):
+    led_class = re.search(r"^class LedIndicator \{.*?^\};", main_cpp or MAIN_CPP, re.S | re.M).group(0)
+    return LED_HARNESS.replace("@@CLASS@@", led_class)
+
+
+@needs_compiler
 def test_led_indicator_on_the_host(tmp_path):
-    led_class = re.search(r"^class LedIndicator \{.*?^\};", MAIN_CPP, re.S | re.M).group(0)
-    source = tmp_path / "led.cpp"
-    binary = tmp_path / "led"
-    source.write_text(LED_HARNESS.replace("@@CLASS@@", led_class))
-
-    build = subprocess.run(["g++", "-std=c++17", "-Wall", "-o", str(binary), str(source)], capture_output=True, text=True)
-    assert build.returncode == 0, build.stderr
-
-    run = subprocess.run([str(binary)], capture_output=True, text=True)
+    run = build_and_run(led_harness_source(), tmp_path, "led")
     assert run.returncode == 0, run.stdout + run.stderr
 
 
@@ -374,17 +391,20 @@ def test_led_indicator_on_the_host(tmp_path):
 # ----------------------------------------------------------------------------
 
 
+@pytest.mark.req("BIT-03")
 @pytest.mark.parametrize("command", ["SELFTEST", "HEALTH", "selftest"])
 def test_self_test_and_health_reach_their_own_handlers(command):
     assert route(command) == command.upper()
 
 
+@pytest.mark.req("BIT-01")
 def test_the_power_on_self_test_runs_after_everything_it_checks_is_up():
     setup = cpp_block("\nvoid setup()")
     assert setup.index("measurement_service.begin()") < setup.index("channels.begin();") < setup.index("supervisor.begin();")
     assert "self_test();" in cpp_block("  void begin() {\n    pinMode(HEARTBEAT_PIN")
 
 
+@pytest.mark.req("BIT-01")
 def test_the_self_test_checks_what_the_outputs_depend_on():
     body = cpp_block("  void self_test()")
     for check, fault in [("clocks_as_designed()", "ClockConfig"), ("switch_generators_ready()", "SwitchGenerator"),
@@ -396,6 +416,7 @@ def test_the_self_test_checks_what_the_outputs_depend_on():
     assert "APB_CTRL_PLL_TICK_NUM" in clocks and "SWITCH_LEDC_CLOCK_HZ" in clocks
 
 
+@pytest.mark.req("BIT-02")
 def test_every_loop_pass_is_timed_and_monitored():
     loop = cpp_block("\nvoid loop()")
     assert loop.strip().startswith("const unsigned long pass_started_us = micros();")
@@ -403,6 +424,7 @@ def test_every_loop_pass_is_timed_and_monitored():
     assert loop.index("supervisor.monitor(") < loop.index("delay(1);")
 
 
+@pytest.mark.req("BIT-02")
 def test_continuous_checks_feed_their_faults():
     monitor = cpp_block("void monitor(unsigned long now_ms, uint32_t pass_us)")
     assert "loop_timing_.record(pass_us);" in monitor
@@ -412,6 +434,7 @@ def test_continuous_checks_feed_their_faults():
     assert "supervisor_.note_serial_overflow();" in cpp_block("void poll_serial()")
 
 
+@pytest.mark.req("BIT-02")
 def test_the_loop_budget_leaves_room_for_the_longest_legitimate_pass():
     # The longest pass by design is a period change priming the LEDC: two periods plus slack.
     longest_priming_us = 4 * int(cpp_constant("SWITCH_HARDWARE_MAX_US")) + int(cpp_constant("SWITCH_LEDC_SETTLE_MARGIN_US"))
@@ -423,6 +446,7 @@ def test_the_loop_budget_leaves_room_for_the_longest_legitimate_pass():
 # ----------------------------------------------------------------------------
 
 
+@pytest.mark.req("OUT-03")
 def test_verification_hardware_is_off_unless_a_build_declares_it():
     for flag in ("TESTBED_GATE_LOOPBACK", "TESTBED_SETPOINT_READBACK"):
         assert f"#ifndef {flag}\n#define {flag} 0\n#endif" in MAIN_CPP
@@ -432,6 +456,7 @@ def test_verification_hardware_is_off_unless_a_build_declares_it():
     assert "#if TESTBED_GATE_LOOPBACK" not in MAIN_CPP and "#if TESTBED_SETPOINT_READBACK" not in MAIN_CPP
 
 
+@pytest.mark.req("OUT-01")
 def test_the_loopback_pin_is_input_only_and_free():
     pins = firmware_pins()
     loopback = pins.pop("GATE_LOOPBACK_PIN")
@@ -440,6 +465,7 @@ def test_the_loopback_pin_is_input_only_and_free():
     assert loopback not in pins.values()
 
 
+@pytest.mark.req("OUT-01", "OUT-02", "BIT-01")
 def test_outputs_are_verified_every_pass_and_at_power_on():
     monitor = cpp_block("void monitor(unsigned long now_ms, uint32_t pass_us)")
     assert monitor.index("outputs_.check(state_.armed());") < monitor.index("report_output_faults();")
@@ -457,6 +483,7 @@ def test_outputs_are_verified_every_pass_and_at_power_on():
     assert setup.index("output_verifier.begin();") < setup.index("supervisor.begin();")
 
 
+@pytest.mark.req("OUT-02", "MEAS-01")
 def test_a_readback_conversion_always_ends_before_the_next_diode_one():
     assert cpp_constant("READBACK_START_WINDOW_MS") == "MEASUREMENT_INTERVAL_MS - ADC_CONVERSION_TIMEOUT_MS"
     window = int(cpp_constant("MEASUREMENT_INTERVAL_MS").rstrip("UL")) - int(cpp_constant("ADC_CONVERSION_TIMEOUT_MS").rstrip("UL"))
@@ -468,10 +495,12 @@ def test_a_readback_conversion_always_ends_before_the_next_diode_one():
 # ----------------------------------------------------------------------------
 
 
+@pytest.mark.req("LINK-02")
 def test_firmware_and_backend_speak_the_same_protocol_version():
     assert int(cpp_constant("PROTOCOL_VERSION")) == backend_constant("PROTOCOL_VERSION")
 
 
+@pytest.mark.req("LINK-01")
 def test_every_line_to_the_host_carries_a_crc():
     # The only direct writes are send_line() itself and the OTA progress counter.
     writes = re.findall(r"Serial\.(?:print|println|printf|write)\(", MAIN_CPP)
@@ -482,6 +511,7 @@ def test_every_line_to_the_host_carries_a_crc():
     assert "Serial.print(line);" in sender and "Serial.println(suffix);" in sender
 
 
+@pytest.mark.req("LINK-01", "SAF-03")
 def test_a_command_with_a_bad_crc_is_refused_and_does_not_feed_the_failsafe():
     handler = cpp_block("void handle_command(String command)")
     check = handler.index("line_protocol::Check::Invalid")
@@ -491,12 +521,14 @@ def test_a_command_with_a_bad_crc_is_refused_and_does_not_feed_the_failsafe():
     assert '"ERROR: Bad checksum!"' in handler and "supervisor_.note_bad_checksum();" in handler
 
 
+@pytest.mark.req("MEAS-02")
 def test_every_reading_is_numbered_and_timestamped():
     formatter = cpp_block("void report_voltage(float volts)")
     assert '" V seq=" + sequence_ + " t_ms=" + millis()' in formatter
     assert "++sequence_;" in formatter
 
 
+@pytest.mark.req("LINK-02", "OUT-03")
 def test_the_version_reply_names_the_build_and_its_hardware():
     assert route("VERSION") == "VERSION"
     version = cpp_block("static void report_version()")

@@ -7,34 +7,33 @@ is what decides whether the pin can glitch, without a board.
 """
 
 import re
-import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
 
+from host_build import build_and_run, needs_compiler
+
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 FIRMWARE_DIR = BACKEND_DIR.parent
-INCLUDE_DIR = FIRMWARE_DIR / "include"
 MAIN_CPP = (FIRMWARE_DIR / "src" / "main.cpp").read_text(encoding="utf-8")
 
 
-def firmware_source():
+def firmware_source(main_cpp=MAIN_CPP):
     """The constants SwitchLine depends on and the class itself, verbatim from main.cpp."""
 
     lines = [
-        re.search(rf"^constexpr int {name} = [^;]+;", MAIN_CPP, re.M).group(0)
+        re.search(rf"^constexpr int {name} = [^;]+;", main_cpp, re.M).group(0)
         for name in ("SWITCH_LOGIC_PIN", "SWITCH_ARMED_PIN", "CONTROLLED_PULSE_CHANNELS")
     ]
-    lines.append(re.search(r"^constexpr int LED_CONTROL_CHANNELS\[[^;]+;", MAIN_CPP, re.M).group(0))
+    lines.append(re.search(r"^constexpr int LED_CONTROL_CHANNELS\[[^;]+;", main_cpp, re.M).group(0))
     lines.append(
         re.search(
             r"^constexpr int SWITCH_HARDWARE_MAX_US.*?^constexpr unsigned long SWITCH_LEDC_SETTLE_MARGIN_US[^\n]*$",
-            MAIN_CPP,
+            main_cpp,
             re.S | re.M,
         ).group(0)
     )
-    lines.append(re.search(r"^class SwitchLine \{.*?^\};", MAIN_CPP, re.S | re.M).group(0))
+    lines.append(re.search(r"^class SwitchLine \{.*?^\};", main_cpp, re.S | re.M).group(0))
     lines.append("SwitchLine* SwitchLine::instance_ = nullptr;")
     return "\n".join(lines)
 
@@ -392,18 +391,12 @@ int main() {
 """
 
 
-@pytest.mark.skipif(shutil.which("g++") is None, reason="needs a host C++ compiler")
+def harness_source(main_cpp=MAIN_CPP):
+    return HARNESS.replace("@@FIRMWARE@@", firmware_source(main_cpp))
+
+
+@pytest.mark.req("SW-03", "SW-04")
+@needs_compiler
 def test_switch_line_transitions_on_the_host(tmp_path):
-    source = tmp_path / "switch_line.cpp"
-    binary = tmp_path / "switch_line"
-    source.write_text(HARNESS.replace("@@FIRMWARE@@", firmware_source()))
-
-    build = subprocess.run(
-        ["g++", "-std=gnu++11", "-Wall", f"-I{INCLUDE_DIR}", "-o", str(binary), str(source)],
-        capture_output=True,
-        text=True,
-    )
-    assert build.returncode == 0, build.stderr
-
-    run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=60)
+    run = build_and_run(harness_source(), tmp_path, "switch_line")
     assert run.returncode == 0, run.stdout + run.stderr

@@ -1,0 +1,7 @@
+# Static analysis for the Python side, run in CI. Pyflakes (F) catches undefined names,
+# unused imports and variables, and broken f-strings; E9 catches syntax errors. Style is
+# not enforced: the gate is for defects, not formatting.
+extend-exclude = [".pio"]
+
+[lint]
+select = ["E9", "F"]

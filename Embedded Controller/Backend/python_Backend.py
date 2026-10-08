@@ -16,6 +16,7 @@ import binascii
 import itertools
 import json
 import logging
+import math
 from collections import deque
 import os
 from pathlib import Path
@@ -639,13 +640,13 @@ class SerialBackend:
         """Updates cached pin values and timestamp."""
 
         if not (1 <= int(pin_index) <= 6):
-            log.warning(f"WARNING: Pin index out of range to send update!")
+            log.warning("WARNING: Pin index out of range to send update!")
             return False
         
         clamped_pin_value = self.get_pin_value(int(pin_index), int(pin_value))
 
         if clamped_pin_value is None:
-            log.warning(f"WARNING: Unable to clamp pin values!")
+            log.warning("WARNING: Unable to clamp pin values!")
             return False
         
         self.pins[int(pin_index) - 1] = clamped_pin_value
@@ -867,6 +868,10 @@ class SerialBackend:
 
             try:
                 voltage = float(message.split()[1])
+
+                # "nan", "inf" and "1e400" all parse; none of them is a reading.
+                if not math.isfinite(voltage):
+                    raise ValueError(voltage)
 
             except (IndexError, ValueError):
                 log.warning("WARNING: Inappropriate measurement received!")

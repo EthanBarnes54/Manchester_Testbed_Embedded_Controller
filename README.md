@@ -221,6 +221,24 @@ Auto control lets the RNN steer the rig unattended, so `python_Autonomy_Guard.py
   At 1 us between edges, the edge at the load has to be well under 100 ns: a 100 ns edge is a tenth of each half-period. The ESP32 pin only drives the gate input on the same board, so its own drive strength is left at the default. Decide the load, then scope the edge at the load at 1 us.
 - **A filter on the ADC input.** At 1 us the switching frequency, 500 kHz, is exactly twice the ADS1115's 250 kHz modulator rate, which its digital filter does not reject (TI datasheet, section 9.1.5). If the switching modulates the diode signal, or couples into the AIN0 wiring, readings can show an offset or a slow wander. The datasheet's remedy is a first-order RC low-pass at the input, with resistors under 1 kOhm (section 9.2.2.6). With readings taken at 20 Hz, a cutoff around 1 kHz costs nothing.
 
+## Verification
+What the system must do is in [docs/requirements.md](docs/requirements.md), each requirement with an ID and how it is verified. Every test that verifies one is tagged `@pytest.mark.req("<ID>")`, and the suite fails if a requirement has no test or a test names an unknown ID.
+
+From `Embedded Controller/Backend`, with `requirements-dev.txt` installed:
+
+| What | Command | In CI |
+|---|---|---|
+| Static checks | `ruff check ..` | yes |
+| Tests, with the coverage floor in `.coveragerc` | `python -m pytest --cov` | yes |
+| Traceability matrix | `python ../tools/traceability.py` | yes, kept as an artefact |
+| Mutation tests (a few minutes) | `python -m pytest -m mutation` | yes, own job |
+| Rig tests (a board on the port) | `TESTBED_HIL_PORT=COM5 python -m pytest hil` | no; see [hil/README.md](Embedded%20Controller/Backend/hil/README.md) |
+
+- **Host harnesses.** The firmware's switch, ADC, safety, output-verification and link code is compiled from `main.cpp` and `include/` with g++ and run on the PC, with every warning an error and under UndefinedBehaviorSanitizer (and AddressSanitizer in CI, where its runtime exists). `TESTBED_HOST_SANITIZE=0` turns the sanitizers off.
+- **Fuzzing.** Property tests (Hypothesis) feed the backend's line parsers malformed and corrupted input, and cross-check the firmware's CRC check against the backend's on generated lines.
+- **Mutation tests.** Each case breaks one safety check on purpose (a refusal dropped, an order swapped, a fault demoted) and the suite must fail. The rig tests are checked the same way against a simulated board (`TESTBED_HIL_PORT=sim`) told to misbehave.
+- **Firmware gates.** The project's own sources build with every warning an error, including the ones the Arduino core exempts. `python tools/check_firmware_size.py` fails an image over 80% of its application partition, which would leave no room for an update.
+
 ## Troubleshooting
 - Connection: confirm `SERIAL_PORT`/`upload_port` match the board; send a `PING` over serial to check link health.
 

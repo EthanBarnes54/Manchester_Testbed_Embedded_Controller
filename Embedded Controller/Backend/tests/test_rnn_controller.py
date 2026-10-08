@@ -38,6 +38,7 @@ def test_online_update_returns_a_triple_on_every_exit(trained, monkeypatch):
     assert rnn.online_update(trained) == (False, None, None)  # nothing fitted yet
 
 
+@pytest.mark.req("DATA-03")
 def test_training_reports_held_out_scores(trained):
     metrics = rnn.train_model(trained, number_of_epochs=2)
 
@@ -60,6 +61,7 @@ def test_a_checkpoint_round_trips_weights_and_scaler(trained, tmp_path, monkeypa
     assert np.allclose(fresh_scaler.mean_, saved_mean)
 
 
+@pytest.mark.req("AUTO-02")
 def test_proposals_stay_inside_the_output_range(trained):
     targets = rnn.propose_control_vector(trained, num_candidates=16)
 
@@ -67,6 +69,7 @@ def test_proposals_stay_inside_the_output_range(trained):
     assert all(0.0 <= volts <= rnn.ANALOG_VREF for volts in targets)
 
 
+@pytest.mark.req("DATA-04")
 def test_the_shared_model_is_never_used_by_two_threads_at_once(trained, monkeypatch):
     inside, overlaps, errors = set(), [], []
     guard = threading.Lock()
@@ -119,6 +122,7 @@ def test_the_shared_model_is_never_used_by_two_threads_at_once(trained, monkeypa
     assert overlaps == []
 
 
+@pytest.mark.req("DATA-04")
 def test_saliency_scoring_does_not_hold_the_model_lock(trained):
     result = {}
     worker = threading.Thread(target=lambda: result.update(rnn.compute_feature_saliencies(trained, max_samples=40, num_permutations=30)))
@@ -144,6 +148,7 @@ def test_pipeline_controller_builds_and_predicts():
     assert predictions[-1].shape == (1,)
 
 
+@pytest.mark.req("DATA-03")
 def test_training_records_the_held_out_score_the_weights_earned(trained):
     metrics = rnn.train_model(trained, number_of_epochs=2)
     validation = rnn.get_validation_metrics()
@@ -155,6 +160,7 @@ def test_training_records_the_held_out_score_the_weights_earned(trained):
     assert rnn.get_validation_metrics()["online_updates_since"] == 1
 
 
+@pytest.mark.req("DATA-03")
 def test_the_held_out_score_travels_with_the_checkpoint(trained, tmp_path, monkeypatch):
     monkeypatch.setattr(rnn, "MODEL_DIR", tmp_path)
     monkeypatch.setattr(rnn, "MODEL_PATH", tmp_path / f"{rnn.MODEL_BASENAME}.pt")
@@ -167,6 +173,7 @@ def test_the_held_out_score_travels_with_the_checkpoint(trained, tmp_path, monke
     assert rnn.get_validation_metrics() == saved
 
 
+@pytest.mark.req("AUTO-03")
 def test_the_training_distribution_is_available_for_drift_checks(trained):
     stats = rnn.get_training_feature_stats()
 

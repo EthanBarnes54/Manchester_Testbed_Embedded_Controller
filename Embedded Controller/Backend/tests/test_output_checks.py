@@ -1,12 +1,9 @@
 """The output verification judgements, compiled from include/output_checks.h and run on the host."""
 
-import shutil
-import subprocess
-from pathlib import Path
-
 import pytest
 
-INCLUDE_DIR = Path(__file__).resolve().parents[2] / "include"
+from host_build import build_and_run, needs_compiler
+
 
 HARNESS = r"""
 #include <cstdio>
@@ -64,14 +61,8 @@ int main() {
 """
 
 
-@pytest.mark.skipif(shutil.which("g++") is None, reason="needs a host C++ compiler")
+@pytest.mark.req("OUT-01", "OUT-02")
+@needs_compiler
 def test_output_checks_on_the_host(tmp_path):
-    source, binary = tmp_path / "output_checks.cpp", tmp_path / "output_checks"
-    source.write_text(HARNESS)
-
-    build = subprocess.run(["g++", "-std=gnu++11", "-Wall", "-Wextra", "-Werror", f"-I{INCLUDE_DIR}", "-o", str(binary), str(source)],
-                           capture_output=True, text=True)
-    assert build.returncode == 0, build.stderr
-
-    run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=60)
+    run = build_and_run(HARNESS, tmp_path, "output_checks")
     assert run.returncode == 0, run.stdout + run.stderr

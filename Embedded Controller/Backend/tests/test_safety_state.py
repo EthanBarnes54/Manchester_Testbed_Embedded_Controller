@@ -1,13 +1,9 @@
 """The firmware's safety state machine, compiled from include/safety_state.h and run on the host."""
 
-import shutil
-import subprocess
-from pathlib import Path
-
 import pytest
 
-BACKEND_DIR = Path(__file__).resolve().parents[1]
-INCLUDE_DIR = BACKEND_DIR.parent / "include"
+from host_build import build_and_run, needs_compiler
+
 
 HARNESS = r"""
 #include <cstdio>
@@ -111,18 +107,8 @@ int main() {
 """
 
 
-@pytest.mark.skipif(shutil.which("g++") is None, reason="needs a host C++ compiler")
+@pytest.mark.req("SAF-02", "SAF-04", "SAF-05")
+@needs_compiler
 def test_safety_state_on_the_host(tmp_path):
-    source = tmp_path / "safety_state.cpp"
-    binary = tmp_path / "safety_state"
-    source.write_text(HARNESS)
-
-    build = subprocess.run(
-        ["g++", "-std=gnu++11", "-Wall", "-Wextra", "-Werror", f"-I{INCLUDE_DIR}", "-o", str(binary), str(source)],
-        capture_output=True,
-        text=True,
-    )
-    assert build.returncode == 0, build.stderr
-
-    run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=60)
+    run = build_and_run(HARNESS, tmp_path, "safety_state")
     assert run.returncode == 0, run.stdout + run.stderr

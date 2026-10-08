@@ -1186,7 +1186,7 @@ def _configure_online_updates(window_seconds, learning_rate, momentum_value, opt
 
     if window_seconds is not None and callable(set_window_update_time):
         try:
-            applied_window = set_window_update_time(window_seconds)
+            set_window_update_time(window_seconds)
 
         except Exception as fault:
             log.error(f"ERROR: Unable to set retraining window time - {fault}!")
@@ -1194,7 +1194,7 @@ def _configure_online_updates(window_seconds, learning_rate, momentum_value, opt
 
     if learning_rate is not None and callable(set_online_learning_rate):
         try:
-            applied_lr = set_online_learning_rate(learning_rate)
+            set_online_learning_rate(learning_rate)
 
         except Exception as fault:
             log.error(f"ERROR: Unable to set the model's learning rate - {fault}!") 

@@ -1,12 +1,9 @@
 """The firmware's loop-timing statistics, compiled from include/health_stats.h and run on the host."""
 
-import shutil
-import subprocess
-from pathlib import Path
-
 import pytest
 
-INCLUDE_DIR = Path(__file__).resolve().parents[2] / "include"
+from host_build import build_and_run, needs_compiler
+
 
 HARNESS = r"""
 #include <cstdio>
@@ -36,14 +33,8 @@ int main() {
 """
 
 
-@pytest.mark.skipif(shutil.which("g++") is None, reason="needs a host C++ compiler")
+@pytest.mark.req("BIT-02")
+@needs_compiler
 def test_loop_timing_on_the_host(tmp_path):
-    source, binary = tmp_path / "health.cpp", tmp_path / "health"
-    source.write_text(HARNESS)
-
-    build = subprocess.run(["g++", "-std=gnu++11", "-Wall", "-Wextra", "-Werror", f"-I{INCLUDE_DIR}", "-o", str(binary), str(source)],
-                           capture_output=True, text=True)
-    assert build.returncode == 0, build.stderr
-
-    run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=60)
+    run = build_and_run(HARNESS, tmp_path, "health")
     assert run.returncode == 0, run.stdout + run.stderr
