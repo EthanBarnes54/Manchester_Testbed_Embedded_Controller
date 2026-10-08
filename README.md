@@ -156,6 +156,15 @@ The switch line reaches its load through an AND gate that the firmware has to en
 - Firmware behaviour: ARMED is driven low first thing in `setup()` and goes high only on an explicit `ARM` (see "Operating modes"). DISARM, the failsafe (host silent for 5 s) and any critical fault drop it before anything else. The switch's own state machine never touches ARMED.
 - External watchdog (recommended): GPIO 18 (HEARTBEAT) toggles on every loop pass. Feed it to a watchdog supervisor such as a TPS3823 and AND its output into the gate (a 3-input 74LVC1G11 in place of the 74LVC1G08), so the gate closes within the watchdog's timeout if the firmware stops, independently of the ESP32. With nothing fitted the pin is harmless.
 
+### Still to be decided before relying on 1 us
+- **What the gate output drives. NOT YET DECIDED.** It could be an on-board driver a few centimetres away, or a cable to the HV switch. This decides:
+  - whether the gate can drive the load directly, or needs a gate driver or line driver after it;
+  - whether a series resistor at the gate output is needed to damp ringing on a cable;
+  - which gate variant, 3.3 V or 5 V logic, from the load's input levels.
+
+  At 1 us between edges, the edge at the load has to be well under 100 ns: a 100 ns edge is a tenth of each half-period. The ESP32 pin only drives the gate input on the same board, so its own drive strength is left at the default. Decide the load, then scope the edge at the load at 1 us.
+- **A filter on the ADC input.** At 1 us the switching frequency, 500 kHz, is exactly twice the ADS1115's 250 kHz modulator rate, which its digital filter does not reject (TI datasheet, section 9.1.5). If the switching modulates the diode signal, or couples into the AIN0 wiring, readings can show an offset or a slow wander. The datasheet's remedy is a first-order RC low-pass at the input, with resistors under 1 kOhm (section 9.2.2.6). With readings taken at 20 Hz, a cutoff around 1 kHz costs nothing.
+
 ## Output verification (hardware)
 Two checks compare the outputs with what was commanded. Both are compiled into every build but stay off until a build flag says their hardware is fitted, so a bench without it cannot raise false faults:
 
@@ -202,6 +211,8 @@ Auto control lets the RNN steer the rig unattended, so `python_Autonomy_Guard.py
 - Auto control also needs the board ARMED (see "Operating modes"). The guard's counts of accepted, limited, rejected and drift-held decisions are reported with the auto control state.
 
 ## Serial link integrity
+The full interface, every command, reply and fault, is in [docs/protocol.md](docs/protocol.md).
+
 - **Framing.** Every line in both directions ends with `*XXXX`, a CRC-16/CCITT-FALSE of the text (`include/line_protocol.h`; `binascii.crc_hqx` on the backend). The board refuses a command whose CRC does not match (`ERROR: Bad checksum!`, fault `BAD_CHECKSUM`), and such a line does not count as the host being alive. Lines typed by hand at a terminal carry no CRC and are accepted. Once the board has confirmed its protocol, the backend drops corrupted lines and protocol lines without a CRC, and counts both.
 - **Version handshake.** `VERSION` answers `firmware=<git describe> protocol=<n> build=<env> gate_loopback=<0|1> setpoint_readback=<0|1>`. The firmware is stamped at build time by `tools/firmware_version.py`. The backend asks on connect and will not arm a board whose protocol differs from its own `PROTOCOL_VERSION`.
 - **Readings.** `MEASURED <volts> V seq=<n> t_ms=<board ms>`. `seq` counts from 1 at boot, so the backend counts readings that went missing and notices a board restart.
@@ -211,15 +222,6 @@ Auto control lets the RNN steer the rig unattended, so `python_Autonomy_Guard.py
 - Power-on self-test, repeated on demand by `SELFTEST`: checks the clocks the switch timing assumes (APB 80 MHz, REF_TICK = APB / 80), both switch generators, the ADC and memory. It answers `SELFTEST PASS|FAIL clocks=.. switch=.. adc=.. memory=..`. A clock or switch-generator failure is critical and leaves the board in FAULT.
 - Continuous self-test, every loop pass: each pass is timed against a 20 ms budget, the ADC is watched for timeouts, and heap and loop-task stack are checked against floors once a second. Each raises its fault (`LOOP_OVERRUN`, `ADC_LOST`, `LOW_MEMORY`); over-long command lines raise `SERIAL_OVERFLOW`.
 - `HEALTH` reports the worst loop pass since the last report and since boot, the budget, overruns, free and minimum heap, loop-task stack headroom, ADC conversions and timeouts, and serial overflows. The backend polls it every 2 s and the dashboard shows a summary. This is how "the checks do not slow the board down" is measured on the bench.
-
-### Still to be decided before relying on 1 us
-- **What the gate output drives. NOT YET DECIDED.** It could be an on-board driver a few centimetres away, or a cable to the HV switch. This decides:
-  - whether the gate can drive the load directly, or needs a gate driver or line driver after it;
-  - whether a series resistor at the gate output is needed to damp ringing on a cable;
-  - which gate variant, 3.3 V or 5 V logic, from the load's input levels.
-
-  At 1 us between edges, the edge at the load has to be well under 100 ns: a 100 ns edge is a tenth of each half-period. The ESP32 pin only drives the gate input on the same board, so its own drive strength is left at the default. Decide the load, then scope the edge at the load at 1 us.
-- **A filter on the ADC input.** At 1 us the switching frequency, 500 kHz, is exactly twice the ADS1115's 250 kHz modulator rate, which its digital filter does not reject (TI datasheet, section 9.1.5). If the switching modulates the diode signal, or couples into the AIN0 wiring, readings can show an offset or a slow wander. The datasheet's remedy is a first-order RC low-pass at the input, with resistors under 1 kOhm (section 9.2.2.6). With readings taken at 20 Hz, a cutoff around 1 kHz costs nothing.
 
 ## Verification
 What the system must do is in [docs/requirements.md](docs/requirements.md), each requirement with an ID and how it is verified. Every test that verifies one is tagged `@pytest.mark.req("<ID>")`, and the suite fails if a requirement has no test or a test names an unknown ID.
@@ -238,6 +240,18 @@ From `Embedded Controller/Backend`, with `requirements-dev.txt` installed:
 - **Fuzzing.** Property tests (Hypothesis) feed the backend's line parsers malformed and corrupted input, and cross-check the firmware's CRC check against the backend's on generated lines.
 - **Mutation tests.** Each case breaks one safety check on purpose (a refusal dropped, an order swapped, a fault demoted) and the suite must fail. The rig tests are checked the same way against a simulated board (`TESTBED_HIL_PORT=sim`) told to misbehave.
 - **Firmware gates.** The project's own sources build with every warning an error, including the ones the Arduino core exempts. `python tools/check_firmware_size.py` fails an image over 80% of its application partition, which would leave no room for an update.
+
+## Documentation
+| Document | What it holds |
+|---|---|
+| [docs/requirements.md](docs/requirements.md) | Every requirement, with an ID and how it is verified |
+| [docs/protocol.md](docs/protocol.md) | The serial interface: commands, replies, faults, framing |
+| [docs/timing-budget.md](docs/timing-budget.md) | Where the loop's time goes, each deadline and its margin |
+| [docs/safety/hazard-analysis.md](docs/safety/hazard-analysis.md) | Hazards and failure modes, each traced to its mitigations and requirements |
+| [docs/acceptance-test-procedure.md](docs/acceptance-test-procedure.md) | The bench steps (ATP-01 to ATP-13), with tables for the results |
+| [docs/adr/](docs/adr/README.md) | Why the design is the way it is: one record per decision |
+
+`tests/test_docs.py` checks the documents against the code: every command the firmware accepts is in the protocol document, every fault with its severity, every requirement a hazard or a bench step names exists, and every rig test the procedure names exists.
 
 ## Troubleshooting
 - Connection: confirm `SERIAL_PORT`/`upload_port` match the board; send a `PING` over serial to check link health.

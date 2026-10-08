@@ -360,6 +360,13 @@ BACKEND_CASES = [
     ("tools/generate_sbom.py", "SBOM package URLs are not encoded",
      "    purl = f\"pkg:{purl_type}/{quote(name, safe='/')}@{quote(version, safe='')}\"",
      '    purl = f"pkg:{purl_type}/{name}@{version}"', "tests/test_security.py -k sbom"),
+    # The documents, against the code they describe
+    ("../docs/protocol.md", "a command missing from the protocol document",
+     "| `CLEAR LOG` | `ACK CLEAR LOG` | Clears the persisted history and the unexpected reset count |\n", "", "tests/test_docs.py"),
+    ("../docs/protocol.md", "a fault's severity misstated", "| `GATE_MISMATCH` | Critical |", "| `GATE_MISMATCH` | Warning |",
+     "tests/test_docs.py"),
+    ("../docs/acceptance-test-procedure.md", "a bench step drops a requirement that names it",
+     "Verifies BIT-01, BIT-02, BIT-03, LINK-06.", "Verifies BIT-01, BIT-02, BIT-03.", "tests/test_docs.py"),
     # The verification tools themselves
     ("tools/traceability.py", "an untested requirement goes unreported",
      '        if "Test" in requirement.methods and not any(not test.startswith("hil/") for test in requirement.tests):',
