@@ -1,7 +1,3 @@
-"""The gates every build must pass: strict warnings, static checks, a coverage floor and
-an image size budget. Each is checked to be both configured and wired into CI, so none
-can be switched off quietly."""
-
 import configparser
 import importlib.util
 import os
@@ -45,8 +41,6 @@ def test_project_sources_build_with_every_warning_as_an_error():
     flags = build_src_flags()
     assert {"-Wall", "-Wextra", "-Werror"} <= set(flags)
 
-    # The Arduino build turns some warnings back into warnings with -Wno-error=...; each
-    # one must be made an error again for the project's own sources.
     exempted = KNOWN_EXEMPTIONS
     if ARDUINO_BUILD_SCRIPT.exists():
         exempted = set(re.findall(r'"-Wno-error=([\w-]+)"', ARDUINO_BUILD_SCRIPT.read_text(encoding="utf-8")))

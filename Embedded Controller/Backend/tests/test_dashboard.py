@@ -1,5 +1,3 @@
-"""The dashboard, driven through Dash's own callback endpoint so callback context is real."""
-
 import json
 
 import numpy as np
@@ -60,10 +58,6 @@ def layout_component(client, component_id):
     return search(json.loads(client.get("/_dash-layout").get_data(as_text=True)))
 
 
-# ----------------------------------------------------------------------------
-#                                 Access
-# ----------------------------------------------------------------------------
-
 
 @pytest.mark.req("SEC-02")
 def test_a_configured_password_gates_every_request(client, monkeypatch):
@@ -73,10 +67,6 @@ def test_a_configured_password_gates_every_request(client, monkeypatch):
     assert client.get("/", auth=("operator", "wrong")).status_code == 401
     assert client.get("/", auth=(dashboard.DASHBOARD_USER, "s3cret")).status_code == 200
 
-
-# ----------------------------------------------------------------------------
-#                              Control panel
-# ----------------------------------------------------------------------------
 
 PIN_OUTPUTS = [("pins-ack", "children"), ("pins-ack", "style")]
 SAFETY_OUTPUTS = [("safety-status", "children"), ("safety-status", "style")]
@@ -279,10 +269,6 @@ def test_a_failed_shap_run_tells_the_operator_why(client, monkeypatch):
     assert "Scaler not fitted" in reply["shap-status"]["children"]
 
 
-# ----------------------------------------------------------------------------
-#                               Auto control
-# ----------------------------------------------------------------------------
-
 TOGGLE_OUTPUTS = [("auto-mode-button", "children"), ("auto-mode-button", "style"), ("auto-mode-status", "children")]
 
 
@@ -327,10 +313,6 @@ def test_the_plot_callback_never_actuates(client, shared_backend, validated_mode
 
     assert shared_backend.sent == []
 
-
-# ----------------------------------------------------------------------------
-#                               Plot history
-# ----------------------------------------------------------------------------
 
 
 def test_plot_history_is_bounded_and_contiguous(shared_backend, monkeypatch):

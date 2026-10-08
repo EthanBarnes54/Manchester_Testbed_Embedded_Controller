@@ -1,5 +1,3 @@
-"""The pulse feature pipeline."""
-
 import numpy as np
 
 from python_Signal_Pipeline import LivePulsePipeline

@@ -1,5 +1,3 @@
-"""Dashboard metrics computed from the live stream."""
-
 import pytest
 
 from python_ML_Metrics import MetricCollector

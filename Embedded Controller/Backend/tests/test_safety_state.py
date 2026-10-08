@@ -1,5 +1,3 @@
-"""The firmware's safety state machine, compiled from include/safety_state.h and run on the host."""
-
 import pytest
 
 from host_build import build_and_run, needs_compiler

@@ -1,6 +1,3 @@
-"""Shared fixtures. No test can reach real hardware: the module-level backend runs in
-simulation, and pyserial is replaced before anything imports it."""
-
 import os
 import tempfile
 import time
@@ -43,8 +40,7 @@ def backend_module():
 
 @pytest.fixture
 def live_backend(backend_module, fake_port):
-    """A started backend talking to the fake port, with online learning off so it cannot
-    interfere with timing, and always stopped afterwards."""
+    """A started backend on the fake port, online learning off, always stopped afterwards."""
 
     backend = backend_module.SerialBackend(port="FAKE0", status=False)
     backend.online_update_enabled = False
@@ -82,8 +78,7 @@ def armed_backend(live_backend):
 
 @pytest.fixture
 def shared_backend(backend_module, monkeypatch):
-    """The module-level backend the dashboard drives, with commands captured instead of
-    sent and its settings put back afterwards."""
+    """The dashboard's backend, with commands captured instead of sent and settings restored afterwards."""
 
     backend = backend_module.Back_End_Controller
     sent = []

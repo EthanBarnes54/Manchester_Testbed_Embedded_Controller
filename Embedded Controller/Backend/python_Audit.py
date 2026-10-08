@@ -1,15 +1,3 @@
-"""Audit trail and provenance for the rig.
-
-- record() appends one JSON line per event to an append-only log: who did what to the rig,
-  from where, and when. The dashboard records every operator action (and any DISARM),
-  and the backend every safety command it sends.
-- provenance() describes the software and firmware behind a dataset or a model, so a
-  result can be traced to exactly what produced it.
-
-The log lives at TESTBED_AUDIT_LOG, or audit_log.jsonl next to this file. It is ignored by
-git: it is a record of a site's operation, not of the code.
-"""
-
 from datetime import datetime, timezone
 import functools
 import hashlib
@@ -20,7 +8,6 @@ import subprocess
 import threading
 
 _LOCK = threading.Lock()
-
 
 def audit_log_path() -> Path:
     return Path(os.getenv("TESTBED_AUDIT_LOG") or Path(__file__).with_name("audit_log.jsonl"))

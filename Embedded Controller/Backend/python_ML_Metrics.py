@@ -1,15 +1,4 @@
 
-"""
-#-------------- Machine Learning Metrics Module ------------#
-
-#   Pyhton module to collect time-series metrics from the 
-#   backend controll system and to provide lightweight summaries 
-#   for live output to the testbed operator via the dashboards 
-#   and analysis.
-
-# ----------------------------------------------------------#
-"""
-
 import threading
 from collections import deque
 from dataclasses import dataclass
@@ -20,10 +9,6 @@ import numpy as np
 # Full-scale PWM duty. A channel pinned here has no headroom left to push the beam.
 SATURATION_PWM_VALUE = 1023.0
 
-#----------------------------------------------------------#
-#                    Metric Data Window
-#----------------------------------------------------------#
-
 @dataclass
 class MetricWindow:
 
@@ -33,14 +18,8 @@ class MetricWindow:
     pin_control_changes: Deque[float]
     saturation_indicators: Deque[int]
 
-#----------------------------------------------------------#
-#                     Metric Collector
-#----------------------------------------------------------#
-
 class MetricCollector:
-    """
-    Collects and maintains time-series learning metrics for the ESP32 backend RNN Auto-controller.
-    """
+    """Collects and maintains time-series learning metrics for the ESP32 backend RNN Auto-controller."""
 
     def __init__(self, maxlen: Optional[int] = None, max_retrain_length: int = 2000):
 
@@ -82,8 +61,6 @@ class MetricCollector:
             self._window.pin_controls.append(control_vector)
             self._window.pin_control_changes.append(control_effort)
 
-            # Only the top rail counts. 0 is where every channel rests when idle, so
-            # counting it flagged a rig doing nothing as saturated on every sample.
             saturation = int(np.any(control_vector >= SATURATION_PWM_VALUE))
             self._window.saturation_indicators.append(saturation)
 

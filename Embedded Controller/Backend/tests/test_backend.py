@@ -1,5 +1,3 @@
-"""The serial backend, driven through a fake port so no board is needed."""
-
 import threading
 import time
 
@@ -11,10 +9,6 @@ from helpers import wait_for
 def backend_threads():
     return sorted(thread.name for thread in threading.enumerate() if thread.name.startswith("backend-"))
 
-
-# ----------------------------------------------------------------------------
-#                           Configuration from the environment
-# ----------------------------------------------------------------------------
 
 
 @pytest.mark.req("DATA-01")
@@ -43,10 +37,6 @@ def test_serial_port_comes_from_the_environment(backend_module, monkeypatch, val
     assert backend_module._configured_serial_port() == expected
 
 
-# ----------------------------------------------------------------------------
-#                                Lifecycle
-# ----------------------------------------------------------------------------
-
 
 def test_importing_the_backend_touches_no_hardware(backend_module):
     shared = backend_module.Back_End_Controller
@@ -73,10 +63,6 @@ def test_start_opens_the_port_and_stop_joins_every_worker(backend_module, fake_p
     assert time.time() - started < 3.0
     assert backend_threads() == []
 
-
-# ----------------------------------------------------------------------------
-#                            Reading from the board
-# ----------------------------------------------------------------------------
 
 
 @pytest.mark.req("DATA-01")
@@ -145,10 +131,6 @@ def test_the_1_us_switch_floor_reaches_the_board(live_backend, fake_port, caplog
     assert "clamped" not in caplog.text
 
 
-# ----------------------------------------------------------------------------
-#                                Provenance
-# ----------------------------------------------------------------------------
-
 
 @pytest.mark.req("DATA-01")
 def test_simulated_samples_never_reach_training_on_a_real_run(backend_module):
@@ -166,10 +148,6 @@ def test_simulated_samples_are_admissible_when_simulation_was_asked_for(backend_
 
     assert len(backend.get_training_data()) == 1
 
-
-# ----------------------------------------------------------------------------
-#                                 Sweeps
-# ----------------------------------------------------------------------------
 
 
 def run_sweep(backend, **overrides):
@@ -209,10 +187,6 @@ def test_an_aborted_sweep_closes_its_capture_and_skips_training(backend_module, 
     assert live_backend._sweep_capture is None
     assert trained == []
 
-
-# ----------------------------------------------------------------------------
-#                               Auto control
-# ----------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -298,10 +272,6 @@ def test_auto_control_stops_steering_when_the_board_goes_quiet(backend_module, a
     assert len(fake_port.commands("TARGETS")) == sent
     assert live_backend.get_auto_control()["state"] == "waiting"
 
-
-# ----------------------------------------------------------------------------
-#                               Safety state
-# ----------------------------------------------------------------------------
 
 
 @pytest.mark.req("SAF-02", "UI-02")
@@ -394,10 +364,6 @@ def test_a_disconnected_board_is_never_reported_armed(backend_module):
     assert not backend.is_armed()
 
 
-# ----------------------------------------------------------------------------
-#                               Built-in test
-# ----------------------------------------------------------------------------
-
 
 @pytest.mark.req("LINK-04", "BIT-03")
 def test_the_keepalive_polls_the_board_health(fast_keepalive, live_backend, fake_port):
@@ -416,10 +382,6 @@ def test_a_self_test_result_is_recorded_and_a_failure_logged(live_backend, fake_
     assert wait_for(lambda: live_backend.get_board_health()["selftest"]["result"] == "FAIL")
     assert "self-test failed" in caplog.text
 
-
-# ----------------------------------------------------------------------------
-#                              Link integrity
-# ----------------------------------------------------------------------------
 
 
 @pytest.mark.req("LINK-01")
@@ -519,10 +481,6 @@ def test_frame_and_unframe_round_trip(backend_module):
     assert backend_module.unframe_line(framed[:-1] + ("0" if framed[-1] != "0" else "1"))[1] == "invalid"
     assert backend_module.unframe_line("WiFi associating...") == ("WiFi associating...", "absent")
 
-
-# ----------------------------------------------------------------------------
-#                          Auto control safeguards
-# ----------------------------------------------------------------------------
 
 
 @pytest.mark.req("AUTO-01")

@@ -1,22 +1,7 @@
-"""
-# ------------- Data Pipeline for RNN Control System ------------- #
-
-#  Pyhton module to calculate Beam data via the backend's diode voltage 
-#   stream. Control vectors utilise the current pin states read from the 
-#   backend. Control effort uses squared step delta of the 5 analog pins.
-#   Saturations count when any of the 5 analog pins sits at full scale (1023).
-
-# --------------------------------------------------------------- #
-"""
-
 import logging
 import numpy as np
 from collections import deque
 from typing import Deque
-
-#---------------------------------------------------------------#
-#                        Logging setup
-#---------------------------------------------------------------#
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,10 +10,6 @@ logging.basicConfig(
 )
 
 log = logging.getLogger("Signal_Pipeline")
-
-#---------------------------------------------------------------#
-#                     Normalisation Stage
-#---------------------------------------------------------------#
 
 class Normaliser:
     """Maintains a rolling window of pulse feature vectors to compute mean and std for normalisation."""
@@ -47,8 +28,7 @@ class Normaliser:
         self._buf.append(np.asarray(feature_vector, dtype=float))
 
     def stats(self):
-        """Computes the mean and standard deviation of the feature vectors in the rolling window. Returns (mean, std) as numpy arrays. 
-        If there are no vectors, returns (None, None)."""
+        """Computes the mean and standard deviation of the feature vectors in the rolling window."""
 
         if not self._buf:
             log.warning("WARNING: Normaliser statistics requested but the buffer is empty! Returning null vectors...")
@@ -60,8 +40,7 @@ class Normaliser:
         return feature_mean, feature_std
 
     def normalise(self, input_feature_vector: np.ndarray) -> np.ndarray:
-        """Normalizes the input feature vector using the mean and std from the rolling window. 
-        If there are not enough vectors in the buffer, returns a zero vector of the same dimensions."""
+        """Normalizes the input feature vector using the mean and std from the rolling window."""
 
         feature_vector = np.asarray(input_feature_vector, dtype=float)
 
@@ -87,9 +66,6 @@ def _moving_average(input_array: np.ndarray, window_size: int) -> np.ndarray:
 
     return np.convolve(input_array, window_filter_weightings, mode="same")
 
-#---------------------------------------------------------------#
-#                Live Feature Calculation Stage
-#---------------------------------------------------------------#
 class LivePulsePipeline:
     """Processes incoming voltage data to extract features for each pulse, applying denoising and normalization."""
 
@@ -149,8 +125,7 @@ class LivePulsePipeline:
         return _moving_average(np.asarray(x, dtype=float), self.denoise_samples)
 
     def _segment_periodic(self, signal_dataset: np.ndarray):
-        """Segments the input data into pulses based on the known periodic structure of the signal.
-         Returns a list of (on, off) tuples for each full pulse and any leftover data that does not form a complete pulse."""
+        """Segments the input data into pulses based on the known periodic structure of the signal."""
         
         number_of_samples = signal_dataset.shape[0]
         number_of_pulses = number_of_samples // self.period_samples
@@ -202,8 +177,7 @@ class LivePulsePipeline:
         return np.array([current_mean, peak_value, integrated_signal, width_us, arrival_us, rms_voltage], dtype=float)
 
     def process_chunk(self, voltage_data: np.ndarray):
-        """Processes a chunk of voltage data, extracting features for each pulse and normalizing them. 
-        Returns a list of normalized feature vectors for the pulses in the chunk."""
+        """Processes a chunk of voltage data, extracting features for each pulse and normalizing them."""
 
         input_voltages = np.asarray(voltage_data, dtype=float)
 

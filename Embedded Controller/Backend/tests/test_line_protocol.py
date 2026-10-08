@@ -1,11 +1,3 @@
-"""The serial link's framing, compiled from include/line_protocol.h and checked against the backend.
-
-Both ends must compute the same CRC for every line, or every command would be refused and
-every reading dropped. The harness frames lines the way the firmware does and the test
-compares each one with the backend's frame_line(), then checks the firmware's verify()
-against good, corrupted and unframed lines.
-"""
-
 import random
 import shutil
 
@@ -125,8 +117,6 @@ def test_every_single_bit_flip_in_a_command_is_caught(backend_module, harness):
     assert set(line.split()[0] for line in harness(flipped, "verify")) == {"invalid"}
 
 
-# Lines dense in what the parser cares about: '*', hex digits in both cases, and lengths
-# around the five-character suffix. Printable ASCII only, as on the wire.
 WIRE_TEXT = st.text(alphabet=st.sampled_from("*0123456789abcdefABCDEFxyz =._-"), max_size=24)
 FRAMED_OR_NOT = st.one_of(WIRE_TEXT, WIRE_TEXT.map(lambda text: text + "*"), WIRE_TEXT.flatmap(
     lambda text: st.sampled_from(["", "*", "*F", "*FFF"]).map(lambda tail: text + tail)))

@@ -1,18 +1,4 @@
-﻿"""
-# --------- Backend Communication Layer - ESP32 Cntrol System --------- #
-
-# Handles serial communication between the ESP32 board and the Python environment.
-# Provides live data streaming, thread-safe buffering, and command
-# transmission. Designed for use with the data loggier, dashboard, signal
-# pipeline, and RNN controller modules.
-
-#------------------------------------------------------------------------#
-"""
-# ---------------------------------------------------------------------- #
-#                               Imports                                  #
-# ---------------------------------------------------------------------- #
-
-import binascii
+﻿import binascii
 import itertools
 import json
 import logging
@@ -99,27 +85,17 @@ except Exception:
         return None
 
 
-# ------------------------------------------------------------------------- # 
-#                                 Logging                                   # 
-# ------------------------------------------------------------------------- # 
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S",)
 log = logging.getLogger("ESP32_Backend")
 
-# -------------------------------------------------------------------------
-#                             Configuration
-# -------------------------------------------------------------------------
-
 def _configured_serial_port() -> str:
-    """Same variable platformio.ini reads for upload_port, so one setting covers flashing
-    and running. COM4 is only the fallback for the original lab machine."""
+    """Same variable platformio.ini reads for upload_port, so one setting covers flashing and running."""
 
     return os.getenv("TESTBED_SERIAL_PORT", "").strip() or "COM4"
 
 
 def _env_flag(name: str) -> bool:
-    """Reads an on/off environment variable. Case folded so that OFFLINE=FALSE cannot
-    quietly turn simulation on."""
+    """Reads an on/off environment variable."""
 
     return os.getenv(name, "").strip().lower() not in ("", "0", "false", "no", "off")
 
@@ -137,22 +113,14 @@ MAX_MODULATION_VALUE = 1023
 MAX_CONTROL_VOLTAGE = 3.3
 CONTROL_PIN_COUNT = 5
 
-# Must mirror SWITCH_PERIOD_MIN_US / SWITCH_PERIOD_MAX_US in the firmware. Both are the
-# time between edges, half a cycle, so the 1 us floor is a 500 kHz square wave. It is
-# the design floor, not yet scoped on hardware.
 SWITCH_PERIOD_MIN_US = 1
 SWITCH_PERIOD_MAX_US = 2000000
 
-# Must match PROTOCOL_VERSION in the firmware. The backend will not arm a board whose
-# VERSION reply reports a different one.
 PROTOCOL_VERSION = 2
 
 # How long a command may go unanswered before it counts as a missed reply.
 ACK_TIMEOUT_SEC = 1.0
 
-# What each command is answered with, keyed by its first word. The board answers commands
-# in the order it received them, so the oldest outstanding command owns the next line
-# that matches it, or the next ERROR.
 COMMAND_REPLIES = {
     "PING": ("OK",),
     "VERSION": ("VERSION ",),
@@ -172,8 +140,6 @@ COMMAND_REPLIES = {
 # ERROR lines the board sends on its own, which never answer a command.
 UNSOLICITED_ERRORS = ("ERROR: ADC conversion timed out", "ERROR: OTA")
 
-# Lines that are part of the protocol, as opposed to free text such as Wi-Fi status. Once
-# the board has confirmed the protocol, these are only trusted with a valid CRC.
 PROTOCOL_PREFIXES = ("MEASURED", "PINS", "ACK", "ERROR", "OK", "FAULT", "FAILSAFE", "HEALTH", "SELFTEST", "VERSION")
 
 
@@ -199,22 +165,15 @@ def _command_word(command: str) -> str:
     return tokens[0].upper() if tokens else ""
 
 
-# Keepalive cadence, kept well inside the firmware's COMMAND_TIMEOUT_MS so that a
-# quiet but healthy link is never mistaken for a dead host.
 KEEPALIVE_INTERVAL_SEC = 2.0
 
 ONLINE_UPDATE_INTERVAL_SEC = 5.0
 
-# Auto control runs on its own backend thread rather than in a dashboard callback, so
-# it keeps its own cadence, carries on with no browser open, and has a single writer
-# however many tabs are watching.
 AUTO_CONTROL_MIN_PERIOD_MS = 100
 AUTO_CONTROL_MAX_PERIOD_MS = 60000
 AUTO_CONTROL_DEFAULT_PERIOD_MS = 500
 AUTO_CONTROL_DEFAULT_CHANGE_PENALTY = 0.1
 
-# Proposals are only made from fresh hardware readings. If the board goes quiet the
-# controller stops steering rather than acting on a picture of the beam that is stale.
 AUTO_CONTROL_MAX_SAMPLE_AGE_SEC = 2.0
 DEFAULT_UPDATE_WINDOW = 30.0
 UPDATE_WINDOW_TIME = 5.0
@@ -224,41 +183,19 @@ DEFAULT_DATA_BUFFER_SAMPLES = 1000
 DATA_BUFFER_MIN_SAMPLES = 100
 DATA_BUFFER_MAX_SAMPLES = 100000
 
-# A sweep records into its own capture rather than the rolling buffer, which is far
-# smaller than a sweep. This only bounds memory if a sweep is configured absurdly large.
 SWEEP_CAPTURE_MAX_SAMPLES = DATA_BUFFER_MAX_SAMPLES
 
-# Provenance tags - every buffered sample is stamped with where it came from, so a
-# simulated trace can never be mistaken for a diode reading after the fact.
 HARDWARE_SOURCE = "hardware"
 SIMULATED_SOURCE = "simulated"
 
 
-# ------------------------------------------------------------------------- # 
-#                             Backend Object                                # 
-# ------------------------------------------------------------------------- # 
-
 
 class SerialBackend:
-    """Serial (or simulated) backend for the ESP32 embedded controller.
-
-    This class owns the serial connection and background threads for:
-
-    - reading and parsing messages from the embedded firmware
-    - buffer data into an in-memory DataFrame
-    - send control commands
-    - perform periodic online model updates and training sweeps when prompted by user
-    """
+    """Serial (or simulated) backend for the ESP32 embedded controller."""
 
     def __init__(self, port=SERIAL_PORT, baud=BAUD_RATE, status: bool = False):
 
-        """Creates the backend. Nothing touches the port or starts a thread until start().
-
-        Arguments:
-            port: Serial port name (for example, "COM4").
-            baud: Serial baud rate.
-            status: When True, starts in offline/simulated mode.
-        """
+        """Creates the backend."""
 
         self.port = port
         self.baud = baud
@@ -296,8 +233,6 @@ class SerialBackend:
         self.pins_timestamp = 0.0
         self.switch_timing = None
 
-        # The board's safety state as it last reported it. UNKNOWN until it has said, and
-        # again whenever the link drops. A simulated board boots SAFE like a real one.
         self.board_mode = "SAFE" if self.force_offline else "UNKNOWN"
         self.board_faults = {}
         self.last_board_fault = None
@@ -305,8 +240,6 @@ class SerialBackend:
         self.board_health = {}
         self.last_selftest = None
 
-        # The link: what the board says it is, whether it speaks this protocol (None until it
-        # has answered VERSION), what is waiting for a reply, and running counts.
         self.board_version = {}
         self.protocol_ok = True if self.force_offline else None
         self._pending_replies = deque()
@@ -342,11 +275,7 @@ class SerialBackend:
         self.auto_control_thread = None
 
     def start(self):
-        """Opens the link and starts the reader, online update and keepalive threads.
-
-        Kept out of the constructor so that importing this module, or building a
-        backend in a test, never opens a serial port. Calling it again is a no-op.
-        """
+        """Opens the link and starts the reader, online update and keepalive threads."""
 
         if self.alive.is_set():
             return self
@@ -369,10 +298,6 @@ class SerialBackend:
 
         workers = (self.thread, self.online_update_thread, self.keepalive_thread, self.auto_control_thread)
         return [worker for worker in workers if worker is not None]
-
-    # ------------------------------------------------------------------ # 
-    #                     Connect / Disconnect Functions                 # 
-    # ------------------------------------------------------------------ # 
 
     def _set_offline_state(self, value: bool):
         """Keep instance and module offline flags in sync."""
@@ -447,14 +372,7 @@ class SerialBackend:
             self.save_dataset_enabled = False
 
     def set_window_update_time(self, window_seconds: float):
-        """Sets the ML learning update window length.
-
-        Arguments:
-            window_seconds: Desired window length in seconds.
-
-        Returns:
-            The clamped window length in seconds.
-        """
+        """Sets the ML learning update window length."""
         try:
             window_time = float(window_seconds)
 
@@ -560,10 +478,6 @@ class SerialBackend:
             row = self.data_frame.iloc[-1]
             return float(row["timestamp"]), float(row["voltage"])
 
-
-    # ------------------------------------------------------------------ #
-    #                         Object Methods                             #
-    # ------------------------------------------------------------------ #
 
     
     @staticmethod
@@ -726,9 +640,7 @@ class SerialBackend:
         return pd.DataFrame(captured, columns=self.data_frame.columns)
 
     def operating_system(self):
-        """ Reads serial messages, parses measurement / pin snapshots, and updates
-        the internal buffers. When offline, generates simulated readings.
-        """
+        """Reads serial messages, parses measurement / pin snapshots, and updates the internal buffers."""
 
         while self.alive.is_set():
 
@@ -790,9 +702,7 @@ class SerialBackend:
                 self._stop_event.wait(0.5)
 
     def _accept_line(self, raw: str) -> str | None:
-        """Checks a received line's CRC. Returns its text, or None if it must be dropped:
-        a CRC that does not match, or a protocol line without one once the board has
-        confirmed it speaks this protocol. Free text (Wi-Fi status, debug logs) needs none."""
+        """Checks a received line's CRC."""
 
         self.link_stats["lines"] += 1
         text, crc = unframe_line(raw)
@@ -991,16 +901,11 @@ class SerialBackend:
 
         return fields
 
-    # ------------------------------------------------------------------ #
-    #                               Safety                               #
-    # ------------------------------------------------------------------ #
-
     def is_armed(self) -> bool:
         return self.board_mode == "ARMED"
 
     def arm(self):
-        """Asks the board to arm. It refuses while a critical fault is latched, and this
-        backend refuses until the board has confirmed it speaks the same protocol."""
+        """Asks the board to arm."""
 
         if not self.force_offline and self.protocol_ok is not True:
             reason = ("the board has not answered VERSION yet" if self.protocol_ok is None
@@ -1075,12 +980,7 @@ class SerialBackend:
         }
 
     def _keepalive_manager(self):
-        """Pings the board on a fixed cadence so its output failsafe stays satisfied.
-
-        The firmware drops its outputs when the host goes quiet. Passive monitoring
-        sends nothing on its own, so without this a perfectly healthy but idle
-        session would trip the failsafe.
-        """
+        """Pings the board on a fixed cadence so its output failsafe stays satisfied."""
 
         while self.alive.is_set():
 
@@ -1098,17 +998,11 @@ class SerialBackend:
 
                 self.send_command("PING")
 
-                # Also keeps the board's mode, faults and health current for the
-                # dashboard and for the auto control and sweep checks.
                 self.send_command("FAULTS")
                 self.send_command("HEALTH")
 
             except Exception as fault:
                 log.warning(f"WARNING: Keepalive ping failed - {fault}!")
-
-    # ------------------------------------------------------------------ #
-    #                           Auto control                             #
-    # ------------------------------------------------------------------ #
 
     def set_auto_control(self, enabled: bool | None = None, period_ms: float | None = None, change_penalty: float | None = None) -> dict:
         """Changes any of the auto control settings and returns the resulting configuration."""
@@ -1233,8 +1127,6 @@ class SerialBackend:
     def _auto_control_manager(self):
         """Background loop that runs auto control at its configured cadence."""
 
-        # Scheduled against a deadline so the time a proposal takes comes out of the
-        # period rather than being added on top of it.
         next_due = time.monotonic()
 
         while self.alive.is_set():
@@ -1242,8 +1134,6 @@ class SerialBackend:
             next_due += self.auto_control_period_ms / 1000.0
             now = time.monotonic()
 
-            # A step that overran its slot restarts the schedule from now instead of
-            # firing a burst of back-to-back steps to catch up.
             if next_due < now:
                 next_due = now
 
@@ -1313,10 +1203,6 @@ class SerialBackend:
                     log.warning(f"WARNING: Failed to record training update metrics - {fault}!")
                     pass
 
-    # ------------------------------------------------------------------ #
-    #                               Methods                              #
-    # ------------------------------------------------------------------ #
-
     def send_command(self, command_string: str):
         """Sends a command string to the ESP32."""
         try:
@@ -1358,8 +1244,6 @@ class SerialBackend:
 
                         log.info(f"[SIMULATED] TARGETS applied: {raw_values}")
 
-                # A simulated board arms like a real one. A real board that has dropped
-                # off the link is never reported as armed.
                 elif command == "ARM" and self.force_offline:
                     if self.board_mode != "FAULT":
                         self.board_mode = "ARMED"
@@ -1380,8 +1264,6 @@ class SerialBackend:
                     log.info(f"[SIMULATED] Received command: {command_string}")
                 return
 
-            # The sweep, the dashboard callbacks and the keepalive all share one port. Each
-            # command goes out with its CRC, and is noted so its reply can be checked off.
             word = _command_word(command_string)
 
             with self.command_lock:
@@ -1409,12 +1291,7 @@ class SerialBackend:
         return self._admissible_for_training(self.get_data())
 
     def _admissible_for_training(self, data_frame: pd.DataFrame) -> pd.DataFrame:
-        """Drops the samples the model must not learn from.
-
-        Simulated samples are only admissible when simulation was asked for. If the
-        board drops out mid-run the simulator keeps the dashboard alive, but those
-        samples must never reach the RNN as though they were diode readings.
-        """
+        """Drops the samples the model must not learn from."""
 
         if self.force_offline or data_frame.empty or "source" not in data_frame.columns:
             return data_frame
@@ -1490,11 +1367,7 @@ class SerialBackend:
         self.set_pin_voltage(channel, duty)
 
     def set_switch_timing(self, timing_input: float):
-        """Sets the switch timing (microseconds between edges) given to the control board.
-
-        The board takes whole microseconds only, so a fractional period is refused rather
-        than truncated. One outside the shared bounds is clamped, with a warning.
-        """
+        """Sets the switch timing (microseconds between edges) given to the control board."""
 
         try:
             switch_timing = float(timing_input)
@@ -1584,13 +1457,8 @@ class SerialBackend:
 
         log.info("Backend thread disconnected...")
 
-    # ------------------------------------------------------------------ #
-    #                         Training sweep control                     #  
-    # ------------------------------------------------------------------ #
-
     def _RNN_training_sweeps(self, minimum_voltage: float, maximum_voltage: float, voltage_step_size: float, hold_time: float, epochs: int, reference_voltages: int | None = None, factorial_levels: int | None = None, random_samples: int | None = None):
-        """Internal worker for parameter sweeps + optional RNN training. Checks and generates the voltage sweeps, then iterates 
-        through the combinations; while checking for cancellation and updating progress, sending all instructions then to the RNN."""
+        """Internal worker for parameter sweeps + optional RNN training."""
 
         try:
 
@@ -1907,10 +1775,6 @@ class SerialBackend:
         self.sweep_cancel.set()
 
 
-# ------------------------------------------------------------------------- #
-#                               Board Access                                #    
-# ------------------------------------------------------------------------- #
-
 # OFFLINE environment variable can be used to force simulated mode.
 status = OFFLINE
 
@@ -1946,10 +1810,6 @@ get_buffer_samples = getattr(Back_End_Controller, "get_buffer_samples", None)
 
 lines = Back_End_Controller.lines
 get_status = Back_End_Controller.get_status
-
-# ------------------------------------------------------------------------- #
-#                           Model Status Livestream                         #
-# ------------------------------------------------------------------------- #
 
 def get_model_info() -> dict:
     """Returns a lightweight snapshot of model/online-update state to be displayed opn the UI Dashboard."""
@@ -2038,10 +1898,6 @@ def get_model_info() -> dict:
     return status_snapshot
 
 
-# -------------------------------------------------------------------------
-#                   Machine Learning Metrics Interface
-# -------------------------------------------------------------------------
-
 ML_METRICS = MetricCollector(maxlen=4000)
 
 def get_ml_metrics():
@@ -2092,18 +1948,10 @@ def compute_feature_importance(max_samples: int = 200, num_permutations: int = 2
     
     return Back_End_Controller.compute_feature_importance(max_samples=max_samples, num_permutations=num_permutations)
 
-#-------------------------------------------------------------------------#
-#                   Training Sweep Controls
-#-------------------------------------------------------------------------#
-
 start_training_sweep = getattr(Back_End_Controller, "start_training_sweep", None)
 get_sweep_status = getattr(Back_End_Controller, "get_sweep_status", None)
 stop_training_sweep = getattr(Back_End_Controller, "stop_training_sweep", None)
 
-
-# -------------------------------------------------------------------------
-#                             Manual testing
-# -------------------------------------------------------------------------
 
 if __name__ == "__main__":
 

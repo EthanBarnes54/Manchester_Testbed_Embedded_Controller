@@ -1,9 +1,3 @@
-"""Hardware-in-the-loop tests: the real board, over its serial port.
-
-These are the automated steps of the acceptance test procedure. They check what the
-firmware does on the chip; what its pins do still needs a scope (see the procedure).
-"""
-
 import random
 import statistics
 import time
@@ -104,8 +98,6 @@ def test_corrupted_commands_do_not_keep_the_failsafe_away(safe_rig):
     assert tripped, "no FAILSAFE line while the host sent only corrupted commands"
     assert tripped.time - last_valid <= FAILSAFE_TIMEOUT_S + FAILSAFE_MARGIN_S
 
-    # The refusal of the last corrupted PING can still be on its way, so the recovery is
-    # judged by the lines it must produce rather than by the next reply.
     recovering = safe_rig.mark()
     safe_rig.send("PING")
     assert safe_rig.wait_for(lambda line: line.text == "OK", recovering, 1.0)
@@ -190,8 +182,6 @@ def test_readings_arrive_at_20_hz_numbered_and_without_gaps(safe_rig):
 
 @pytest.mark.req("LINK-06", "BIT-02")
 def test_the_backends_status_poll_does_not_hold_up_the_loop(safe_rig):
-    # The backend's keepalive sends these three together every 2 s. Their replies come to
-    # about 450 characters, far more than the UART's 128-byte FIFO.
     poll = b"".join((frame(command) + "\n").encode("utf-8") for command in ("PING", "FAULTS", "HEALTH"))
     before = int(safe_rig.health()["overruns"])
 
@@ -227,8 +217,6 @@ def test_a_flood_of_garbage_is_discarded_and_the_board_keeps_answering(safe_rig)
     safe_rig.send_raw(b"X" * 4000 + b"\n")
     safe_rig.send_raw(b"".join(bytes(rng.randrange(32, 127) for _ in range(rng.randrange(1, 300))) + b"\n" for _ in range(200)))
 
-    # The board answers the garbage with ERROR lines, in order, so a distinctive reply after
-    # them shows it has worked through the whole flood and still answers.
     since = safe_rig.mark()
     safe_rig.send("VERSION")
     assert safe_rig.wait_for(lambda line: line.text.startswith("VERSION "), since, 5.0), "the board stopped answering"

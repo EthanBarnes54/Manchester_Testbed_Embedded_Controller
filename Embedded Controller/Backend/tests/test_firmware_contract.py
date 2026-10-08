@@ -1,9 +1,3 @@
-"""Contracts between the firmware and the backend, checked without a board.
-
-Everything here is read straight out of main.cpp and platformio.ini, so the checks stay
-honest as those files change instead of testing a hand-copied list that could drift.
-"""
-
 import ast
 import re
 from pathlib import Path
@@ -159,8 +153,6 @@ def test_switch_line_is_driven_low_before_anything_else_at_boot():
 
 @pytest.mark.req("SW-04")
 def test_the_ledc_handover_runs_out_of_line_from_iram():
-    # Inlined into flash code, a cache miss between routing the pin and releasing the
-    # count would stretch the first pulse by microseconds.
     assert "static void NOINLINE_ATTR IRAM_ATTR hand_pin_to_ledc()" in MAIN_CPP
     assert "hand_pin_to_ledc();" in cpp_block("bool start_hardware(unsigned long period_us)")
 
@@ -252,9 +244,7 @@ def test_the_heartbeat_is_driven_every_pass():
 
 
 def worst_case_reply_burst():
-    """The most the board can owe the host at once, in characters: a keepalive's replies
-    (OK, FAULTS, HEALTH) and VERSION, with every fault listed and counted and every number
-    at its widest, plus two readings. Each line carries "*XXXX" and "\\r\\n"."""
+    """The most the board can owe the host at once, in characters, with every field at its widest."""
 
     header = (FIRMWARE_DIR / "include" / "safety_state.h").read_text(encoding="utf-8")
     names = re.findall(r'return "([A-Z_]+)";', header[header.index("name_of(Fault"):header.index("name_of(Mode")])
@@ -419,10 +409,6 @@ def test_led_indicator_on_the_host(tmp_path):
     assert run.returncode == 0, run.stdout + run.stderr
 
 
-# ----------------------------------------------------------------------------
-#                               Built-in test
-# ----------------------------------------------------------------------------
-
 
 @pytest.mark.req("BIT-03")
 @pytest.mark.parametrize("command", ["SELFTEST", "HEALTH", "selftest"])
@@ -474,18 +460,12 @@ def test_the_loop_budget_leaves_room_for_the_longest_legitimate_pass():
     assert int(cpp_constant("LOOP_BUDGET_US")) >= 4 * longest_priming_us
 
 
-# ----------------------------------------------------------------------------
-#                            Output verification
-# ----------------------------------------------------------------------------
-
 
 @pytest.mark.req("OUT-03")
 def test_verification_hardware_is_off_unless_a_build_declares_it():
     for flag in ("TESTBED_GATE_LOOPBACK", "TESTBED_SETPOINT_READBACK"):
         assert f"#ifndef {flag}\n#define {flag} 0\n#endif" in MAIN_CPP
 
-    # Both checks are written as ordinary branches on constants, so the compiler checks
-    # them in every build, not only the one that turns them on.
     assert "#if TESTBED_GATE_LOOPBACK" not in MAIN_CPP and "#if TESTBED_SETPOINT_READBACK" not in MAIN_CPP
 
 
@@ -522,10 +502,6 @@ def test_a_readback_conversion_always_ends_before_the_next_diode_one():
     window = int(cpp_constant("MEASUREMENT_INTERVAL_MS").rstrip("UL")) - int(cpp_constant("ADC_CONVERSION_TIMEOUT_MS").rstrip("UL"))
     assert window > int(cpp_constant("ADC_FIRST_POLL_MS").rstrip("UL")), "a diode conversion must be able to finish inside it"
 
-
-# ----------------------------------------------------------------------------
-#                              Link integrity
-# ----------------------------------------------------------------------------
 
 
 @pytest.mark.req("LINK-02")

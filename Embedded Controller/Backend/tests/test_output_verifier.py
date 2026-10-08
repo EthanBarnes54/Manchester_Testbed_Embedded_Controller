@@ -1,10 +1,3 @@
-"""The firmware's output verification, compiled from main.cpp and run on the host.
-
-The real OutputVerifier class and its constants are cut out of main.cpp and built against a
-fake pulse counter, gate input, switch line and ADC readback, once with the verification
-hardware declared fitted and once without it.
-"""
-
 import re
 from pathlib import Path
 

@@ -1,6 +1,3 @@
-"""Every requirement in docs/requirements.md is verified by something, and every test that
-claims a requirement names a real one. See tools/traceability.py for the matrix itself."""
-
 import importlib.util
 from pathlib import Path
 

@@ -1,14 +1,3 @@
-"""Fails a build whose firmware image leaves too little of its application partition free.
-
-Over-the-air updates write the new image into the other application slot, so an image
-that grows to fill its slot leaves no room for the fix that follows it. Reads each built
-environment's firmware.bin and the partition table the build produced (partitions.bin),
-and compares the image with the smallest application partition.
-
-    python tools/check_firmware_size.py                     every environment under .pio/build
-    python tools/check_firmware_size.py esp32dev --budget 0.8
-"""
-
 import argparse
 import struct
 import sys
@@ -61,7 +50,7 @@ def check(build_dir: Path, budget: float = DEFAULT_BUDGET) -> tuple[bool, str]:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description="Fails a firmware image that uses too much of its application partition.")
     parser.add_argument("environments", nargs="*", help="build environments to check (default: every one built)")
     parser.add_argument("--budget", type=float, default=DEFAULT_BUDGET, help="largest share of the partition an image may use")
     parser.add_argument("--build-dir", type=Path, default=BUILD_DIR)

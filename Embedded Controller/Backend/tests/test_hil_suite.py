@@ -1,12 +1,3 @@
-"""Checks the hardware-in-the-loop suite itself, against the simulated board in hil/.
-
-A rig test that has never run is a liability: a wrong reply string or a timing slip would
-only show up with someone standing at the rig. So the whole suite runs here against a
-board simulated at the protocol level, once as it should behave and once for each way
-the simulator can be told to misbehave, where the rig test that guards that behaviour
-must fail. None of this says anything about the real hardware.
-"""
-
 import os
 import subprocess
 import sys

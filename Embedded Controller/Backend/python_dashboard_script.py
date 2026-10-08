@@ -1,14 +1,3 @@
-"""
-#--------------- ESP32 Control and Monitoring Dashboard -------------------#
-
-# A Dash-based web interface for real-time control and data visualization
-# of the ESP32-based embedded control system. Communicates with the backend
-# and  ML system to display live metrics of both the ion beam testbed and 
-# RNN remote controller.
-
-# Run locally in a new terminal and open http://127.0.0.1:8050 in a browser.
-# ------------------------------------------------------------------------#
-"""
 from dash import Dash, dcc, html, Input, Output, State, ctx
 from dash.exceptions import PreventUpdate
 from flask import request, Response
@@ -56,48 +45,25 @@ from python_Backend import (
 if not hasattr(pkgutil, "find_loader"):
     pkgutil.find_loader = lambda name: importlib.util.find_spec(name)
 
-# -------------------------------------------------------------------------
-#                                Logging setup
-# -------------------------------------------------------------------------
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S",)
-
-# -------------------------------------------------------------------------
-#                                 Initialize app
-# -------------------------------------------------------------------------
 
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 app = Dash(__name__, title="Manchester Ion Beam Testbed: Control Dashboard", assets_folder=ASSETS_DIR)
 server = app.server
-
-# -------------------------------------------------------------------------
-#                            Access control
-# -------------------------------------------------------------------------
-
-# The panel commands the rig directly, so it stays on loopback unless credentials
-# are supplied deliberately. Everything is read from the environment, nothing is
-# ever committed alongside the source.
 
 DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1").strip()
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8050"))
 DASHBOARD_USER = os.getenv("DASHBOARD_USER", "operator").strip()
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 
-# A second, read-only login. Observers see everything and can make the rig safe (DISARM,
-# stop a sweep), but cannot make anything live.
 DASHBOARD_OBSERVER_USER = os.getenv("DASHBOARD_OBSERVER_USER", "observer").strip()
 DASHBOARD_OBSERVER_PASSWORD = os.getenv("DASHBOARD_OBSERVER_PASSWORD", "")
 
-# TLS certificate and key. Off loopback the dashboard refuses to serve without them, since
-# basic auth over plain HTTP hands the password to anyone on the network.
 DASHBOARD_TLS_CERT = os.getenv("DASHBOARD_TLS_CERT", "")
 DASHBOARD_TLS_KEY = os.getenv("DASHBOARD_TLS_KEY", "")
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
-# Callback inputs that change the rig, its model or its data. Only an operator may fire
-# them. Everything else (the update tick, the plot window, DISARM, stopping a sweep) is open
-# to observers too: anyone may make the rig safe, only an operator may make it live.
 OPERATOR_ONLY_INPUTS = {
     "pwm1.value", "pwm2.value", "pwm3.value", "pwm4.value", "pwm5.value", "switch-time-us.value",
     "arm-confirm.submit_n_clicks", "clear-faults-button.n_clicks", "selftest-button.n_clicks",
@@ -144,8 +110,6 @@ def _role_for(credentials) -> str | None:
 
     username, password = credentials.username or "", credentials.password or ""
 
-    # Every comparison is made every time, so neither a username nor a role can be told
-    # from another by how long the reply takes.
     operator = hmac.compare_digest(username, DASHBOARD_USER) & hmac.compare_digest(password, DASHBOARD_PASSWORD)
     observer = (hmac.compare_digest(username, DASHBOARD_OBSERVER_USER)
                 & hmac.compare_digest(password, DASHBOARD_OBSERVER_PASSWORD) & bool(DASHBOARD_OBSERVER_PASSWORD))
@@ -165,8 +129,7 @@ def _changed_inputs() -> set:
 
 @server.before_request
 def _require_dashboard_credentials():
-    """Gates every request behind basic auth whenever a password has been configured, keeps
-    observers to read-only use, and records every action on the rig in the audit trail."""
+    """Basic auth on every request, read-only observers, and an audit trail of every action on the rig."""
 
     changed = _changed_inputs()
 
@@ -207,14 +170,9 @@ SAFETY_BUTTON_STYLE = {
     "cursor": "pointer",
 }
 
-# The plot keeps a longer view than the backend buffer, but a bounded one: whichever is
-# larger of ten minutes at the 20 Hz sample rate or the buffer itself.
 PLOT_HISTORY_MIN_SAMPLES = 12000
 PLOT_HISTORY_LOCK = threading.Lock()
 PLOT_HISTORY = deque(maxlen=PLOT_HISTORY_MIN_SAMPLES)
-# -------------------------------------------------------------------------
-#                                     Layout
-# -------------------------------------------------------------------------
 
 def _control_tab():
     """Builds the main control dashboard layout."""
@@ -432,8 +390,6 @@ def _control_tab():
                             html.Div(
                                 [
                                     html.Label("Switch Time (us)"),
-                                    # Starts empty so editing a voltage never starts the switch
-                                    # line on its own - it only runs once a period is entered.
                                     dcc.Input(
                                         id="switch-time-us",
                                         type="number",
@@ -501,8 +457,6 @@ def _control_tab():
                 ],
             ),
 
-            # Arming is a deliberate step: the board boots safe, and only ARM (after a
-            # confirmation) makes the outputs live. DISARM is always one click.
             html.Div(
                 style={"display": "flex", "gap": "0.75em", "alignItems": "center", "flexWrap": "wrap", "marginTop": "0.75em"},
                 children=[
@@ -1072,8 +1026,7 @@ def _rig_tab():
 
 
 def _serve_layout():
-    """Builds the page afresh for every load, so a newly opened tab shows the backend's
-    current settings rather than the ones in force when the server started."""
+    """Builds the page per load, so a new tab shows the backend's current settings."""
 
     return html.Div(
         style={"fontFamily": "Segoe UI, sans-serif", "padding": "2em"},
@@ -1162,12 +1115,7 @@ def _update_plot_window_config(_apply_clicks, range_mode, window_seconds, window
 )
 
 def _configure_online_updates(window_seconds, learning_rate, momentum_value, optimiser_type):
-    """Applies whichever online-update setting the operator changed and returns a status message.
-
-    Only the field that fired is applied. Momentum and optimiser changes rebuild the
-    optimiser and discard its state, so re-sending all four on every edit or page load
-    would reset training each time, and a newly opened tab would push its stale
-    defaults over settings made from another one."""
+    """Applies whichever online-update setting the operator changed and returns a status message."""
 
     errors = []
     changed = ctx.triggered_id
@@ -1237,10 +1185,6 @@ def _manual_save_model(user_input):
         return f"SUCCESS: Model saved to {path} succesfully..."
     except Exception as fault:
         return f"ERROR: Unable to save model parameters - {fault}!"
-
-# -------------------------------------------------------------------------
-#                                Graph Updates
-# -------------------------------------------------------------------------
 
 @app.callback(
     Output("live-graph", "figure"),
@@ -1345,10 +1289,7 @@ def update_graph(_, plot_window_config):
 )
 
 def _toggle_auto_mode(User_Input, _):
-    """Toggles auto control in the backend on a click, and otherwise mirrors its state.
-
-    The button reflects what the backend is doing rather than counting its own clicks,
-    so every open tab agrees and a reloaded page cannot show OFF while control runs."""
+    """Toggles auto control in the backend on a click, and otherwise mirrors its state."""
 
     base_style = {
         "minWidth": "130px",
@@ -1414,11 +1355,7 @@ def _configure_auto_control(period_ms, change_penalty):
 )
 
 def _toggle_save_dataset(User_Input, _):
-    """Toggles dataset saving in the backend on a click, and otherwise mirrors its state.
-
-    Counting this tab's own clicks meant the call every page load makes, with zero
-    clicks, switched saving off for every tab - a sweep could then go unsaved while
-    another tab still showed ON."""
+    """Toggles dataset saving in the backend on a click, and otherwise mirrors its state."""
 
     base_style = {
         "minWidth": "150px",
@@ -1546,10 +1483,6 @@ app.clientside_callback(
     prevent_initial_call=True,
 )
 
-# -------------------------------------------------------------------------
-#                     Input validation (UI Interface)
-# -------------------------------------------------------------------------
-
 @app.callback(
     Output("plot-window-samples", "style"),
     Output("plot-window-samples-warning", "children"),
@@ -1660,10 +1593,6 @@ def _validate_switch_time_input(input_value):
         return base_style
 
     return {**base_style, "border": "2px solid red", "boxShadow": "0 0 4px rgba(255,0,0,0.6)"}
-
-# -------------------------------------------------------------------------
-#                             Status updater
-# -------------------------------------------------------------------------
 
 @app.callback(
     Output("status", "children"),
@@ -1798,10 +1727,6 @@ def _safety_controls(arm_clicks, disarm_clicks, clear_clicks, _):
 
     return text, {"fontWeight": "bold", "color": SAFETY_MODE_COLOURS.get(mode, "#555")}
 
-# -------------------------------------------------------------------------
-#                             Pin control updates
-# -------------------------------------------------------------------------
-
 @app.callback(
     Output("pins-ack", "children"),
     Output("pins-ack", "style"),
@@ -1850,16 +1775,12 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
             
             targets.append(float_voltages)
 
-        # The board refuses output commands until it is armed; saying so here is clearer
-        # than a refusal the operator never sees.
         if not Back_End_Controller.is_armed():
             return (
                 f"ERROR: Board is {Back_End_Controller.board_mode} - press ARM before setting outputs!",
                 {"color": "red", "fontWeight": "bold"},
             )
 
-        # The operator takes over: a manual edit switches auto control off rather than
-        # letting the model undo it on its next step.
         override_note = ""
 
         if get_auto_control()["enabled"]:
@@ -1868,8 +1789,6 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
 
         Back_End_Controller.set_pin_voltages(targets)
 
-        # Report what the backend will actually drive, not what was typed, so the
-        # operator sees any clamping rather than having to infer it.
         applied = [Back_End_Controller.clamp_voltage(target) for target in targets]
 
         switch_timing_messgae = "not set"
@@ -1914,10 +1833,6 @@ def update_pins(pin_voltage_1, pin_voltage_2, pin_voltage_3, pin_voltage_4, pin_
 
     except Exception as fault:
         return f"ERROR: Pin update failed - {fault}!", {"color": "red", "fontWeight": "bold", "display": "block"}
-
-# -------------------------------------------------------------------------
-#                               Pin statuses
-# -------------------------------------------------------------------------
 
 @app.callback(
     Output("pin-status", "children"),
@@ -2021,10 +1936,6 @@ def update_pin_status(_):
 
     return pin_status_updates
 
-
-# -------------------------------------------------------------------------
-#                           Training sweep control
-# -------------------------------------------------------------------------
 
 @app.callback(
         
@@ -2165,10 +2076,6 @@ def handle_training_sweep(
     bar_style = {"height": "100%", "width": f"{percent_completion}%", "background": color, "transition": "width 0.2s ease",}
 
     return text, disabled, bar_style
-
-# -------------------------------------------------------------------------
-#                              ML Tab updates
-# -------------------------------------------------------------------------
 
 @app.callback(
     Output("ml-beam-graph", "figure"),
@@ -2557,9 +2464,6 @@ def update_ml_tab(_):
         saturation_indicator_outputs,
         model_status_outputs,
     )
-# -------------------------------------------------------------------------
-#                               Entry point
-# -------------------------------------------------------------------------
 
 if __name__ == "__main__":
 

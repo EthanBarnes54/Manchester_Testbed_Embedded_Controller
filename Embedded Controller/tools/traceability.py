@@ -1,18 +1,3 @@
-"""Requirements traceability: which tests verify which requirement, and what is missing.
-
-Reads the requirement tables in docs/requirements.md and the @pytest.mark.req(...) markers
-on the tests (statically, without importing or running them), then reports:
-
-- every requirement whose verification includes Test but which no test claims;
-- every marker naming an ID that is not a requirement;
-- every Bench requirement that names no acceptance test step;
-- every acceptance test step named that docs/acceptance-test-procedure.md does not define,
-  once that document exists.
-
-    python tools/traceability.py            prints the matrix as Markdown
-    python tools/traceability.py --check    prints only the problems; exits 1 if there are any
-"""
-
 import ast
 import re
 import sys
@@ -79,8 +64,7 @@ def _req_ids(decorator) -> list:
 
 
 def read_markers(test_dirs=TEST_DIRS) -> dict:
-    """{test id: [requirement IDs]} for every test function carrying a req marker. A module
-    level pytestmark applies its IDs to every test in that module."""
+    """{test id: [requirement IDs]} for every test function carrying a req marker."""
 
     markers = {}
 
@@ -106,8 +90,7 @@ def read_markers(test_dirs=TEST_DIRS) -> dict:
 
 
 def read_procedure_steps(path: Path = PROCEDURE) -> set | None:
-    """The ATP-NN steps the acceptance test procedure defines (as headings), or None if it
-    does not exist yet."""
+    """The ATP-NN steps the acceptance test procedure defines (as headings), or None if it does not exist yet."""
 
     if not path.exists():
         return None

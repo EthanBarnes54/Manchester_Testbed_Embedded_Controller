@@ -2,13 +2,6 @@
 
 #include <stdint.h>
 
-// Loop-pass timing for the HEALTH report and the loop-overrun fault. Pure logic with no
-// Arduino dependency, so the host tests compile this exact file.
-//
-// The window maximum is what HEALTH reports and then resets, so each report shows the
-// worst pass since the previous one. The peak is the worst since boot, and overruns
-// counts passes that took longer than the budget.
-
 namespace health {
 
 class LoopTiming {

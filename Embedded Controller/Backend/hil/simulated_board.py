@@ -1,16 +1,3 @@
-"""A simulated board at the serial protocol level, for checking the rig tests themselves.
-
-TESTBED_HIL_PORT=sim runs the hardware-in-the-loop suite against this instead of a board,
-so a mistake in a test (a wrong reply string, a timing assumption) shows up before anyone
-is standing at the rig. It plays the firmware's documented behaviour: CRC checking, the
-command set and its refusals, the 5 s failsafe, the 20 Hz numbered readings, the 256-byte
-command buffer and a reset on the RTS line. It is a model of the protocol, not of the
-chip: passing against it says nothing about the hardware.
-
-TESTBED_SIM_FAULT makes it misbehave in one named way (see FAULTS), so the test suite can
-show each rig test fails against a board that gets that one thing wrong.
-"""
-
 import math
 import os
 import queue
@@ -34,8 +21,6 @@ FAULTS = {
     "blocking_serial": "has no serial transmit buffer, so a pass that writes a lot overruns",
 }
 
-# Without a transmit buffer a write waits for the UART's 128-byte FIFO, which drains 11.52
-# characters a millisecond at 115200 baud: more than this in one pass takes over 20 ms.
 UNBUFFERED_PASS_LIMIT = 128 + 20 * 11.52
 
 
@@ -211,8 +196,6 @@ class SimulatedBoard:
                 volts = [float(value) for value in values]
             except ValueError:
                 volts = []
-            # As the firmware does: each voltage becomes a 10-bit duty, and only a non-zero
-            # duty counts as energising. Each channel is acknowledged, then the command.
             duties = [int(min(max(v, 0.0), 3.3) / 3.3 * 1023 + 0.5) for v in volts if math.isfinite(v)]
             if len(volts) != 5 or len(duties) != 5:
                 self._send("ERROR: TARGETS requires five voltages!")

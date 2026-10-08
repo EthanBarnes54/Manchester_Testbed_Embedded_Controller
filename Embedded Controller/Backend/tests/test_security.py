@@ -1,6 +1,3 @@
-"""Configuration and security: the SBOM, dashboard roles and launch policy, the audit trail,
-provenance of datasets and models, and the firmware's deploy build and OTA rollback."""
-
 import importlib.util
 import json
 import re
@@ -23,10 +20,6 @@ def load_sbom_tool():
     spec.loader.exec_module(module)
     return module
 
-
-# ----------------------------------------------------------------------------
-#                                    SBOM
-# ----------------------------------------------------------------------------
 
 
 @pytest.mark.req("SEC-07")
@@ -54,10 +47,6 @@ def test_the_sbom_tool_writes_a_file(tmp_path):
     load_sbom_tool().main(["generate_sbom.py", str(output)])
     assert json.loads(output.read_text())["components"]
 
-
-# ----------------------------------------------------------------------------
-#                        Dashboard roles and audit trail
-# ----------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -160,10 +149,6 @@ def test_the_audit_trail_never_stops_the_rig(monkeypatch, tmp_path):
     audit.record({"source": "test"})   # the directory does not exist: nothing raised
 
 
-# ----------------------------------------------------------------------------
-#                                  Provenance
-# ----------------------------------------------------------------------------
-
 
 @pytest.mark.req("SEC-04")
 def test_a_saved_dataset_carries_what_produced_it_and_its_hash(backend_module, tmp_path):
@@ -213,10 +198,6 @@ def test_the_dataset_hash_ignores_the_index_but_not_the_values():
     assert audit.frame_sha256(frame) == audit.frame_sha256(frame.set_index(pd.Index([7, 8])))
     assert audit.frame_sha256(frame) != audit.frame_sha256(pd.DataFrame({"voltage": [1.0, 2.5]}))
 
-
-# ----------------------------------------------------------------------------
-#                       Firmware: deploy build and OTA rollback
-# ----------------------------------------------------------------------------
 
 
 @pytest.mark.req("SEC-05", "OUT-03")

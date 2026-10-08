@@ -1,10 +1,3 @@
-"""Fixtures for the hardware-in-the-loop tests. See README.md in this directory first.
-
-Nothing here runs unless TESTBED_HIL_PORT names the board's serial port, and no test arms
-the board unless TESTBED_HIL_ALLOW_ARM=1 as well: arming lets the switch line and the
-setpoints reach whatever the rig has connected to them.
-"""
-
 import os
 
 import pytest
@@ -50,8 +43,7 @@ def safe_rig(rig):
 
 @pytest.fixture
 def armable_rig(safe_rig):
-    """The rig, for a test that must arm it. Skipped unless the operator has said the rig
-    is safe to energise."""
+    """The rig, for a test that must arm it."""
 
     if not ALLOW_ARM:
         pytest.skip("arms the board: set TESTBED_HIL_ALLOW_ARM=1 once the rig is safe to energise")

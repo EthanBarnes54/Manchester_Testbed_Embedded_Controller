@@ -1,21 +1,8 @@
-"""
-# -------------- Machine Learning Utilities Module -------------- #
-
-#   Provides shared preprocessing, feature engineering, 
-#   evaluation, and stability analysis for the embedded 
-#   RNN control system.
-
-# --------------------------------------------------------------- #
-"""
 import logging
 import numpy as np
 import pandas as pd
 from sklearn.metrics import r2_score, mean_squared_error
 from sklearn.preprocessing import StandardScaler
-
-# ---------------------------------------------------------------
-#                        Logging setup
-# ---------------------------------------------------------------
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,10 +11,6 @@ logging.basicConfig(
 )
 
 log = logging.getLogger("ML_Toolbox")
-
-# ---------------------------------------------------------------
-#                      Feature Scaling
-# ---------------------------------------------------------------
 
 standard_scaler = StandardScaler()
 
@@ -45,10 +28,6 @@ def scale_features(data_frame: pd.DataFrame, columns):
     log.debug("Scaled features: %s", columns)
     return scaled_df, standard_scaler
 
-
-# ---------------------------------------------------------------
-#                    RNN Data Preparation
-# ---------------------------------------------------------------
 
 def data_windows(data_frame: pd.DataFrame, sequence_length: int = 10, features=("voltage", "response")):
     """Prepares windowed data for RNN training. Returns feature and target arrays suitable for sequence modeling."""
@@ -68,10 +47,6 @@ def data_windows(data_frame: pd.DataFrame, sequence_length: int = 10, features=(
     return X_window, y_window
 
 
-# ---------------------------------------------------------------
-#                     Evaluation Metrics
-# ---------------------------------------------------------------
-
 def compute_r2(y_true, y_pred) -> float:
     """Computes the R² score between true and predicted values. Returns the R² score as a float."""
 
@@ -89,10 +64,6 @@ def compute_mae(y_true, y_pred) -> float:
 
     return float(np.mean(np.abs(np.array(y_true) - np.array(y_pred))))
 
-
-# ---------------------------------------------------------------
-#              Stability and Signal Diagnostics
-# ---------------------------------------------------------------
 
 def signal_stability(series, data_window: int = 20, variance_threshold: float = 0.001) -> bool:
     """Checks if the signal in the series is stable based on variance over a recent data window. Returns True if stable, False otherwise."""
@@ -117,10 +88,6 @@ def moving_average(series, data_window: int = 5):
     return np.convolve(series, np.ones(data_window) / data_window, mode="valid")
 
 
-# ---------------------------------------------------------------
-#                    Feature Engineering
-# ---------------------------------------------------------------
-
 def add_derived_features(data_frame: pd.DataFrame) -> pd.DataFrame:
     """Adds derived features such as differences and moving averages to the data-frame. Returns the augmented data-frame with new features."""
 
@@ -137,10 +104,6 @@ def add_derived_features(data_frame: pd.DataFrame) -> pd.DataFrame:
 
     return data_frame
 
-
-# ---------------------------------------------------------------
-#                       Dataset Actions
-# ---------------------------------------------------------------
 
 def anomaly_filter(data_frame: pd.DataFrame, columns, z_thresh: float = 3.0) -> pd.DataFrame:
     """Removes rows from the data-frame where the specified columns have outliers based on a Z-score threshold. Returns the cleaned data-frame."""

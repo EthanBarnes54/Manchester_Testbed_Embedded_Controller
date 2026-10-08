@@ -1,9 +1,3 @@
-"""The firmware's ADC sampling, compiled from main.cpp and run on the host against a fake ADS1115.
-
-The fake takes 8 ms per conversion like the real part at 128 SPS, can vanish from the bus,
-and flags any conversion restarted while one is still running.
-"""
-
 import re
 from pathlib import Path
 

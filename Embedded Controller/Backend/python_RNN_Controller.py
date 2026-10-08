@@ -1,19 +1,3 @@
-r"""
-# ----------------- RNN Auto controller ----------------- #
-
-#   Learns from diode voltage sequences to predict the next
-#   diode voltage conditioned on the 5 DAC outputs, so we can
-#   choose DAC targets that push the diode higher.
-
-# Due to issues with packagE imports, if this file isnt 
-# working run this in the terminal:
-
-# C:\YOUR FOLDER LOCATION\Manchester_Testbed_Embedded_Controller>python "C:\YOUR FOLDER LOCATION\Manchester_Testbed_Embedded_Controller\Embedded Controller (Automatic)\Backend\python_RNN_Controller.py"
-#python "C:\Users\b09335eb\Documents\Manchester_Testbed_Embedded_Controller\Embedded Controller (Automatic)\Backend\python_RNN_Controller.py"
-# ------------------------------------------------------- #
-
-"""
-
 
 
 import copy
@@ -50,10 +34,6 @@ __all__ = [
     "load_previous_weights",
 ]
 
-# -------------------------------------------------------
-#                 Variable Initialisation
-# -------------------------------------------------------
-
 DEVICE = torch.device("cpu")
 MODEL_BASENAME = "RNN_model"
 MODEL_DIR = Path(".")
@@ -75,10 +55,6 @@ ANALOG_VREF = 3.3
 _current_learning_rate = LEARNING_RATE
 _current_momentum = MOMENTUM
 
-# -------------------------------------------------------
-#                      Logging setup
-# -------------------------------------------------------
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -88,15 +64,6 @@ logging.basicConfig(
 log = logging.getLogger("RNN_Controller")
 
 
-# -------------------------------------------------------
-#                    Shared State Lock
-# -------------------------------------------------------
-
-# The module-level model, optimiser and scaler are reached from the online update
-# thread, the sweep thread, the auto controller and Dash workers at once. Without
-# this, one thread's optimiser step rewrites weights mid-way through another's
-# backward pass, and a scaler refit can land between a transform's mean and scale.
-# Re-entrant because train_model(save=True) calls save_nn_weights under it.
 MODEL_LOCK = threading.RLock()
 
 
@@ -110,10 +77,6 @@ def _holding_model_lock(function):
 
     return locked
 
-
-# -------------------------------------------------------
-#                    Model Architecture
-# -------------------------------------------------------
 
 
 class _RNN(nn.Module):
@@ -142,10 +105,6 @@ class _RNN(nn.Module):
         predictions = self.brain(model_output[:, -1, :])
         return predictions
 
-
-# -------------------------------------------------------
-#                   Model Initialisation
-# -------------------------------------------------------
 
 
 def _restore_scaler(scaler, scaler_state: dict) -> bool:
@@ -234,8 +193,7 @@ def save_nn_weights(model, scaler):
 
 
 def _make_optimiser(parameters, learning_rate: float | None = None):
-    """Creates a new optimiser instance based on the current learning rate and momentum settings. 
-    If 'learning_rate' is provided, it overrides the current learning rate for this optimiser instance only."""
+    """Creates a new optimiser instance based on the current learning rate and momentum settings."""
 
     learning_rate_value = _current_learning_rate if learning_rate is None else float(learning_rate)
     opt = str(OPTIMISER_TYPE).lower()
@@ -275,14 +233,8 @@ scaler = StandardScaler()
 # The model's inputs, in the order the scaler and the network see them.
 FEATURE_COLUMNS = [f"pin_{i}" for i in range(1, 6)] + ["voltage"]
 
-# The held-out scores the current weights earned when they were last trained, saved with
-# them in every checkpoint. Auto control will not drive the rig on a model without them
-# (python_Autonomy_Guard). Online updates move the weights afterwards; how many have is
-# counted so a stale score can be seen.
 VALIDATION = {}
 
-# What the current weights were trained on (dataset hash, firmware, backend revision), set
-# by the backend before training and saved alongside the weights.
 PROVENANCE = {}
 
 
@@ -328,8 +280,6 @@ def model_init(retrain: bool = False):
 
     model = _RNN(INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE, use_elu_head=True).to(DEVICE)
 
-    # Let the loader pick the newest checkpoint itself - timestamped saves count even
-    # when the plain RNN_model.pt is missing.
     if retrain or not load_previous_weights(model, scaler):
         log.info("Reset model weights. Please perform a retrain before operation...")
 
@@ -354,8 +304,6 @@ def set_learning_rate(learning_rate: float) -> float:
     learning_rate = max(MIN_LEARNING_RATE, min(MAX_LEARNING_RATE, learning_rate))
     _current_learning_rate = learning_rate
 
-    # Torch reads the rate back out of "lr" - writing anything else leaves the
-    # optimiser on its original rate while reporting the new one.
     for group in optimiser.param_groups:
         group["lr"] = learning_rate
 
@@ -425,10 +373,6 @@ def get_optimiser_type() -> str:
     return str(OPTIMISER_TYPE)
 
 
-# -------------------------------------------------------
-#                   Data Preparation
-# -------------------------------------------------------
-
 
 def _check_scaler_fitted():
     """Checks if the scaler has been fitted by verifying the presence of 'mean_' and 'scale_' attributes."""
@@ -436,8 +380,7 @@ def _check_scaler_fitted():
     return hasattr(scaler, "mean_") and hasattr(scaler, "scale_")
 
 def prepare_sequences(data_frame: pd.DataFrame, sequence_length: int = SEQUENCE_LENGTH, fit_scaler: bool = False):
-    """Prepares input sequences and target vectors from the provided DataFrame for model training or prediction. 
-    If 'fit_scaler' is True, it will fit the scaler to the data; otherwise, it will use the existing scaler for transformation."""
+    """Prepares input sequences and target vectors from the provided DataFrame for model training or prediction."""
 
     required_columns = [f"pin_{i}" for i in range(1, 6)] + ["voltage"]
     filtered_data_frame = data_frame.dropna(subset = required_columns).copy()
@@ -468,16 +411,9 @@ def prepare_sequences(data_frame: pd.DataFrame, sequence_length: int = SEQUENCE_
     return input_sequences, target_values
 
 
-# -------------------------------------------------------
-#                      Model Training
-# -------------------------------------------------------
-
 
 def _split_for_validation(data_frame: pd.DataFrame, validation_ratio: float):
-    """Holds back a chronological tail for scoring.
-
-    Returns (training_frame, validation_frame), with validation_frame set to None when
-    there is not enough data to spare a split worth measuring."""
+    """Holds back a chronological tail for scoring."""
 
     try:
         ratio = float(validation_ratio)
@@ -535,9 +471,7 @@ def _validation_metrics(validation_frame) -> dict:
 
 @_holding_model_lock
 def train_model(data_frame: pd.DataFrame, number_of_epochs: int = 10, grad_clip_threshold: float = 1.0, save: bool = False, validation_ratio: float = 0.2):
-    """Trains the RNN model on the provided DataFrame for a specified number of epochs. 
-    It prepares the data sequences, performs backpropagation, and optionally saves the model weights after training.
-    A chronological tail is held back so the returned metrics include held out scores alongside the training ones."""
+    """Trains the RNN model on the provided DataFrame for a specified number of epochs."""
 
     global model, optimiser
     model.train()
@@ -597,15 +531,10 @@ def train_model(data_frame: pd.DataFrame, number_of_epochs: int = 10, grad_clip_
     return metrics
 
 
-# -------------------------------------------------------
-#                    Model Prediction / Control
-# -------------------------------------------------------
-
 
 @_holding_model_lock
 def propose_control_vector(data_window: pd.DataFrame, output_mode: str = "volts", num_candidates: int = 64, change_penalty: float = 0.1):
-    """Given a recent window of data, proposes a control vector (DAC settings) that is predicted to increase the diode voltage, 
-    while penalizing large changes from the current state."""
+    """Proposes the setpoints predicted to raise the diode voltage, penalising large changes."""
 
     required_columns = [f"pin_{i}" for i in range(1, 6)] + ["voltage"]
     filtered_data_frame = data_window.dropna(subset=required_columns)
@@ -665,15 +594,10 @@ def propose_control_vector(data_window: pd.DataFrame, output_mode: str = "volts"
     return (best_pwm / PWM_MAX_VALUE) * ANALOG_VREF
 
 
-# -------------------------------------------------------
-#                    Online Updates
-# -------------------------------------------------------
-
 
 @_holding_model_lock
 def online_update(new_data_frame: pd.DataFrame, grad_clip_threshold: float = 1.0, save: bool = False):
-    """Performs an online update of the model using a new batch of data. It prepares the data sequences, 
-    performs a single optimisation step, and optionally saves the updated model weights."""
+    """Performs an online update of the model using a new batch of data."""
 
     if not _check_scaler_fitted():
         log.warning("WARNING: Scaler not fitted yet! Skipping online update until an initial training run completes...")
@@ -682,8 +606,6 @@ def online_update(new_data_frame: pd.DataFrame, grad_clip_threshold: float = 1.0
     
     model.train()
 
-    # Every exit hands back the same (updated, loss, r2) triple that the callers unpack -
-    # the old four value returns surfaced as an unpacking error rather than a clean skip.
     try:
         scaled_input_sequence, target_voltage = prepare_sequences(new_data_frame, fit_scaler=False)
 
@@ -742,15 +664,9 @@ def online_update(new_data_frame: pd.DataFrame, grad_clip_threshold: float = 1.0
     return True, float(mse_losses.item()), float(prediction_variance) if prediction_variance is not None else None
 
 
-# -------------------------------------------------------
-#               Feature Saliency (on demand)
-# -------------------------------------------------------
-
 
 def compute_feature_saliencies(data_frame: pd.DataFrame, max_samples: int = 50,num_permutations: int = 20):
-    """Computes feature saliencies using a permutation-based approach. The fucntion evaluates the contribution of each input 
-    feature to the model's predictions by randomly permuting feature values and measuring the impact on the predicted output. 
-    Returns a dictionary containing the base mean prediction and the importance scores for each feature."""
+    """Computes feature saliencies using a permutation-based approach."""
 
     required_columns = [f"pin_{i}" for i in range(1, 6)] 
     filtered_data_frame = data_frame.dropna(subset=required_columns).copy()
@@ -758,9 +674,6 @@ def compute_feature_saliencies(data_frame: pd.DataFrame, max_samples: int = 50,n
     if len(filtered_data_frame) <= SEQUENCE_LENGTH:
         raise ValueError("Insufficient data to compute saliencies.")
 
-    # Only the snapshot happens under the lock. The permutation run can take tens of
-    # seconds, and holding the lock that long would stall online updates and the auto
-    # controller, so it scores a private copy of the model instead.
     with MODEL_LOCK:
         if not _check_scaler_fitted():
             raise RuntimeError("Scaler not fitted. Train the model first...")
@@ -833,14 +746,9 @@ def compute_feature_saliencies(data_frame: pd.DataFrame, max_samples: int = 50,n
     return {"base_mean": base_mean, "feature_names": names, "importances": values,}
 
 
-# -------------------------------------------------------
-#                 Data Pipeline Integration
-# -------------------------------------------------------
-
 
 class RNNController:
-    """Acts as the Data Pipeline interface for the RNN model, managing data history, model predictions, and interactions with the pipeline.
-    Provides methods for processing incoming data chunks, generating predictions, and saving/loading model weights."""
+    """The RNN's data pipeline interface: history, predictions and pipeline hooks."""
 
     def __init__(
         self,
@@ -910,10 +818,7 @@ class RNNController:
         return predicted_outputs
 
     def step_features(self, pins_state: np.ndarray, pipeline_features: np.ndarray):
-        """Processes a single step of features by building the input vector and updating the data history.
-
-        Returns a prediction once the sequence window has filled, or None while it is
-        still warming up, which is what data_chunk tests for."""
+        """Processes a single step of features by building the input vector and updating the data history."""
 
         feature_vector = self.build_input_vector(pins_state, pipeline_features)
         self.data_history.append(feature_vector)
@@ -947,8 +852,7 @@ class RNNController:
         torch.save({"state_dict": self.model.state_dict()}, file_path)
 
     def load(self, path=None) -> bool:
-        """Attempts to load model weights from a checkpoint file. If 'path' is provided, it loads from that location; otherwise, 
-        uses the default model history location. Returns True if successful, False otherwise."""
+        """Attempts to load model weights from a checkpoint file."""
 
         file_path = path if path is not None else self.model_history_location
 

@@ -1,10 +1,3 @@
-"""The switch line's LEDC arithmetic, compiled from include/switch_timing.h and run on the host.
-
-The harness checks every whole period against an independent brute-force search, so a
-period is only ever reported exact when the hardware would really produce it, and only
-ever rejected when no whole divider exists.
-"""
-
 import re
 import shutil
 
@@ -123,15 +116,11 @@ def test_every_period_is_exact_or_rejected_never_rounded(harness, source_hz):
 
 @pytest.mark.req("SW-01")
 def test_ref_tick_covers_every_period_up_to_1024_us(harness):
-    # Half a cycle on the 1 MHz REF_TICK is period_us ticks, so the divider is just the
-    # odd part of the period, and every odd part up to 1023 fits.
     assert sweep(harness, REF_TICK_HZ)["first_rejected"] == "1025"
 
 
 @pytest.mark.req("SW-01")
 def test_apb_runs_out_of_divider_at_205_us(harness):
-    # 80 MHz carries a factor of 5 that has to go into the divider, so odd parts above
-    # 204 overflow 1023. This is why the switch is clocked from REF_TICK.
     assert sweep(harness, APB_HZ)["first_rejected"] == "205"
 
 
@@ -172,8 +161,6 @@ def test_known_settings(harness, period_us, source_hz, bits, divider):
     assert w["register"] == divider << 8
 
 
-# The last two use a source that does not tick in whole microseconds (a 32.768 kHz
-# crystal), where a period truncated to whole ticks would otherwise be passed off as exact.
 @pytest.mark.req("SW-02")
 @pytest.mark.parametrize("period_us, source_hz", [(0, REF_TICK_HZ), (1025, REF_TICK_HZ), (205, APB_HZ), (5, 0),
                                                   (1, 32_768), (1000, 32_768)])

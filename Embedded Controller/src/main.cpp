@@ -49,18 +49,8 @@ constexpr int CONE_1_PIN = 32;
 constexpr int CONE_2_PIN = 33;
 constexpr int SWITCH_LOGIC_PIN = 16;
 
-// Second input of the AND gate between GPIO 16 and the load, with a pull-down on the board.
-// GPIO 23 is not a strapping pin, and neither the bootloader nor the PSRAM probe touches
-// it, unlike GPIO 16 (the PSRAM chip-select on this chip).
 constexpr int SWITCH_ARMED_PIN = 23;
-
-// Toggled every loop pass for an external watchdog (for example a TPS3823) whose output
-// also enables the gate. If the loop stops, the gate closes within the watchdog's
-// timeout, without relying on this processor. Harmless with nothing fitted.
 constexpr int HEARTBEAT_PIN = 18;
-
-// The gate output looped back for output verification, when fitted (see below). An
-// input-only pin, untouched at boot.
 constexpr int GATE_LOOPBACK_PIN = 34;
 
 constexpr int CHANNEL_COUNT = 6;
@@ -74,17 +64,9 @@ constexpr int MAX_MODULATION_VALUE = (1 << MODULATION_RESOLUTION) - 1;
 constexpr int LED_CONTROL_CHANNELS[CONTROLLED_PULSE_CHANNELS] = {0, 1, 2, 3, 4};
 
 constexpr unsigned long MEASUREMENT_INTERVAL_MS = 50;
-
-// At the library's default 128 SPS a conversion takes 1/128 s, 7.8 ms nominal, and the
-// ADS1115's oscillator is good to about 10%, so nothing is polled for before 7 ms.
-// One not finished after the timeout is treated as lost: the ADC is absent or has
-// dropped off the bus.
 constexpr unsigned long ADC_FIRST_POLL_MS = 7;
 constexpr unsigned long ADC_CONVERSION_TIMEOUT_MS = 40;
 
-// Output verification (README, "Output verification"). Each check is compiled in but
-// stays off until its build flag says the hardware is fitted, so a bench without it
-// cannot raise false faults. The deploy environment turns both on.
 #ifndef TESTBED_GATE_LOOPBACK
 #define TESTBED_GATE_LOOPBACK 0
 #endif
@@ -96,16 +78,10 @@ constexpr unsigned long ADC_CONVERSION_TIMEOUT_MS = 40;
 constexpr bool GATE_LOOPBACK_FITTED = TESTBED_GATE_LOOPBACK != 0;
 constexpr bool SETPOINT_READBACK_FITTED = TESTBED_SETPOINT_READBACK != 0;
 
-// Gate loopback: the pulse counter counts rising edges on GATE_LOOPBACK_PIN. Its filter
-// drops anything shorter than 125 ns; a 1 us pulse is 80 APB cycles.
 constexpr pcnt_unit_t LOOPBACK_PCNT_UNIT = PCNT_UNIT_0;
+
 constexpr uint16_t LOOPBACK_FILTER_APB_CYCLES = 10;
 constexpr uint8_t GATE_MISMATCH_PASSES = 3;
-
-// Setpoint readback: ADS1115 AIN1-AIN3 read back setpoints 1-3 (squeeze_plate, ion_source,
-// wein_filter) through whatever network the board uses, scaled by READBACK_VOLTS_PER_VOLT.
-// cone_1 and cone_2 need a second ADS1115 (address 0x49) to be covered. A reading only
-// counts once the setpoint has had READBACK_SETTLE_MS to settle after a change.
 constexpr uint8_t READBACK_INPUTS = 3;
 constexpr uint8_t READBACK_SETPOINTS[READBACK_INPUTS] = {1, 2, 3};
 constexpr float READBACK_VOLTS_PER_VOLT = 1.0f;
@@ -113,51 +89,25 @@ constexpr float READBACK_TOLERANCE_V = 0.15f;
 constexpr unsigned long READBACK_SETTLE_MS = 500;
 constexpr uint8_t READBACK_MISMATCH_READINGS = 3;
 
-// A readback conversion only starts this soon after a diode conversion started, so even
-// one that times out has finished before the next diode conversion is due.
 constexpr unsigned long READBACK_START_WINDOW_MS = MEASUREMENT_INTERVAL_MS - ADC_CONVERSION_TIMEOUT_MS;
 
-// +/-4.096 V is the tightest ADS1115 range that still covers the 0-3.3 V diode signal,
-// giving 125 uV per count against 187.5 uV at the library's +/-6.144 V default.
 constexpr adsGain_t ADC_GAIN = GAIN_ONE;
 
-// Printed resolution has to sit below one ADC count or the serial link throws the
-// precision away. String(float) defaults to 2 places, which is 10 mV.
 constexpr unsigned int MEASURED_DECIMAL_PLACES = 5;
 constexpr unsigned long HEARTBEAT_INTERVAL_MS = 2000;
 constexpr int COMMAND_BUFFER_LIMIT = 256;
 
-// Replies are copied into this and sent from the UART driver's interrupt, so the loop
-// never waits on the link. The core's default is no buffer, only the 128-byte FIFO, and
-// the backend's keepalive replies (FAULTS and HEALTH together, about 450 characters)
-// would then hold a loop pass for over 20 ms. This holds the largest burst the protocol
-// can produce, about 1.5 KB (docs/timing-budget.md).
 constexpr size_t SERIAL_TX_BUFFER_BYTES = 2048;
 
-// Host silence tolerated before the outputs are dropped. The backend keepalive runs
-// well inside this, so only a genuinely dead host trips it.
 constexpr unsigned long COMMAND_TIMEOUT_MS = 5000;
 
-// Flash namespace for the fault log that survives resets (Preferences, at most 15 characters).
 constexpr const char* FAULT_LOG_NAMESPACE = "testbed_faults";
 
-// Continuous self-test budgets. A normal pass is about a millisecond plus the delay(1);
-// the longest legitimate one is a switch period change priming the LEDC (two periods,
-// 2 ms at 1 ms between edges). Twenty times that is a pass that has gone wrong.
 constexpr uint32_t LOOP_BUDGET_US = 20000;
 constexpr unsigned long HEALTH_CHECK_INTERVAL_MS = 1000;
 constexpr uint32_t HEAP_FLOOR_BYTES = 32768;
 constexpr uint32_t STACK_FLOOR_BYTES = 1024;
 
-// SWITCH_PERIOD_US is the time between edges, half a cycle. Up to SWITCH_HARDWARE_MAX_US
-// an LEDC channel generates the line with no CPU work per edge. Above it the timer
-// interrupt toggles the pin: edges are then at least 1 ms apart, so the cost is
-// negligible, but each edge can move by the interrupt latency (microseconds).
-//
-// 1 us between edges (a 500 kHz square wave) is the design floor, and the LEDC is exact
-// there: one counter bit, divider 1 on REF_TICK. It has not been scoped on hardware yet.
-// What the gate's load can follow is the real limit, and that load is still to be
-// decided (README, "Switch output stage").
 constexpr int SWITCH_PERIOD_MIN_US = 1;
 constexpr int SWITCH_PERIOD_MAX_US = 2000000;
 constexpr int SWITCH_HARDWARE_MAX_US = 1000;
@@ -165,10 +115,6 @@ constexpr int SWITCH_HARDWARE_MAX_US = 1000;
 constexpr uint32_t SWITCH_PIN_MASK = (1UL << SWITCH_LOGIC_PIN);
 constexpr uint32_t SWITCH_ARMED_PIN_MASK = (1UL << SWITCH_ARMED_PIN);
 
-// The Arduino core maps LEDC channel c to speed group c / 8 and timer (c / 2) % 4, so the
-// setpoints on channels 0-4 hold high-speed timers 0-2 and channel 6 has timer 3 to
-// itself. Changing the switch period therefore cannot move the setpoint PWM frequency.
-// Channel 5 would have shared cone_2's timer.
 constexpr int SWITCH_LEDC_CHANNEL = 6;
 
 constexpr int ledc_timer_of(int channel) {
@@ -188,30 +134,15 @@ constexpr ledc_timer_t SWITCH_LEDC_TIMER = static_cast<ledc_timer_t>((SWITCH_LED
 constexpr ledc_channel_t SWITCH_LEDC_HW_CHANNEL = static_cast<ledc_channel_t>(SWITCH_LEDC_CHANNEL);
 constexpr uint32_t SWITCH_LEDC_SIGNAL = LEDC_HS_SIG_OUT0_IDX + SWITCH_LEDC_CHANNEL;
 
-// REF_TICK is APB / 80 (APB_CTRL_PLL_TICK_NUM, default 79), a 1 MHz clock. On it every
-// whole period up to 1024 us has an exact whole divider, where APB itself runs out at
-// 205 us (switch_timing.h and tests/test_switch_timing.py).
-//
-// The CPU runs at 240 MHz (F_CPU from the esp32dev board definition) with APB at 80 MHz.
-// APB must stay there: CONFIG_PM_ENABLE is unset in this core's sdkconfig and power
-// management or frequency scaling must stay off, because changing APB would disturb
-// REF_TICK and the 1 us tick of the switch timer interrupt.
 constexpr uint32_t SWITCH_LEDC_CLOCK_HZ = REF_CLK_FREQ;
 
-// Slack on top of two cycles before a new LEDC setting is declared stuck.
 constexpr unsigned long SWITCH_LEDC_SETTLE_MARGIN_US = 100;
 
-// A production build (the esp32_deploy environment) never starts the radio: no Wi-Fi, no
-// OTA, nothing listening. Updates then go over the cable only.
 #ifndef TESTBED_PRODUCTION
 #define TESTBED_PRODUCTION 0
 #endif
 
 constexpr bool WIRELESS_ENABLED = TESTBED_PRODUCTION == 0;
-
-// WiFi/OTA configuration. Override these from platformio.ini build_flags rather than
-// editing them here, so site credentials never end up committed:
-//   -DTESTBED_WIFI_SSID='"YourNetwork"' -DTESTBED_OTA_PASSWORD='"YourOtaPassword"'
 
 #ifndef TESTBED_WIFI_SSID
 #define TESTBED_WIFI_SSID "YourSSID"
@@ -230,17 +161,13 @@ constexpr const char* WIFI_PASSWORD = TESTBED_WIFI_PASSWORD;
 constexpr const char* OTA_PASSWORD = TESTBED_OTA_PASSWORD;
 constexpr const char* OTA_HOSTNAME = "esp32dev";
 
-// Placeholder SSID shipped with the repo - WiFi stays down until this is replaced.
 constexpr const char* WIFI_SSID_PLACEHOLDER = "YourSSID";
 
 constexpr unsigned long WIFI_ASSOCIATE_TIMEOUT_MS = 15000;
 constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 30000;
 
-// The serial protocol's version. Bump it whenever a line's format or meaning changes: the
-// backend will not arm a board whose VERSION reports a different one.
 constexpr int PROTOCOL_VERSION = 2;
 
-// Stamped by tools/firmware_version.py from git and the PlatformIO environment.
 #ifndef TESTBED_FIRMWARE_VERSION
 #define TESTBED_FIRMWARE_VERSION "unknown"
 #endif
@@ -251,9 +178,7 @@ constexpr int PROTOCOL_VERSION = 2;
 
 }
 
-// Every line to the host goes through here and leaves with a CRC (line_protocol.h), so the
-// backend can tell a corrupted line from a real one. Only the debug LOG_ macros and the OTA
-// progress counter bypass it.
+
 void send_line(const String& line) {
   char suffix[line_protocol::CHECKSUM_LENGTH + 1];
   line_protocol::format_suffix(line_protocol::crc16(line.c_str(), line.length()), suffix);
@@ -263,28 +188,14 @@ void send_line(const String& line) {
 
 Adafruit_ADS1115 ads;
 
-// The switch line on GPIO 16, always in one of three modes:
-//   Held      - a fixed level on the plain GPIO output register. Off is held low.
-//   Hardware  - an LEDC channel generates the square wave, with no CPU work per edge.
-//   Interrupt - the timer interrupt toggles the pin, for periods above SWITCH_HARDWARE_MAX_US.
-// Every change passes through Held low, so the line is low whenever nothing is driving
-// it on purpose, including at boot and when the failsafe trips.
 class SwitchLine {
  public:
-  // GPIO 16 and ARMED float from reset until this runs, so setup() calls it before
-  // anything else. The output register is cleared before the outputs are enabled, so both
-  // pins go straight from floating to low.
   static void hold_low_at_boot() {
     GPIO.out_w1tc = SWITCH_PIN_MASK | SWITCH_ARMED_PIN_MASK;
     pinMode(SWITCH_LOGIC_PIN, OUTPUT);
     pinMode(SWITCH_ARMED_PIN, OUTPUT);
   }
 
-  // ARMED opens the external AND gate that passes GPIO 16 to the load. It is low from
-  // reset, held there by the board's pull-down until this firmware drives it, so nothing
-  // the chip does to GPIO 16 while booting can reach the load. The failsafe drops it as a
-  // second path to low, independent of GPIO 16. It never changes the switch mode, and
-  // nothing in the switch state machine touches it.
   static void set_armed(bool armed) {
     if (armed) {
       GPIO.out_w1ts = SWITCH_ARMED_PIN_MASK;
@@ -293,8 +204,6 @@ class SwitchLine {
     }
   }
 
-  // Needs the LEDC driver already up for the high-speed group, which the setpoint
-  // ledcSetup() calls do.
   void begin() {
     instance_ = this;
     configure_ledc();
@@ -302,11 +211,6 @@ class SwitchLine {
     hold(false);
   }
 
-  // Stops any automatic switching and holds the line at a fixed level. This is also the
-  // failsafe path, so it is ordered to be safe whatever was running: the level is set
-  // and the pin taken back onto the output register before either generator is stopped,
-  // so neither can reach the pin afterwards. A timer interrupt already pending when this
-  // runs finds the line Held and leaves it alone.
   void hold(bool high) {
     portENTER_CRITICAL(&mux_);
     mode_ = Mode::Held;
@@ -326,8 +230,6 @@ class SwitchLine {
     }
   }
 
-  // Switches with period_us between edges. On false the line is held low, or untouched
-  // if nothing had been changed yet.
   bool start(unsigned long period_us) {
     if (period_us <= static_cast<unsigned long>(SWITCH_HARDWARE_MAX_US)) {
       return start_hardware(period_us);
@@ -336,9 +238,6 @@ class SwitchLine {
     return start_interrupt(period_us);
   }
 
-  // What the line is doing, read consistently: switching or held, the held level, the
-  // period, and a generation that changes on every transition so a measurement spanning
-  // one can be thrown away.
   struct Snapshot {
     bool switching;
     bool held_high;
@@ -353,13 +252,10 @@ class SwitchLine {
     return snapshot;
   }
 
-  // Both generators came up in begin(). Checked by the power-on self-test.
-  bool generators_ready() const {
+ bool generators_ready() const {
     return ledc_ready_ && timer_ != nullptr;
   }
 
-  // switch_logic in PINS: the held level, or 1 while switching automatically. The CPU no
-  // longer sees individual edges, so 1 means "not held low".
   int reported_level() const {
     portENTER_CRITICAL(const_cast<portMUX_TYPE*>(&mux_));
     const int level = (mode_ != Mode::Held || held_high_) ? 1 : 0;
@@ -383,18 +279,13 @@ class SwitchLine {
 
   bool start_hardware(unsigned long period_us) {
     const switch_timing::LedcWaveform waveform = switch_timing::ledc_waveform_for(period_us, SWITCH_LEDC_CLOCK_HZ);
-
-    // Every period this path accepts is exact (tests/test_switch_timing.py sweeps the
-    // range), so a rejection here means the bounds were moved without the tests.
+    
     if (!ledc_ready_ || !waveform.exact) {
       return false;
     }
 
     hold(false);
-
-    // Everything is set up with the pin still on the output register. ledc_timer_set()
-    // writes the whole divider straight into the register, and reading it back confirms
-    // the hardware holds exactly what was asked for before any of it reaches the pin.
+    
     ledc_timer_set(SWITCH_LEDC_MODE, SWITCH_LEDC_TIMER, waveform.divider_register(), waveform.counter_bits, LEDC_REF_TICK);
     ledc_set_duty_with_hpoint(SWITCH_LEDC_MODE, SWITCH_LEDC_HW_CHANNEL, waveform.high_counts, 0);
     ledc_update_duty(SWITCH_LEDC_MODE, SWITCH_LEDC_HW_CHANNEL);
@@ -414,13 +305,6 @@ class SwitchLine {
     return true;
   }
 
-  // Restarts the timer at the top of a cycle and gives it the pin. The pin is routed while
-  // the count is held at zero and released by the next store, so the first high
-  // half-cycle is stretched by tens of nanoseconds at most. Going through the driver here
-  // put its argument checks and spinlock between the two, which at 1 us between edges is a
-  // large share of the first pulse. Kept out of line in IRAM, so a flash cache miss
-  // cannot land between the two stores either. Pause and reset sit at the same bits in
-  // every high-speed timer's conf register.
   static void NOINLINE_ATTR IRAM_ATTR hand_pin_to_ledc() {
     auto& conf = LEDC.timer_group[SWITCH_LEDC_MODE].timer[SWITCH_LEDC_TIMER].conf;
     const uint32_t held = conf.val | LEDC_HSTIMER0_PAUSE;
@@ -439,8 +323,6 @@ class SwitchLine {
 
     hold(false);
 
-    // The count restarts from zero, so the first edge comes one full period after the
-    // line went low however long the timer had been running.
     portENTER_CRITICAL(&mux_);
     interrupt_high_ = false;
     mode_ = Mode::Interrupt;
@@ -460,13 +342,8 @@ class SwitchLine {
     return conf.clock_divider == waveform.divider_register() && conf.duty_resolution == waveform.counter_bits &&
            conf.tick_sel == 0;
   }
-
-  // Runs the timer for one whole cycle while the pin is still on the output register.
-  // A channel only takes up a new duty and hpoint at the start of a cycle (ledc.h, on
-  // ledc_update_duty), so this makes the first cycle the pin sees use the new settings,
-  // and keeps the line low for at least that cycle on the way. Takes two periods: 10 us
-  // at the floor, 2 ms at SWITCH_HARDWARE_MAX_US, and only when a period is set.
-  static bool run_one_cycle_off_pin(unsigned long period_us) {
+    
+    static bool run_one_cycle_off_pin(unsigned long period_us) {
     const uint32_t overflow = BIT(SWITCH_LEDC_TIMER);
 
     ledc_timer_rst(SWITCH_LEDC_MODE, SWITCH_LEDC_TIMER);
@@ -532,9 +409,6 @@ class SwitchLine {
     }
   }
 
-  // Gives GPIO 16 to the plain output register or to the LEDC channel in one register
-  // write, so the pin never passes through a half-set routing. Output enable always comes
-  // from GPIO_ENABLE (oen_sel), which pinMode() set at boot.
   static void IRAM_ATTR route_pin(uint32_t signal) {
     GPIO.func_out_sel_cfg[SWITCH_LOGIC_PIN].val = signal | GPIO_FUNC0_OEN_SEL;
   }
@@ -588,8 +462,6 @@ class ChannelController {
     return true;
   }
 
-  // True when these TARGETS would drive any channel above zero. A line that does not
-  // parse is left for apply_target_voltages() to reject.
   static bool targets_would_energise(const String& args) {
     float targets[CONTROLLED_PULSE_CHANNELS];
 
@@ -606,7 +478,6 @@ class ChannelController {
     return false;
   }
 
-  // switch_logic is 0 or 1: the held level, or 1 while the line switches automatically.
   void report_channels() const {
     int snapshot[CHANNEL_COUNT];
     snapshot_values(snapshot, CHANNEL_COUNT);
@@ -636,7 +507,6 @@ class ChannelController {
     return switch_line_.snapshot();
   }
 
-  // Setpoint channel_number (1-5) as last written, and when it last changed.
   int setpoint_value(uint8_t channel_number) const {
     return channel_values_[channel_number - 1];
   }
@@ -645,15 +515,10 @@ class ChannelController {
     return setpoint_changed_ms_[channel_number - 1];
   }
 
-  // The external gate on the switch line. Opened only by SystemSupervisor on ARM, closed
-  // by engage_safe_state().
   void set_switch_armed(bool armed) {
     SwitchLine::set_armed(armed);
   }
 
-  // Drops every output back to zero and stops the switch line. Used when the host
-  // stops talking to us, so a latched target cannot outlive the controlling process.
-  // The gate closes first, which takes the switch off the load in one register write.
   void engage_safe_state() {
     set_switch_armed(false);
 
@@ -675,7 +540,6 @@ class ChannelController {
   }
 
  private:
-  // Setpoints only. The switch line keeps its own state.
   int channel_values_[CHANNEL_COUNT] = {0};
   unsigned long setpoint_changed_ms_[CONTROLLED_PULSE_CHANNELS] = {0};
   SwitchLine switch_line_;
@@ -753,8 +617,6 @@ class MeasurementService {
     return !lost_;
   }
 
-  // The ADC is absent, or its last conversion timed out. Cleared by the next conversion
-  // that completes, so an ADC that comes back is noticed without a reset.
   bool lost() const {
     return lost_;
   }
@@ -767,8 +629,6 @@ class MeasurementService {
     return timeouts_;
   }
 
-  // Setpoint readback (when fitted): the latest reading on ADS1115 input 1-3 and when it
-  // was taken, or 0 if there has not been one yet.
   float readback_volts(uint8_t input) const {
     return readback_volts_[input];
   }
@@ -777,28 +637,15 @@ class MeasurementService {
     return readback_ms_[input];
   }
 
-  // Single formatter for every MEASURED line, so the streamed and on-demand readings
-  // always carry the same precision. seq counts readings from 1 at boot, so the host can
-  // see one go missing or the board restart; t_ms is the board's clock when it was taken.
   void report_voltage(float volts) {
     ++sequence_;
     send_line(String("MEASURED ") + String(volts, MEASURED_DECIMAL_PLACES) + " V seq=" + sequence_ + " t_ms=" + millis());
   }
 
-  // READ is answered by the next conversion to complete. One already in flight is never
-  // restarted, so a READ cannot corrupt it; with the ADC idle a conversion starts at once.
   void request_reading() {
     reading_requested_ = true;
   }
-
-  // Starts a conversion when one is due and collects it once the ADC reports it done, so
-  // the loop never waits on one. The library's readADC_SingleEnded() polls until the ADC
-  // answers, and with the ADC missing or off the bus it never returns, which used to stop
-  // the loop and the failsafe with it.
-  //
-  // The diode on AIN0 keeps its 50 ms schedule. With setpoint readback fitted, one readback
-  // conversion (AIN1-AIN3 in turn) fits in the gap after each diode conversion, so each
-  // setpoint is read about every 150 ms and the diode stream is never delayed.
+  
   void update(unsigned long now_ms) {
     if (!converting_) {
       if (reading_requested_ || now_ms - diode_started_ms_ >= MEASUREMENT_INTERVAL_MS) {
@@ -841,7 +688,6 @@ class MeasurementService {
     if (elapsed_ms >= ADC_CONVERSION_TIMEOUT_MS) {
       converting_ = false;
 
-      // Once per outage rather than at 20 Hz, but always in answer to a READ.
       if (!fault_reported_ || reading_requested_) {
         send_line("ERROR: ADC conversion timed out!");
       }
@@ -878,8 +724,6 @@ class MeasurementService {
   }
 };
 
-// Blinks are scheduled rather than slept through - update() plays them out from loop(),
-// so an LED pattern can never hold up serial commands, sampling or the failsafe.
 class LedIndicator {
  public:
   explicit LedIndicator(int pin) : pin_(pin) {}
@@ -893,7 +737,6 @@ class LedIndicator {
     if (now_ms - last_heartbeat_ms_ > HEARTBEAT_INTERVAL_MS) {
       last_heartbeat_ms_ = now_ms;
 
-      // A command or error pattern already in flight takes precedence over the beat.
       if (!busy()) {
         start_pattern(1, HEARTBEAT_FLASH_MS, 0, now_ms);
       }
@@ -909,7 +752,6 @@ class LedIndicator {
   }
 
   void update(unsigned long now_ms) {
-    // Loops so a zero-length phase is skipped in the same call rather than costing a pass.
     while (phases_remaining_ > 0) {
       if (now_ms - phase_started_ms_ < current_phase_ms()) {
         return;
@@ -921,7 +763,6 @@ class LedIndicator {
     }
   }
 
-  // Ends the steady boot light, but leaves any pattern already scheduled to finish.
   void set_low() {
     if (!busy()) {
       digitalWrite(pin_, LOW);
@@ -938,7 +779,6 @@ class LedIndicator {
   int pin_;
   unsigned long last_heartbeat_ms_ = 0;
 
-  // A pattern is 2 * flashes phases counted down to zero: even counts are lit, odd are dark.
   unsigned int phases_remaining_ = 0;
   unsigned long phase_started_ms_ = 0;
   unsigned long on_ms_ = 0;
@@ -967,8 +807,6 @@ class LedIndicator {
 
 class OtaWifiService {
  public:
-  // The radio is driven entirely from loop() - nothing here is allowed to block,
-  // because serial commands and ADC sampling share the same thread.
   void begin(const char* ssid, const char* password, const char* hostname) {
     ssid_ = ssid;
     password_ = password;
@@ -989,9 +827,6 @@ class OtaWifiService {
 
     ArduinoOTA.setHostname(hostname);
 
-    // An upload holds the loop for its whole length without feeding the loop watchdog,
-    // so the watchdog stands down for it. Uploads are only serviced while disarmed (see
-    // loop()), so nothing is live while the loop is held.
     ArduinoOTA.onStart([]() {
       disableLoopWDT();
       send_line("OTA connection starting...");
@@ -1024,9 +859,6 @@ class OtaWifiService {
     start_association();
   }
 
-  // updates_allowed is false while the board is armed: an OTA upload blocks the loop, and
-  // with it the failsafe, for as long as it runs, so one is never accepted with outputs
-  // live. The client is simply not answered and times out.
   void loop(bool updates_allowed) {
     switch (link_state_) {
       case LinkState::Disabled:
@@ -1079,7 +911,6 @@ class OtaWifiService {
     return ssid_ != nullptr && strlen(ssid_) > 0 && strcmp(ssid_, WIFI_SSID_PLACEHOLDER) != 0;
   }
 
-  // Kicks off association and returns straight away - WiFi.begin() does not block.
   void start_association() {
     WiFi.begin(ssid_, password_);
     link_state_ = LinkState::Associating;
@@ -1100,7 +931,6 @@ class OtaWifiService {
     send_line(String("WiFi connected, IP address: ") + WiFi.localIP().toString());
   }
 
-  // Drops OTA on the way down so the next association rebinds against the new address.
   void enter_waiting_state(const char* reason) {
     if (ota_started_) {
       ArduinoOTA.end();
@@ -1113,10 +943,6 @@ class OtaWifiService {
   }
 };
 
-// Checks the outputs against what was commanded, through hardware fitted for it (README,
-// "Output verification"): the gate output looped back to GATE_LOOPBACK_PIN and counted by
-// the pulse counter, and three setpoints read back on the ADS1115's spare inputs. Each
-// part does nothing unless its build flag says the hardware is there.
 class OutputVerifier {
  public:
   OutputVerifier(ChannelController& channels, MeasurementService& measurement)
@@ -1150,7 +976,6 @@ class OutputVerifier {
     window_started_us_ = micros();
   }
 
-  // Once per loop pass.
   void check(bool armed) {
     if (GATE_LOOPBACK_FITTED) {
       check_gate(armed);
@@ -1161,7 +986,6 @@ class OutputVerifier {
     }
   }
 
-  // The gate output disagrees with ARMED and the switch, or the loopback counter would not start.
   bool gate_fault() const {
     return GATE_LOOPBACK_FITTED && (!counter_ready_ || gate_level_check_.tripped() || stray_edges_);
   }
@@ -1210,8 +1034,6 @@ class OutputVerifier {
   bool window_armed_ = false;
   uint32_t last_window_edges_ = 0;
 
-  // Level every pass (debounced); edges over a window long enough to see about four
-  // cycles. A window that spans a switch or arming transition is thrown away.
   void check_gate(bool armed) {
     const SwitchLine::Snapshot line = channels_.switch_snapshot();
     const output_checks::GateExpectation expected = output_checks::expected_gate(armed, line.switching, line.held_high);
@@ -1249,15 +1071,11 @@ class OutputVerifier {
       frequency_wrong_ = !output_checks::edge_count_plausible(
           last_window_edges_, output_checks::expected_rising_edges(elapsed_us, line.period_us));
     } else {
-      // A closed gate or a held level passes no edges at all.
       stray_edges_ = last_window_edges_ > 0;
       frequency_wrong_ = false;
     }
   }
 
-  // Each fresh reading taken at least READBACK_SETTLE_MS after its setpoint last changed is
-  // compared with what that setpoint was commanded to. The difference is taken signed, so
-  // a reading from before the change is skipped rather than wrapping round.
   void check_readback() {
     for (uint8_t index = 0; index < READBACK_INPUTS; ++index) {
       const uint8_t input = index + 1;
@@ -1281,17 +1099,11 @@ class OutputVerifier {
   }
 };
 
-// Owns the safety state and everything it drives: the gate (ARMED), the external
-// watchdog heartbeat, the fault log in flash and the FAULTS report. Every change of mode
-// goes through here, so the outputs and the reported mode cannot disagree.
 class SystemSupervisor {
  public:
   SystemSupervisor(ChannelController& channels, MeasurementService& measurement, OutputVerifier& outputs)
       : channels_(channels), measurement_(measurement), outputs_(outputs), loop_timing_(LOOP_BUDGET_US) {}
 
-  // Loads the fault history kept in flash, counts the boot and records why the chip
-  // last reset. A watchdog, panic or brownout reset is a critical fault: the board comes
-  // up in Fault and will not arm until the operator has cleared it.
   void begin() {
     pinMode(HEARTBEAT_PIN, OUTPUT);
     digitalWrite(HEARTBEAT_PIN, LOW);
@@ -1321,13 +1133,9 @@ class SystemSupervisor {
 
     persist_history();
 
-    // Power-on self-test. Anything critical leaves the board in FAULT, so it cannot arm.
     self_test();
   }
 
-  // The power-on self-test, and SELFTEST on demand. Checks what the outputs depend on:
-  // the clocks the switch timing assumes, both switch generators, the ADC and memory.
-  // Raises or resolves the matching faults and reports one SELFTEST line.
   void self_test() {
     const bool clocks_ok = clocks_as_designed();
     const bool switch_ok = channels_.switch_generators_ready();
@@ -1340,7 +1148,6 @@ class SystemSupervisor {
     set_fault(safety::Fault::LowMemory, !memory_ok);
     report_output_faults();
 
-    // Output verification counts as passing when its hardware is not fitted ("off").
     const bool outputs_ok = strcmp(outputs_.gate_verdict(), "FAIL") != 0 && strcmp(outputs_.readback_verdict(), "FAIL") != 0;
     const bool pass = clocks_ok && switch_ok && adc_ok && memory_ok && outputs_ok;
     send_line(String("SELFTEST ") + (pass ? "PASS" : "FAIL") + " clocks=" + verdict(clocks_ok) +
@@ -1349,9 +1156,6 @@ class SystemSupervisor {
                    " mode=" + safety::name_of(state_.mode()));
   }
 
-  // Continuous self-test, once per loop pass with that pass's duration. The ADC is
-  // checked every pass so a lost one is reported promptly; memory and overruns once a
-  // second, so a run of slow passes raises one fault rather than one per pass.
   void monitor(unsigned long now_ms, uint32_t pass_us) {
     loop_timing_.record(pass_us);
     set_fault(safety::Fault::AdcLost, measurement_.lost());
@@ -1385,9 +1189,6 @@ class SystemSupervisor {
     resolve(safety::Fault::BadChecksum);
   }
 
-  // One line with everything needed to tell whether the board is keeping up: the worst
-  // loop pass since the last report and since boot against its budget, memory headroom,
-  // the ADC and the serial link.
   void report_health() {
     String line = String("HEALTH mode=") + safety::name_of(state_.mode());
     line += String(" uptime_ms=") + millis();
@@ -1413,14 +1214,10 @@ class SystemSupervisor {
     return state_.armed();
   }
 
-  // The checks that say this firmware image brought its own peripherals up. A missing
-  // ADC or verification hardware is not the image's fault, so it does not count here.
   bool image_checks_passed() const {
     return (state_.active() & (safety::bit_of(safety::Fault::ClockConfig) | safety::bit_of(safety::Fault::SwitchGenerator))) == 0;
   }
 
-  // ARM opens the gate. The outputs are zero whenever the board is not armed, so the gate
-  // always opens onto a held-low switch line and zero setpoints.
   void arm() {
     const char* refusal = state_.arm_refusal();
 
@@ -1439,13 +1236,11 @@ class SystemSupervisor {
     send_line("ACK DISARM");
   }
 
-  // Zeroes every output and closes the gate, whatever the mode.
   void make_safe() {
     state_.disarm();
     channels_.engage_safe_state();
   }
 
-  // A fault condition present now. Reported once at its onset; a critical one disarms.
   void raise(safety::Fault fault) {
     const bool onset = (state_.active() & safety::bit_of(fault)) == 0;
 
@@ -1495,7 +1290,6 @@ class SystemSupervisor {
     send_line(line);
   }
 
-  // Called once per loop pass, so the heartbeat stops if the loop does.
   void heartbeat() {
     heartbeat_high_ = !heartbeat_high_;
     digitalWrite(HEARTBEAT_PIN, heartbeat_high_ ? HIGH : LOW);
@@ -1519,8 +1313,6 @@ class SystemSupervisor {
   esp_reset_reason_t reset_reason_ = ESP_RST_UNKNOWN;
   bool heartbeat_high_ = false;
 
-  // The output checks' verdicts as faults. All three are critical: an output that is not
-  // doing what it was told disarms the board.
   void report_output_faults() {
     set_fault(safety::Fault::GateMismatch, outputs_.gate_fault());
     set_fault(safety::Fault::SwitchFrequency, outputs_.frequency_fault());
@@ -1541,8 +1333,6 @@ class SystemSupervisor {
     return getApbFrequency() == APB_CLK_FREQ && ref_tick_divider + 1 == APB_CLK_FREQ / SWITCH_LEDC_CLOCK_HZ;
   }
 
-  // Free heap now, and the loop task's stack at its deepest so far (that one cannot recover,
-  // so a stack that once came close stays reported).
   static bool memory_above_floor() {
     return ESP.getFreeHeap() >= HEAP_FLOOR_BYTES && uxTaskGetStackHighWaterMark(nullptr) >= STACK_FLOOR_BYTES;
   }
@@ -1551,8 +1341,6 @@ class SystemSupervisor {
     return ok ? "ok" : "FAIL";
   }
 
-  // Flash is only written when the history gains a fault, so at most once per fault type
-  // between CLEAR LOGs, never at loop rate.
   void persist_history() {
     if (!log_ready_ || state_.history() == persisted_history_) {
       return;
@@ -1663,8 +1451,6 @@ class CommandProcessor {
   unsigned long last_command_ms_ = 0;
   bool command_seen_ = false;
 
-  // Which firmware this is, which protocol it speaks, and which verification hardware the
-  // build expects. The backend checks protocol= before it will arm the board.
   static void report_version() {
     send_line(String("VERSION firmware=") + TESTBED_FIRMWARE_VERSION + " protocol=" + PROTOCOL_VERSION +
               " build=" + TESTBED_BUILD_ENV + " gate_loopback=" + (GATE_LOOPBACK_FITTED ? 1 : 0) +
@@ -1688,8 +1474,6 @@ class CommandProcessor {
   void handle_command(String command) {
     command.trim();
 
-    // A line whose CRC does not match is refused whole and does not count as the host
-    // being alive: a link that only delivers garbage must still trip the failsafe.
     size_t body_length = 0;
 
     if (line_protocol::verify(command.c_str(), command.length(), &body_length) == line_protocol::Check::Invalid) {
@@ -1708,8 +1492,6 @@ class CommandProcessor {
     last_command_ms_ = millis();
     command_seen_ = true;
 
-    // Commands that would drive an output are refused unless the board is armed; ones that
-    // set an output to zero are always accepted.
     if (command.equalsIgnoreCase("PING")) {
       send_line("OK");
     } else if (command.equalsIgnoreCase("VERSION")) {
@@ -1823,16 +1605,10 @@ CommandProcessor command_processor(channels, measurement_service, led_indicator,
 
 bool failsafe_engaged = false;
 
-// The core asks this before marking a freshly updated image as good (esp32-hal-misc.c).
-// Saying "later" leaves the image pending until setup() has run the power-on self-test.
 bool verifyRollbackLater() {
   return true;
 }
 
-// After an OTA update the bootloader runs the new image once, pending verification. It is
-// kept only if its self-test shows it brought up its own clocks and switch generators;
-// otherwise the bootloader goes back to the previous image. An image flashed over the
-// cable is never pending, so this does nothing then.
 void confirm_or_roll_back_image() {
   const esp_partition_t* running = esp_ota_get_running_partition();
   esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
@@ -1851,9 +1627,6 @@ void confirm_or_roll_back_image() {
   }
 }
 
-// Once the host has spoken to us it is expected to keep doing so. If it goes quiet the
-// board disarms, otherwise a set of targets would stay latched on the rig for as long as
-// it has power. The host coming back does not re-arm it: that takes an explicit ARM.
 void enforce_command_timeout(unsigned long now_ms) {
   if (!command_processor.has_received_command()) {
     return;
@@ -1897,8 +1670,6 @@ void setup() {
   channels.begin();
   output_verifier.begin();
 
-  // Records the reset and runs the power-on self-test, so after the ADC, the switch
-  // generators and the output checks have been brought up.
   supervisor.begin();
   confirm_or_roll_back_image();
 
@@ -1906,9 +1677,6 @@ void setup() {
     ota_wifi_service.begin(WIFI_SSID, WIFI_PASSWORD, OTA_HOSTNAME);
   }
 
-  // The board comes up Safe, with the gate closed, and stays that way until an ARM.
-  // From here a loop that stops for 5 s resets the chip, which records the reset as a
-  // fault and brings the board back up Safe.
   enableLoopWDT();
 
   LOG_INFO("Setup complete. Awaiting commands...");

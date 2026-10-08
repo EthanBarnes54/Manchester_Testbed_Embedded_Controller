@@ -1,5 +1,3 @@
-"""Test doubles and data shared across the suite."""
-
 import binascii
 import queue
 import threading
@@ -16,13 +14,7 @@ def crc_suffix(text):
 
 
 class FakePort:
-    """Plays the board's side of the serial link, speaking protocol 2 like the firmware.
-
-    Serves queued lines with a CRC appended, falls back to a steady numbered MEASURED
-    stream while streaming is on, and answers VERSION and the safety and health commands
-    the way the firmware does. Everything written is recorded twice: the command text as the
-    firmware would act on it, and the raw line with whether its CRC checked out. Lines put
-    with put_raw() are served exactly as given, to play a corrupted or old-firmware board."""
+    """Plays the board's side of the serial link, speaking protocol 2 like the firmware."""
 
     def __init__(self):
         self.lines = queue.Queue()
@@ -146,10 +138,7 @@ def wait_for(condition, timeout=5.0, interval=0.02):
 
 
 def sweep_shaped_frame(holds=40, samples_per_hold=8, seed=0):
-    """Synthetic diode data with each pin vector held for several samples.
-
-    Independently varying pins make the next voltage unpredictable, so any model result
-    on that kind of data is meaningless. Holding settings is what a real sweep does."""
+    """Synthetic diode data with each pin vector held for several samples."""
 
     rng = np.random.default_rng(seed)
     rows, timestamp = [], 0.0

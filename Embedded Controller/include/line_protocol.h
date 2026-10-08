@@ -3,13 +3,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// Framing for every line on the serial link, in both directions: the text, then '*' and a
-// CRC-16 of the text as four upper-case hex digits, for example "PING*5A7C". The CRC is
-// CRC-16/CCITT-FALSE (polynomial 0x1021, initial value 0xFFFF; the check value for
-// "123456789" is 0x29B1). Unlike NMEA's XOR it catches every burst error up to 16 bits and
-// every odd number of flipped bits. Pure logic with no Arduino dependency, so the host
-// tests compile this exact file; the backend computes the same CRC with binascii.crc_hqx.
-
 namespace line_protocol {
 
 constexpr size_t CHECKSUM_LENGTH = 5;  // "*XXXX"
@@ -42,9 +35,6 @@ inline void format_suffix(uint16_t crc, char* suffix) {
 
 enum class Check : uint8_t { Absent, Valid, Invalid };
 
-// Looks for a "*XXXX" suffix. With one, body_length is set to the length of the text before
-// it and the result says whether the CRC matches. Without one, the whole line is the body:
-// lines typed by hand at a terminal carry no checksum.
 inline Check verify(const char* line, size_t length, size_t* body_length) {
   *body_length = length;
 

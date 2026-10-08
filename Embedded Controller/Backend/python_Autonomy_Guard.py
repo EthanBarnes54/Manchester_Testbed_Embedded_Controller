@@ -21,10 +21,7 @@ class ControlEnvelope:
 
 @dataclass
 class Review:
-    """What the guard decided about one proposal.
-
-    action is "accept" (sent as proposed), "limit" (sent after clipping) or "reject" (nothing
-    sent). targets is what to send, or None to hold what is on the rig."""
+    """What the guard decided about one proposal."""
 
     action: str
     targets: list | None

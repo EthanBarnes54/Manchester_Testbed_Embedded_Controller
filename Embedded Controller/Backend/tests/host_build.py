@@ -1,13 +1,3 @@
-"""Builds and runs the host harnesses that test firmware code on the PC.
-
-Every harness goes through here, so they all get the same strict warnings and, where the
-toolchain has them, the same sanitizers: AddressSanitizer and UndefinedBehaviorSanitizer
-with their runtime where it exists (Linux, so CI), or UndefinedBehaviorSanitizer in trap
-mode, which needs no runtime (MinGW). A trap shows up as the harness crashing rather than
-as a report. TESTBED_HOST_SANITIZE=0 turns them off, to tell a sanitizer finding apart
-from an ordinary failed check.
-"""
-
 import functools
 import os
 import shutil
@@ -63,10 +53,7 @@ def sanitizer_flags() -> tuple:
 def compile_harness(source_text: str, work_dir: Path, name: str, *, std: str = "gnu++11", defines: dict | None = None,
                     include_dirs: tuple = (), optimise: bool = False,
                     warnings_as_errors: bool = True) -> tuple[subprocess.CompletedProcess, Path]:
-    """Compiles one harness. include_dirs are searched before include/, so a mutated copy of
-    a header there shadows the real one. warnings_as_errors=False is for the mutation tests,
-    whose deliberately broken code often draws a warning but must still be judged by whether
-    the checks notice. Returns the compiler's result and the binary path."""
+    """Compiles one harness."""
 
     source, binary = work_dir / f"{name}.cpp", work_dir / name
     source.write_text(source_text, encoding="utf-8")

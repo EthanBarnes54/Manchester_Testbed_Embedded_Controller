@@ -1,10 +1,3 @@
-"""The soak test: the board left running for TESTBED_SOAK_MINUTES, watched throughout.
-
-Disarmed by default. With TESTBED_HIL_ALLOW_ARM=1 and TESTBED_SOAK_SWITCH_US set, the board
-is armed and switching at that period for the whole run, which is the harder case for
-the loop budget and the output verification.
-"""
-
 import os
 import time
 

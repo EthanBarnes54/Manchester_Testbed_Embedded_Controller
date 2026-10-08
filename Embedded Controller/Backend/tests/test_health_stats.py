@@ -1,5 +1,3 @@
-"""The firmware's loop-timing statistics, compiled from include/health_stats.h and run on the host."""
-
 import pytest
 
 from host_build import build_and_run, needs_compiler

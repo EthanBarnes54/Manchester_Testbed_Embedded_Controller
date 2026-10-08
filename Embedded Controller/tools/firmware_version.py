@@ -1,9 +1,3 @@
-"""Stamps the firmware with the git revision it was built from and its PlatformIO environment.
-
-Runs as a PlatformIO post-script on the project's own sources only, so a new revision does
-not force the framework to rebuild. VERSION reports both on the serial link.
-"""
-
 import subprocess
 
 Import("projenv")  # noqa: F821 - provided by PlatformIO

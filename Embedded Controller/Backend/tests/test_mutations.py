@@ -1,17 +1,3 @@
-"""Mutation tests: each case breaks one safety check on purpose and expects the suite to fail.
-
-A test that still passes with the check it guards removed proves nothing, so every case
-here is a small, realistic slip (a condition dropped, an order swapped, a constant moved)
-in the firmware, a header or the backend, paired with the tests that must catch it.
-
-Firmware and header cases rebuild the affected harness from the mutated source in memory.
-Backend cases copy the project to a scratch directory, apply the change there and run the
-named tests in a fresh interpreter. A case whose anchor text no longer appears exactly once
-fails, so the list cannot rot silently as the code changes.
-
-Slow (a few minutes), so excluded from the default run: python -m pytest -m mutation
-"""
-
 import inspect
 import itertools
 import shutil
@@ -42,8 +28,7 @@ def mutate(text, old, new):
 
 
 def harness_fails(source, work, name, **options):
-    """Whether a self-checking harness built from mutated source fails. A mutant that does
-    not compile is a broken case, not a caught one."""
+    """Whether a self-checking harness built from mutated source fails."""
 
     built, binary = compile_harness(source, work, name, warnings_as_errors=False, **options)
     assert built.returncode == 0, f"the mutant does not compile, so it proves nothing:\n{built.stderr[-1500:]}"
@@ -68,8 +53,7 @@ def expand(function):
 
 
 def failing_tests(module, fixtures):
-    """Runs every test function in a module that needs only the given fixtures, and returns
-    the names of those that fail."""
+    """Runs each test in a module that needs only the given fixtures; returns the names that fail."""
 
     failed = []
 
@@ -94,10 +78,6 @@ def failing_tests(module, fixtures):
     return failed
 
 
-# ----------------------------------------------------------------------------
-#                    Firmware: main.cpp, through the harnesses
-# ----------------------------------------------------------------------------
-
 def switch_line_fails(source, work):
     return harness_fails(test_switch_line.harness_source(source), work, "switch_line")
 
@@ -113,8 +93,7 @@ def output_verifier_fails(source, work):
 
 
 def contract_fails(source, work, monkeypatch):
-    """The text checks on main.cpp, in the contract and security tests. The host harnesses
-    in those modules are left to their own cases."""
+    """The text checks on main.cpp, in the contract and security tests."""
 
     failed = []
 
@@ -218,10 +197,6 @@ def test_the_unmutated_firmware_passes_every_check_used_above(tmp_path, monkeypa
     assert not contract_fails(source, tmp_path, monkeypatch)
 
 
-# ----------------------------------------------------------------------------
-#                         Firmware: the shared headers
-# ----------------------------------------------------------------------------
-
 def self_checking(module, name):
     def fails(include_dir, work):
         return harness_fails(module.HARNESS, work, name, include_dirs=(include_dir,))
@@ -289,10 +264,6 @@ def test_the_unmutated_headers_pass_every_check_used_above(tmp_path):
     for fails in {case[2] for case in HEADER_CASES}:
         assert not fails(INCLUDE_DIR, tmp_path)
 
-
-# ----------------------------------------------------------------------------
-#               Backend, dashboard and tools: in a scratch copy
-# ----------------------------------------------------------------------------
 
 BACKEND_CASES = [
     # The link

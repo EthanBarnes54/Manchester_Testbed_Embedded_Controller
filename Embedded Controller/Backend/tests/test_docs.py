@@ -1,10 +1,3 @@
-"""The documents in docs/ agree with the code they describe.
-
-Each check reads both sides, so a command added to the firmware without a line in the
-protocol document, a hazard that names a requirement that does not exist, or a procedure
-step that names a rig test that was renamed, fails here rather than misleading someone at
-the rig."""
-
 import ast
 import re
 from pathlib import Path
@@ -91,8 +84,6 @@ def test_every_procedure_step_names_the_requirements_it_verifies():
         assert verifies, step.splitlines()[0]
         ids = set(re.findall(r"[A-Z]+-\d{2}", verifies.group(1)))
         assert ids and ids <= REQUIREMENT_IDS, step.splitlines()[0]
-        # Each requirement it verifies names this step, and each requirement that names this
-        # step is one it verifies.
         number = step.split()[0]
         for identifier in ids:
             row = re.search(rf"^\| {identifier} \|.*$", REQUIREMENTS, re.M).group(0)

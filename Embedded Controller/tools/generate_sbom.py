@@ -1,13 +1,3 @@
-"""Writes a software bill of materials for the whole stack as CycloneDX 1.5 JSON.
-
-It lists exactly what the project pins: the Python packages in Backend/requirements*.txt,
-and the PlatformIO platform and libraries in platformio.ini, plus the Arduino core the
-platform installed when one is present. Every entry is a pin the project already declares,
-so the SBOM can never list something the build does not use.
-
-    python tools/generate_sbom.py [output.json]      # default: sbom.cdx.json
-"""
-
 from datetime import datetime, timezone
 import json
 from pathlib import Path

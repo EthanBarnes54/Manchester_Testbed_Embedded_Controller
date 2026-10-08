@@ -1,5 +1,3 @@
-"""The output verification judgements, compiled from include/output_checks.h and run on the host."""
-
 import pytest
 
 from host_build import build_and_run, needs_compiler

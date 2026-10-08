@@ -1,10 +1,3 @@
-"""A minimal client for the board's serial protocol, for the hardware-in-the-loop tests.
-
-Deliberately independent of python_Backend: it frames and checks lines from the protocol
-definition (CRC-16/CCITT-FALSE, "*XXXX"), so the tests check the board against the
-protocol rather than against the backend's reading of it.
-"""
-
 import binascii
 import contextlib
 import re
@@ -47,8 +40,7 @@ class Received:
 
 
 class Rig:
-    """One open connection to the board. Every line it sends is recorded with the time it
-    was sent; every line received is kept with the time it arrived and its CRC verdict."""
+    """One open connection to the board."""
 
     def __init__(self, port: str, reset: bool = True):
         if port == "sim":
@@ -138,8 +130,7 @@ class Rig:
             return [line for line in self.received[since:] if line.text.startswith(prefix)]
 
     def command(self, text: str, replies: tuple, timeout: float = 1.0, framed: bool = True) -> str:
-        """Sends a command and returns the first reply starting with one of replies, or an
-        ERROR that answers it. Fails if nothing answers within the timeout."""
+        """Sends a command and returns the first reply starting with one of replies, or an ERROR that answers it."""
 
         since = self.mark()
         self.send(text, framed=framed)
@@ -179,8 +170,7 @@ class Rig:
     # ------------------------------------------------------------- control
 
     def reset(self, timeout: float = 15.0):
-        """Resets the board through the USB bridge's RTS line (wired to EN on ESP32 dev
-        boards, as esptool uses it) and waits until it answers."""
+        """Resets the board through the USB bridge's RTS line, as esptool does, and waits until it answers."""
 
         self.serial.dtr = False
         self.serial.rts = True

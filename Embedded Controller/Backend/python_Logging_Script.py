@@ -1,22 +1,9 @@
 
-"""
-#----------- Data logger for ESP32 serial instrument. -------------#
-
-#   Python module which reads measurement data from the backend queue, 
-#   logs to CSV, and visualizes the voltage in real time. 
-
-#----------------------------------------------------------------------#
-"""
-
 import time
 import pandas as pd
 import logging
 import matplotlib.pyplot as plt
 from python_Backend import lines, start_backend
-
-# -------------------------------------------------------------------------
-#                           Logging configuration
-# -------------------------------------------------------------------------
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,20 +13,12 @@ logging.basicConfig(
 
 log = logging.getLogger("DataLogger")
 
-# -------------------------------------------------------------------------
-#                       Configuration constants
-# -------------------------------------------------------------------------
-
 AUTOSAVE_INTERVAL = 10  # seconds
 MAX_ROWS = 10_000
 ENABLE_PLOT = True
 
 timestamp_str = time.strftime("%Y%m%d_%H%M%S")
 FILE_NAME = f"DataLog_{timestamp_str}.csv"
-
-# -------------------------------------------------------------------------
-#                           Data storage setup
-# -------------------------------------------------------------------------
 
 data_frame = pd.DataFrame(columns=["timestamp", "voltage", "raw_message"])
 buffer = []
@@ -52,10 +31,6 @@ if ENABLE_PLOT:
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Voltage (V)")
     ax.set_title(f"Live Voltage Trace ({timestamp_str})")
-
-# -------------------------------------------------------------------------
-#                           Main logging loop
-# -------------------------------------------------------------------------
 
 start_backend()
 

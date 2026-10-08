@@ -1,11 +1,3 @@
-"""The firmware's switch line state machine, compiled from main.cpp and run on the host.
-
-The real SwitchLine class and the real switch constants are cut out of main.cpp and built
-against stand-ins for the GPIO matrix, the LEDC peripheral and the hardware timer that
-record every operation. That shows the order things happen in on each transition, which
-is what decides whether the pin can glitch, without a board.
-"""
-
 import re
 from pathlib import Path
 

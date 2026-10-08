@@ -1,5 +1,3 @@
-"""The GRU controller: training, online updates, checkpoints and thread safety."""
-
 import threading
 import time
 

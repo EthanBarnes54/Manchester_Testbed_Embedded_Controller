@@ -1,9 +1,3 @@
-"""Property tests of the backend's handling of whatever arrives from the serial port.
-
-The reader thread hands every line to _accept_line, _handle_board_line and _match_reply.
-None of them may raise on any input, and nothing the CRC rejects may change what the
-backend believes about the board."""
-
 import math
 
 import pytest
@@ -22,9 +16,6 @@ TOKEN = st.one_of(
     st.floats(allow_nan=True, allow_infinity=True).map(str),
 )
 
-# Lines shaped like the board's, with arbitrary fields, plus arbitrary text. Readings get
-# their own generator so the voltage field is often something float() accepts but is not
-# a reading.
 BOARD_LIKE = st.builds(lambda prefix, tokens: " ".join([prefix, *tokens]), st.sampled_from(PREFIXES), st.lists(TOKEN, max_size=8))
 READING = st.builds(lambda volts, rest: " ".join(["MEASURED", volts, "V", *rest]),
                     st.one_of(st.floats(allow_nan=True, allow_infinity=True).map(str), st.sampled_from(["1e400", "-1e400", "NaN", "Infinity"]), TOKEN),

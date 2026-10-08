@@ -1,5 +1,3 @@
-"""The runtime assurance between the RNN's proposals and the board, on its own."""
-
 import math
 
 import pandas as pd
