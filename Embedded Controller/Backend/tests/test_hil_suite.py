@@ -38,6 +38,7 @@ def test_the_rig_suite_passes_against_a_board_that_behaves():
     ("energises_while_safe", "test_a_command_that_would_energise_an_output_is_refused_while_safe"),
     ("drops_readings", "test_readings_arrive_at_20_hz_numbered_and_without_gaps"),
     ("uncounted_overflow", "test_a_flood_of_garbage_is_discarded_and_the_board_keeps_answering"),
+    ("blocking_serial", "test_the_backends_status_poll_does_not_hold_up_the_loop"),
 ])
 def test_each_rig_test_fails_against_a_board_that_gets_its_one_thing_wrong(fault, catcher):
     result = run_hil(("-k", catcher), fault=fault)

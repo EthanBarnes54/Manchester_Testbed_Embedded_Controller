@@ -188,6 +188,23 @@ def test_readings_arrive_at_20_hz_numbered_and_without_gaps(safe_rig):
     assert 19 <= host_rate <= 21, f"{host_rate:.2f} readings per second at the host"
 
 
+@pytest.mark.req("LINK-06", "BIT-02")
+def test_the_backends_status_poll_does_not_hold_up_the_loop(safe_rig):
+    # The backend's keepalive sends these three together every 2 s. Their replies come to
+    # about 450 characters, far more than the UART's 128-byte FIFO.
+    poll = b"".join((frame(command) + "\n").encode("utf-8") for command in ("PING", "FAULTS", "HEALTH"))
+    before = int(safe_rig.health()["overruns"])
+
+    for _ in range(5):
+        since = safe_rig.mark()
+        safe_rig.send_raw(poll)
+        assert safe_rig.wait_for(lambda line: line.text.startswith("HEALTH "), since, 3.0)
+        time.sleep(0.5)
+
+    after = safe_rig.health()
+    assert int(after["overruns"]) == before, f"{int(after['overruns']) - before} loop overruns during five polls"
+
+
 @pytest.mark.req("BIT-02")
 def test_the_loop_stays_inside_its_budget_and_memory_holds(safe_rig):
     with safe_rig.keepalive():

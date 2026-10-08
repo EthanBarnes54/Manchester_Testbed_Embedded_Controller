@@ -190,6 +190,7 @@ MAIN_CPP_CASES = [
      "if (line_protocol::verify(command.c_str(), command.length(), &body_length) == line_protocol::Check::Invalid) {",
      "if (false) {"),
     ("readings are not numbered", contract_fails, '" V seq=" + sequence_ + " t_ms=" + millis()', '" V"'),
+    ("replies hold up the loop", contract_fails, "  Serial.setTxBufferSize(SERIAL_TX_BUFFER_BYTES);\n", ""),
     ("a reply bypasses the CRC", contract_fails, '    send_line("ACK DISARM");', '    Serial.println("ACK DISARM");'),
     ("an updated image is kept without its checks", contract_fails,
      "  if (supervisor.image_checks_passed()) {", "  if (true) {"),

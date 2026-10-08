@@ -31,7 +31,12 @@ FAULTS = {
     "energises_while_safe": "accepts output commands while disarmed",
     "drops_readings": "loses one reading in every 50",
     "uncounted_overflow": "discards an over-long line without counting it",
+    "blocking_serial": "has no serial transmit buffer, so a pass that writes a lot overruns",
 }
+
+# Without a transmit buffer a write waits for the UART's 128-byte FIFO, which drains 11.52
+# characters a millisecond at 115200 baud: more than this in one pass takes over 20 ms.
+UNBUFFERED_PASS_LIMIT = 128 + 20 * 11.52
 
 
 class SimulatedBoard:
@@ -96,12 +101,15 @@ class SimulatedBoard:
         self.mode, self.switch_us, self.targets = "SAFE", 0, [0.0] * 5
         self.active, self.history = set(), set()
         self.sequence, self.next_reading = 0, self.started + MEASUREMENT_INTERVAL_S
-        self.buffer, self.rx_overflows, self.bad_checksums = "", 0, 0
+        self.buffer, self.rx_overflows, self.bad_checksums, self.overruns = "", 0, 0, 0
+        self._pass_characters = 0
         self.last_command, self.command_seen, self.failsafe = 0.0, False, False
         self._incoming.clear()
 
     def _send(self, text):
-        self._outgoing.put(frame(text))
+        line = frame(text)
+        self._pass_characters += len(line) + 2
+        self._outgoing.put(line)
 
     def _millis(self):
         return int((time.monotonic() - self.started) * 1000)
@@ -114,6 +122,7 @@ class SimulatedBoard:
     def _pass(self):
         now = time.monotonic()
         incoming, self._incoming = bytes(self._incoming), bytearray()
+        self._pass_characters = 0
 
         for byte in incoming:
             character = chr(byte)
@@ -146,6 +155,9 @@ class SimulatedBoard:
             self.failsafe = False
             self.active.discard("HOST_TIMEOUT")
             self._send("FAILSAFE cleared, host link restored")
+
+        if self.fault == "blocking_serial" and self._pass_characters > UNBUFFERED_PASS_LIMIT:
+            self.overruns += 1
 
     def _make_safe(self):
         self.switch_us, self.targets = 0, [0.0] * 5
@@ -190,7 +202,7 @@ class SimulatedBoard:
         elif upper == "HEALTH":
             switching = armed and self.switch_us > 0
             self._send(f"HEALTH mode={self.mode} uptime_ms={self._millis()} loop_max_us=900 loop_peak_us=2400 "
-                       "loop_budget_us=20000 overruns=0 heap_free=200000 heap_min=190000 stack_free=5000 adc=ok "
+                       f"loop_budget_us=20000 overruns={self.overruns} heap_free=200000 heap_min=190000 stack_free=5000 adc=ok "
                        f"adc_conversions={self.sequence} adc_timeouts=0 rx_overflows={self.rx_overflows} "
                        f"bad_checksums={self.bad_checksums} gate=ok gate_edges={1000 if switching else 0} readback=off")
         elif command.startswith("TARGETS"):

@@ -251,6 +251,39 @@ def test_the_heartbeat_is_driven_every_pass():
     assert statements[:2] == ["const unsigned long pass_started_us = micros()", "supervisor.heartbeat()"]
 
 
+def worst_case_reply_burst():
+    """The most the board can owe the host at once, in characters: a keepalive's replies
+    (OK, FAULTS, HEALTH) and VERSION, with every fault listed and counted and every number
+    at its widest, plus two readings. Each line carries "*XXXX" and "\\r\\n"."""
+
+    header = (FIRMWARE_DIR / "include" / "safety_state.h").read_text(encoding="utf-8")
+    names = re.findall(r'return "([A-Z_]+)";', header[header.index("name_of(Fault"):header.index("name_of(Mode")])
+    names.remove("UNKNOWN")
+    every = ",".join(names)
+    widest = "4294967295"
+
+    faults = (f"FAULTS mode=FAULT active={every} latched={every} history={every} counts="
+              + ",".join(f"{name}:65535" for name in names)
+              + f" boots={widest} unexpected_resets={widest} last_reset=UNKNOWN")
+    health_keys = re.findall(r'line \+= String\(" (\w+)="\)', cpp_block("  void report_health()"))
+    health = "HEALTH mode=FAULT " + " ".join(f"{key}={widest}" for key in health_keys)
+    version = "VERSION firmware=" + "x" * 40 + " protocol=2 build=esp32_deploy gate_loopback=1 setpoint_readback=1"
+    reading = f"MEASURED -4.09600 V seq={widest} t_ms={widest}"
+
+    return sum(len(line) + len("*XXXX\r\n") for line in ("OK", faults, health, version, reading, reading))
+
+
+@pytest.mark.req("LINK-06")
+def test_the_largest_burst_of_replies_fits_the_serial_transmit_buffer():
+    burst = worst_case_reply_burst()
+    assert burst > 128, "the burst fits the UART's FIFO alone; this check has stopped measuring anything"
+    assert int(cpp_constant("SERIAL_TX_BUFFER_BYTES")) >= burst
+
+    # The core only takes a buffer size before the UART starts.
+    setup = cpp_block("\nvoid setup()")
+    assert setup.index("Serial.setTxBufferSize(SERIAL_TX_BUFFER_BYTES);") < setup.index("Serial.begin(")
+
+
 @pytest.mark.req("SAF-05")
 def test_an_unexpected_reset_comes_up_in_fault():
     begin = cpp_block("  void begin() {\n    pinMode(HEARTBEAT_PIN")

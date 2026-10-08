@@ -73,6 +73,7 @@ only the bench proves the hardware does what the logic asks.
 | LINK-03 | The host shall account for every command it sends as answered, refused or unanswered. | Test |
 | LINK-04 | The host shall poll the board well inside the failsafe timeout, keeping its view of the board's faults and health current. | Test |
 | LINK-05 | An over-long or malformed input line shall be discarded and counted, and the board shall keep serving commands. | Bench ATP-10 |
+| LINK-06 | Sending replies shall never hold up the main loop: the largest burst of replies the protocol can produce shall fit the serial transmit buffer. | Test; Bench ATP-07 |
 
 ## Auto control (AUTO)
 

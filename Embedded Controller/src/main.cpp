@@ -127,6 +127,13 @@ constexpr unsigned int MEASURED_DECIMAL_PLACES = 5;
 constexpr unsigned long HEARTBEAT_INTERVAL_MS = 2000;
 constexpr int COMMAND_BUFFER_LIMIT = 256;
 
+// Replies are copied into this and sent from the UART driver's interrupt, so the loop
+// never waits on the link. The core's default is no buffer, only the 128-byte FIFO, and
+// the backend's keepalive replies (FAULTS and HEALTH together, about 450 characters)
+// would then hold a loop pass for over 20 ms. This holds the largest burst the protocol
+// can produce, about 1.5 KB (docs/timing-budget.md).
+constexpr size_t SERIAL_TX_BUFFER_BYTES = 2048;
+
 // Host silence tolerated before the outputs are dropped. The backend keepalive runs
 // well inside this, so only a genuinely dead host trips it.
 constexpr unsigned long COMMAND_TIMEOUT_MS = 5000;
@@ -1871,6 +1878,8 @@ void setup() {
   SwitchLine::hold_low_at_boot();
   led_indicator.begin();
 
+  // Before begin(): the core refuses to resize a running UART.
+  Serial.setTxBufferSize(SERIAL_TX_BUFFER_BYTES);
   Serial.begin(115200);
   delay(1500);
 
